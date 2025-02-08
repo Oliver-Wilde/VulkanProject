@@ -1,0 +1,93 @@
+# ----------------------------------------------------------------------------
+# OS / System Files
+# ----------------------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+*.DS_Store
+
+# ----------------------------------------------------------------------------
+# Visual Studio / C++ Build Files
+# ----------------------------------------------------------------------------
+.vs/
+.vscode/
+*.VC.db
+*.VC.VCOPackageTemp
+*.VC.opendb
+*.suo
+*.sdf
+*.cache
+*.pdb
+*.pdb1
+*.obj
+*.log
+*.log*
+*.tlog
+*.lastbuildstate
+*.pdb
+*.user
+*.vcxproj.user
+*.vcxproj.filters
+*.vcxproj.filters.user
+*.sln.iml
+*.ilk
+*.ipdb
+*.iobj
+*.idb
+
+# ----------------------------------------------------------------------------
+# Compiled Binaries & Artifacts
+# ----------------------------------------------------------------------------
+*.exe
+*.lib
+*.dll
+*.so
+*.dylib
+*.a
+
+# ----------------------------------------------------------------------------
+# Build Directories
+# ----------------------------------------------------------------------------
+x64/
+VulkanProject/x64/
+build/
+bin/
+obj/
+out/
+VulkanProject/VulkanProject/x64/
+
+
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+*.cmake.user
+Makefile
+cmake_install.cmake
+Testing/
+
+# ----------------------------------------------------------------------------
+# Ignore Everything in External Libraries EXCEPT the parts you want
+# ----------------------------------------------------------------------------
+External Libraries/*
+
+!External Libraries/imgui/
+
+
+External Libraries/glm/cmake/
+External Libraries/glm/**/*.md
+External Libraries/glfw/
+External Libraries/Vulkan/
+External Libraries/Lib/
+
+
+*.tmp
+*.temp
+*.old
+*.bak
+*.swp
+*.out
+*.orig
+*.gch
+
