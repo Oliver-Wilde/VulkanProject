@@ -1,8 +1,13 @@
-
+// -----------------------------------------------------------------------------
+// Includes
+// -----------------------------------------------------------------------------
 #include "ChunkManager.h"
 #include <stdexcept>
 #include <Engine/Utils/Logger.h>
 
+// -----------------------------------------------------------------------------
+// Constructor / Destructor
+// -----------------------------------------------------------------------------
 ChunkManager::ChunkManager()
 {
 }
@@ -12,6 +17,9 @@ ChunkManager::~ChunkManager()
     // unique_ptr automatically cleans up all Chunks in m_chunks
 }
 
+// -----------------------------------------------------------------------------
+// Public Methods
+// -----------------------------------------------------------------------------
 bool ChunkManager::hasChunk(int cx, int cy, int cz) const
 {
     ChunkCoord coord{ cx, cy, cz };
@@ -41,10 +49,10 @@ Chunk* ChunkManager::createChunk(int cx, int cy, int cz)
     Chunk* chunkPtr = newChunk.get();
     m_chunks.emplace(coord, std::move(newChunk));
 
-    Logger::Info("Creating chunk at (" + std::to_string(cx) + ", "
+    Logger::Info("Creating chunk at ("
+        + std::to_string(cx) + ", "
         + std::to_string(cy) + ", "
         + std::to_string(cz) + ")");
-
 
     return chunkPtr;
 }

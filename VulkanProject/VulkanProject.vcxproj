@@ -492,6 +492,7 @@
     <ClInclude Include="src\Engine\Voxels\VoxelWorld.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitignore" />
     <None Include="External Libraries\glm\detail\func_common.inl" />
     <None Include="External Libraries\glm\detail\func_common_simd.inl" />
     <None Include="External Libraries\glm\detail\func_exponential.inl" />

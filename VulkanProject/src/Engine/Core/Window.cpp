@@ -1,15 +1,23 @@
+// -----------------------------------------------------------------------------
+// Includes
+// -----------------------------------------------------------------------------
 #include "Window.h"
 #include <stdexcept>
 
+// -----------------------------------------------------------------------------
+// Constructor / Destructor
+// -----------------------------------------------------------------------------
 Window::Window(int width, int height, const std::string& title)
 {
     if (!glfwInit()) {
         throw std::runtime_error("Failed to initialize GLFW.");
     }
 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // No OpenGL context
+    // We don't want an OpenGL context, so disable it.
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
+    // Create the GLFW window.
     m_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!m_window) {
         throw std::runtime_error("Failed to create GLFW window.");
@@ -22,6 +30,9 @@ Window::~Window()
     glfwTerminate();
 }
 
+// -----------------------------------------------------------------------------
+// Public Methods
+// -----------------------------------------------------------------------------
 bool Window::shouldClose() const
 {
     return glfwWindowShouldClose(m_window);

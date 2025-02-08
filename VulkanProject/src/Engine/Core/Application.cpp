@@ -1,3 +1,6 @@
+// -----------------------------------------------------------------------------
+// Includes
+// -----------------------------------------------------------------------------
 #include "Application.h"
 #include "Window.h"
 #include "Time.h"
@@ -8,8 +11,12 @@
 #include "Engine/Utils/Logger.h"
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
+
 #include <stdexcept>
 
+// -----------------------------------------------------------------------------
+// Constructor / Destructor
+// -----------------------------------------------------------------------------
 Application::Application()
 {
     // optionally set pointers to nullptr here
@@ -20,6 +27,9 @@ Application::~Application()
     cleanup();
 }
 
+// -----------------------------------------------------------------------------
+// Public Methods
+// -----------------------------------------------------------------------------
 void Application::init()
 {
     // 1) Register voxel types (IDs for Stone, Grass, etc.)
@@ -62,12 +72,13 @@ void Application::handleInput(Camera& cam, float dt)
 
     float speed = cam.moveSpeed * dt;
 
+    // Basic movement
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) cam.position += forward * speed;
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) cam.position -= forward * speed;
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cam.position += right * speed;
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cam.position -= right * speed;
 
-    // up/down
+    // Up/down movement
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)        cam.position.y += speed;
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)   cam.position.y -= speed;
 
@@ -75,8 +86,8 @@ void Application::handleInput(Camera& cam, float dt)
     static double lastX = 400, lastY = 300;
     double mouseX, mouseY;
     glfwGetCursorPos(window, &mouseX, &mouseY);
-    float dx = (float)(mouseX - lastX);
-    float dy = (float)(mouseY - lastY);
+    float dx = static_cast<float>(mouseX - lastX);
+    float dy = static_cast<float>(mouseY - lastY);
     lastX = mouseX;
     lastY = mouseY;
 
@@ -106,7 +117,9 @@ void Application::runLoop()
         }
 
         // 3) Press F => toggle wireframe
-        bool wireframeIsPressed = (glfwGetKey(m_window->getGLFWwindow(), GLFW_KEY_F) == GLFW_PRESS);
+        bool wireframeIsPressed =
+            (glfwGetKey(m_window->getGLFWwindow(), GLFW_KEY_F) == GLFW_PRESS);
+
         if (wireframeIsPressed && !wireframeWasPressed) {
             Logger::Info("Toggling wireframe mode...");
             m_renderer->toggleWireframe();
@@ -116,8 +129,6 @@ void Application::runLoop()
         // 4) Render
         m_renderer->setCamera(camera);
         m_renderer->renderFrame();
-
-        
     }
 }
 
@@ -129,7 +140,7 @@ void Application::cleanup()
         m_voxelWorld = nullptr;
     }
 
-    // 2) Then renderer
+    // 2) Destroy the Renderer
     if (m_renderer) {
         delete m_renderer;
         m_renderer = nullptr;
@@ -146,9 +157,11 @@ void Application::cleanup()
         delete m_window;
         m_window = nullptr;
     }
+
     if (m_time) {
         delete m_time;
         m_time = nullptr;
     }
+
     m_isRunning = false;
 }
