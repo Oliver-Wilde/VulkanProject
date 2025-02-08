@@ -151,6 +151,7 @@
     <ClCompile Include="External Libraries\imgui\imgui_draw.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_tables.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="src\Engine\Graphics\Frustum.cpp" />
     <ClCompile Include="src\Engine\Core\Application.cpp" />
     <ClCompile Include="src\Engine\Core\Time.cpp" />
     <ClCompile Include="src\Engine\Core\Window.cpp" />
@@ -469,6 +470,7 @@
     <ClInclude Include="External Libraries\imgui\imstb_rectpack.h" />
     <ClInclude Include="External Libraries\imgui\imstb_textedit.h" />
     <ClInclude Include="External Libraries\imgui\imstb_truetype.h" />
+    <ClInclude Include="src\Engine\Graphics\Frustum.h" />
     <ClInclude Include="src\Engine\Core\Application.h" />
     <ClInclude Include="src\Engine\Core\Time.h" />
     <ClInclude Include="src\Engine\Core\Window.h" />

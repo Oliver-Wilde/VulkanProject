@@ -1,5 +1,5 @@
 #include "Renderer.h"
-#include "Engine/Core/Window.h"          // So we can use m_window->getGLFWwindow()
+#include "Engine/Core/Window.h"         // So we can use m_window->getGLFWwindow()
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Graphics/SwapChain.h"
 #include "Engine/Resources/ResourceManager.h"
@@ -8,18 +8,39 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Scene/Camera.h"
-
-#include <stdexcept>
-#include <vector>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include "Engine/Core/Time.h" 
-
+#include "Engine/Core/Time.h"
 
 // Include ImGui + backends
 #include "../External Libraries/imgui/imgui.h"
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
 #include "../External Libraries/imgui/backends/imgui_impl_vulkan.h"
+
+// Include your Frustum utility
+#include "Frustum.h"
+
+#include <stdexcept>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <Engine/Utils/Logger.h>
+
+// -----------------------------------------------------------------------------
+// A helper to build the camera frustum from your current camera state
+// -----------------------------------------------------------------------------
+static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
+{
+    float aspect = float(extent.width) / float(extent.height);
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+    // Flip Y for Vulkan
+    proj[1][1] *= -1.0f;
+
+    glm::mat4 view = camera.getViewMatrix();
+    glm::mat4 vp = proj * view;
+
+    Frustum frustum;
+    frustum.extractPlanes(vp);
+    return frustum;
+}
 
 // -----------------------------------------------------------------------------
 // Constructor
@@ -65,7 +86,8 @@ Renderer::Renderer(VulkanContext* context, Window* window)
         poolInfo.poolSizeCount = (uint32_t)(sizeof(poolSizes) / sizeof(poolSizes[0]));
         poolInfo.pPoolSizes = poolSizes;
 
-        if (vkCreateDescriptorPool(m_context->getDevice(), &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS)
+        if (vkCreateDescriptorPool(m_context->getDevice(), &poolInfo, nullptr,
+            &m_imguiDescriptorPool) != VK_SUCCESS)
         {
             throw std::runtime_error("Failed to create ImGui descriptor pool!");
         }
@@ -86,14 +108,45 @@ Renderer::Renderer(VulkanContext* context, Window* window)
     // 6) Create MVP Uniform Buffer
     createMVPUniformBuffer();
 
-    // 7) Semaphores
-    VkSemaphoreCreateInfo semInfo{};
-    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-    if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_imageAvailableSemaphore) != VK_SUCCESS ||
-        vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_renderFinishedSemaphore) != VK_SUCCESS)
+    // -----------------------------------------
+    // Create 2 frames in flight
+    // -----------------------------------------
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        throw std::runtime_error("Failed to create semaphores!");
+        // Command buffer
+        VkCommandBufferAllocateInfo cmdAlloc{};
+        cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmdAlloc.commandPool = m_context->getCommandPool();
+        cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdAlloc.commandBufferCount = 1;
+
+        if (vkAllocateCommandBuffers(m_context->getDevice(), &cmdAlloc,
+            &m_frames[i].commandBuffer) != VK_SUCCESS)
+        {
+            throw std::runtime_error("Failed to allocate command buffer for frame " + std::to_string(i));
+        }
+
+        // Semaphores
+        VkSemaphoreCreateInfo semInfo{};
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
+            &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
+                &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
+        {
+            throw std::runtime_error("Failed to create semaphores for frame " + std::to_string(i));
+        }
+
+        // Fence (start signaled so we can use it immediately)
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr,
+            &m_frames[i].inFlightFence) != VK_SUCCESS)
+        {
+            throw std::runtime_error("Failed to create fence for frame " + std::to_string(i));
+        }
     }
 
     // -----------------------------------------
@@ -103,29 +156,28 @@ Renderer::Renderer(VulkanContext* context, Window* window)
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
-        // io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // optional
 
-        // 1) Initialize ImGui for GLFW
+        // Initialize ImGui for GLFW
         GLFWwindow* glfwWindow = m_window->getGLFWwindow();
         ImGui_ImplGlfw_InitForVulkan(glfwWindow, true);
 
-        // 2) Setup ImGui Vulkan init info
-        ImGui_ImplVulkan_InitInfo init_info = {};
+        // Setup ImGui Vulkan init info
+        ImGui_ImplVulkan_InitInfo init_info{};
         init_info.Instance = m_context->getInstance();
         init_info.PhysicalDevice = m_context->getPhysicalDevice();
         init_info.Device = m_context->getDevice();
         init_info.QueueFamily = m_context->getGraphicsQueueFamilyIndex();
         init_info.Queue = m_context->getGraphicsQueue();
         init_info.DescriptorPool = m_imguiDescriptorPool;
-        init_info.Subpass = 0; // if using the same subpass
-        init_info.MinImageCount = 2; // match your swapchain
+        init_info.Subpass = 0;
+        init_info.MinImageCount = 2;
         init_info.ImageCount = m_swapChain->getImageCount();
         init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         init_info.CheckVkResultFn = nullptr;
 
         ImGui_ImplVulkan_Init(&init_info, renderPass);
 
-        // 3) Upload fonts with one-time command buffer
+        // Upload fonts
         VkCommandPool cmdPool = m_context->getCommandPool();
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -155,10 +207,7 @@ Renderer::Renderer(VulkanContext* context, Window* window)
         vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo2, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_context->getGraphicsQueue());
 
-        // Free temp command buffer
         vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
-
-        // Cleanup font staging
         ImGui_ImplVulkan_DestroyFontUploadObjects();
     }
 }
@@ -170,30 +219,52 @@ Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // Destroy semaphores
-    if (m_imageAvailableSemaphore) {
-        vkDestroySemaphore(m_context->getDevice(), m_imageAvailableSemaphore, nullptr);
-        m_imageAvailableSemaphore = VK_NULL_HANDLE;
-    }
-    if (m_renderFinishedSemaphore) {
-        vkDestroySemaphore(m_context->getDevice(), m_renderFinishedSemaphore, nullptr);
-        m_renderFinishedSemaphore = VK_NULL_HANDLE;
+    // Clean per-frame resources
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        // Free command buffer
+        if (m_frames[i].commandBuffer) {
+            vkFreeCommandBuffers(m_context->getDevice(),
+                m_context->getCommandPool(),
+                1,
+                &m_frames[i].commandBuffer);
+            m_frames[i].commandBuffer = VK_NULL_HANDLE;
+        }
+        // Destroy semaphores
+        if (m_frames[i].imageAvailableSemaphore) {
+            vkDestroySemaphore(m_context->getDevice(),
+                m_frames[i].imageAvailableSemaphore,
+                nullptr);
+            m_frames[i].imageAvailableSemaphore = VK_NULL_HANDLE;
+        }
+        if (m_frames[i].renderFinishedSemaphore) {
+            vkDestroySemaphore(m_context->getDevice(),
+                m_frames[i].renderFinishedSemaphore,
+                nullptr);
+            m_frames[i].renderFinishedSemaphore = VK_NULL_HANDLE;
+        }
+        // Destroy fence
+        if (m_frames[i].inFlightFence) {
+            vkDestroyFence(m_context->getDevice(),
+                m_frames[i].inFlightFence,
+                nullptr);
+            m_frames[i].inFlightFence = VK_NULL_HANDLE;
+        }
     }
 
     // Cleanup MVP
-    if (m_mvpBuffer != VK_NULL_HANDLE) {
+    if (m_mvpBuffer) {
         vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
         m_mvpBuffer = VK_NULL_HANDLE;
     }
-    if (m_mvpMemory != VK_NULL_HANDLE) {
+    if (m_mvpMemory) {
         vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
         m_mvpMemory = VK_NULL_HANDLE;
     }
-    if (m_mvpDescriptorPool != VK_NULL_HANDLE) {
+    if (m_mvpDescriptorPool) {
         vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
         m_mvpDescriptorPool = VK_NULL_HANDLE;
     }
-    if (m_mvpLayout != VK_NULL_HANDLE) {
+    if (m_mvpLayout) {
         vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
         m_mvpLayout = VK_NULL_HANDLE;
     }
@@ -209,12 +280,12 @@ Renderer::~Renderer()
         m_imguiDescriptorPool = VK_NULL_HANDLE;
     }
 
+    // Clean up voxel world, managers, swapchain
     delete m_voxelWorld;
     delete m_rpManager;
     delete m_pipelineMgr;
     delete m_resourceMgr;
 
-    // Destroy swapchain
     if (m_swapChain) {
         m_swapChain->cleanup();
         delete m_swapChain;
@@ -229,13 +300,11 @@ void Renderer::createMVPUniformBuffer()
 {
     VkDeviceSize bufferSize = sizeof(MVPBlock);
 
-    createBuffer(
-        bufferSize,
+    createBuffer(bufferSize,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_mvpBuffer,
-        m_mvpMemory
-    );
+        m_mvpMemory);
 
     // Create descriptor pool for exactly 1 UBO
     VkDescriptorPoolSize poolSize{};
@@ -296,16 +365,12 @@ void Renderer::updateMVP()
 {
     glm::mat4 model = glm::mat4(1.f);
     glm::mat4 view = m_camera.getViewMatrix();
-
-    glm::mat4 proj = glm::perspective(
-        glm::radians(45.f),
-        (float)m_swapChain->getExtent().width / (float)m_swapChain->getExtent().height,
+    glm::mat4 proj = glm::perspective(glm::radians(45.f),
+        float(m_swapChain->getExtent().width) /
+        float(m_swapChain->getExtent().height),
         0.1f,
-        100.f
-    );
-
-    // Flip Y for Vulkan
-    proj[1][1] *= -1.f;
+        100.f);
+    proj[1][1] *= -1.f; // Flip Y for Vulkan
 
     MVPBlock block{};
     block.mvp = proj * view * model;
@@ -329,58 +394,58 @@ void Renderer::toggleWireframe()
 // -----------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
-    // --- 0) Gather timing
-    float dt = 0.0f;
-    if (m_time) {
-        dt = m_time->getDeltaTime();
-    }
-    float fps = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
+    // 1) Wait for this frame’s fence => ensure GPU is done with last usage
+    vkWaitForFences(m_context->getDevice(),
+        1,
+        &m_frames[m_currentFrame].inFlightFence,
+        VK_TRUE,
+        UINT64_MAX);
 
-    // We'll track how many draw calls this frame
-    uint32_t drawCallCount = 0;
-    // We'll also track total vertices here:
-    uint32_t totalVertices = 0;
+    // 2) Reset fence so we can use it again
+    vkResetFences(m_context->getDevice(),
+        1,
+        &m_frames[m_currentFrame].inFlightFence);
 
-    // 1) Update MVP
+    // 3) Update MVP
     updateMVP();
 
-    // 2) Acquire swapchain image
+    // Optionally build the frustum if culling is on
+    Frustum frustum;
+    if (m_enableFrustumCulling) {
+        frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
+    }
+
+    // 4) Acquire swapchain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
         m_swapChain->getSwapChain(),
         UINT64_MAX,
-        m_imageAvailableSemaphore,
+        m_frames[m_currentFrame].imageAvailableSemaphore, // per-frame semaphore
         VK_NULL_HANDLE,
         &imageIndex
     );
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Handle window resize if needed
+        // handle window resize if needed
         return;
     }
     else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         throw std::runtime_error("Failed to acquire swapchain image!");
     }
 
-    // 3) Allocate a command buffer
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = m_context->getCommandPool();
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
+    // 5) Reset this frame’s command buffer (we’ll re-record from scratch)
+    VkCommandBuffer cmdBuf = m_frames[m_currentFrame].commandBuffer;
+    vkResetCommandBuffer(cmdBuf, /*VkCommandBufferResetFlagBits*/ 0);
 
-    VkCommandBuffer cmdBuf;
-    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate command buffer!");
-    }
-
-    // 4) Begin recording
+    // 6) Begin command buffer
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to begin recording command buffer!");
+    }
 
-    // 5) Render pass setup
+    // 7) Render pass
     VkClearValue clearVals[2];
     clearVals[0].color = { { 0.1f, 0.2f, 0.3f, 1.f } };
     clearVals[1].depthStencil = { 1.f, 0 };
@@ -396,43 +461,57 @@ void Renderer::renderFrame()
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 6) Choose pipeline + bind
+    // 8) Pipeline + descriptor sets
     std::string pipelineName = (m_wireframeOn) ? "voxel_wireframe" : "voxel_fill";
     PipelineInfo pipelineInfo = m_pipelineMgr->getPipeline(pipelineName);
 
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
-    vkCmdBindDescriptorSets(
-        cmdBuf,
+    vkCmdBindDescriptorSets(cmdBuf,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         pipelineInfo.pipelineLayout,
-        0, 1,
-        &m_mvpDescriptorSet,
-        0, nullptr
-    );
+        0, 1, &m_mvpDescriptorSet,
+        0, nullptr);
 
-    // 7) Draw chunk meshes (accumulate total vertices & draw calls)
+    // 9) Draw chunks (frustum culling optional)
+    uint32_t totalVertices = 0;
+    uint32_t drawCallCount = 0;
+    float dt = (m_time) ? m_time->getDeltaTime() : 0.0f;
+    float fps = (dt > 0.f) ? 1.0f / dt : 0.0f;
+
     const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
     for (auto& kv : allChunks) {
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
-
-        // Check if chunk has valid GPU buffers
         if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
             chunk->getIndexBuffer() == VK_NULL_HANDLE)
         {
             continue;
         }
 
-        // Accumulate this chunk's vertex count
+        if (m_enableFrustumCulling) {
+            glm::vec3 minB, maxB;
+            chunk->getBoundingBox(minB, maxB);
+            // Debug logging:
+            Logger::Info("Chunk bounding box min:("
+                + std::to_string(minB.x) + ","
+                + std::to_string(minB.y) + ","
+                + std::to_string(minB.z) + ") max:("
+                + std::to_string(maxB.x) + ","
+                + std::to_string(maxB.y) + ","
+                + std::to_string(maxB.z) + ")");
+
+            if (!frustum.intersectsAABB(minB, maxB)) {
+                continue;
+            }
+        }
+
         totalVertices += chunk->getVertexCount();
 
-        // Bind vertex + index
         VkDeviceSize offsets[] = { 0 };
         VkBuffer vb = chunk->getVertexBuffer();
         vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
         vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-        // Draw if indices
         uint32_t idxCount = chunk->getIndexCount();
         if (idxCount > 0) {
             vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
@@ -440,14 +519,14 @@ void Renderer::renderFrame()
         }
     }
 
-    // 8) ImGui overlay
+    // 10) ImGui
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    // Performance metrics UI
     ImGui::Begin("Debug");
     ImGui::Text("Wireframe is %s", m_wireframeOn ? "ON" : "OFF");
+    ImGui::Checkbox("Frustum Culling", &m_enableFrustumCulling);
     ImGui::Separator();
     ImGui::Text("Delta Time:  %.3f s", dt);
     ImGui::Text("FPS:         %.2f", fps);
@@ -459,38 +538,43 @@ void Renderer::renderFrame()
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuf);
 
-    // end render pass
+    // End render pass
     vkCmdEndRenderPass(cmdBuf);
 
-    // end command buffer
+    // End command buffer
     if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS) {
         throw std::runtime_error("Failed to record command buffer!");
     }
 
-    // 9) Submit
+    // 11) Submit
+    VkSemaphore waitSemaphores[] = { m_frames[m_currentFrame].imageAvailableSemaphore };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    VkSubmitInfo submitInfo2{};
-    submitInfo2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo2.waitSemaphoreCount = 1;
-    submitInfo2.pWaitSemaphores = &m_imageAvailableSemaphore;
-    submitInfo2.pWaitDstStageMask = waitStages;
-    submitInfo2.commandBufferCount = 1;
-    submitInfo2.pCommandBuffers = &cmdBuf;
-    submitInfo2.signalSemaphoreCount = 1;
-    submitInfo2.pSignalSemaphores = &m_renderFinishedSemaphore;
 
-    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo2, VK_NULL_HANDLE) != VK_SUCCESS) {
+    VkSemaphore signalSemaphores[] = { m_frames[m_currentFrame].renderFinishedSemaphore };
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    // Use the fence for this frame
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo, m_frames[m_currentFrame].inFlightFence) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit draw command buffer!");
     }
 
-    // 10) Present
+    // 12) Present
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &m_renderFinishedSemaphore;
+    presentInfo.pWaitSemaphores = signalSemaphores; // wait on the same "renderFinishedSemaphore"
+    VkSwapchainKHR swapchains[] = { m_swapChain->getSwapChain() };
     presentInfo.swapchainCount = 1;
-    VkSwapchainKHR swcs[] = { m_swapChain->getSwapChain() };
-    presentInfo.pSwapchains = swcs;
+    presentInfo.pSwapchains = swapchains;
     presentInfo.pImageIndices = &imageIndex;
 
     result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
@@ -501,8 +585,8 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to present swapchain image!");
     }
 
-    // free the command buffer
-    vkFreeCommandBuffers(m_context->getDevice(), m_context->getCommandPool(), 1, &cmdBuf);
+    // 13) Advance frame index
+    m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 // -----------------------------------------------------------------------------
@@ -547,8 +631,7 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &memProps);
 
     for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
-        if ((filter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
-        {
+        if ((filter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props) {
             return i;
         }
     }
