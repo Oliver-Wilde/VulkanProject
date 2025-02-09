@@ -9,6 +9,7 @@
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Scene/Camera.h"
 #include "Engine/Core/Time.h"
+#include "../Utils/CpuProfiler.h"
 
 // Include ImGui + backends
 #include "../External Libraries/imgui/imgui.h"
@@ -24,6 +25,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <Engine/Utils/Logger.h>
 
+static CpuProfiler g_cpuProfiler;
 // -----------------------------------------------------------------------------
 // A helper to build the camera frustum from your current camera state
 // -----------------------------------------------------------------------------
@@ -491,14 +493,7 @@ void Renderer::renderFrame()
         if (m_enableFrustumCulling) {
             glm::vec3 minB, maxB;
             chunk->getBoundingBox(minB, maxB);
-            // Debug logging:
-            Logger::Info("Chunk bounding box min:("
-                + std::to_string(minB.x) + ","
-                + std::to_string(minB.y) + ","
-                + std::to_string(minB.z) + ") max:("
-                + std::to_string(maxB.x) + ","
-                + std::to_string(maxB.y) + ","
-                + std::to_string(maxB.z) + ")");
+            
 
             if (!frustum.intersectsAABB(minB, maxB)) {
                 continue;
@@ -533,7 +528,13 @@ void Renderer::renderFrame()
     ImGui::Text("Vertex Count:%u", totalVertices);
     ImGui::Text("Draw Calls:  %u", drawCallCount);
     ImGui::Text("Chunk Count: %zu", allChunks.size());
+
+    // New: Display CPU usage:
+    float cpuUsage = g_cpuProfiler.GetCpuUsage();
+    ImGui::Text("CPU Usage:   %.1f%%", cpuUsage);
     ImGui::End();
+
+    
 
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuf);
@@ -621,6 +622,7 @@ void Renderer::createBuffer(
     if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory!");
     }
+
 
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }
