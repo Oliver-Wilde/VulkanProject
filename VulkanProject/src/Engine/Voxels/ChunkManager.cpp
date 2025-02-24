@@ -71,3 +71,16 @@ void ChunkManager::removeChunk(int cx, int cy, int cz)
             + std::to_string(cz) + ")");
     }
 }
+
+std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const {
+    size_t totalActive = 0;
+    size_t totalEmpty = 0;
+
+    for (const auto& kv : m_chunks) {
+        std::pair<size_t, size_t> usage = kv.second->getVoxelUsage();
+        totalActive += usage.first;
+        totalEmpty += usage.second;
+    }
+    
+    return { totalActive, totalEmpty };
+}

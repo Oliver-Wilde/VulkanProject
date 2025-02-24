@@ -31,25 +31,25 @@ void registerAllVoxels()
         VoxelType("Air", false, false, { 0.0f, 0.0f, 0.0f })
     );
 
-    // ID=1 => "Stone" (solid, gray)
+    // ID=1 => Stone (solid, gray)
     int stoneID = registry.registerVoxel(
         VoxelType("Stone", true, false, { 0.5f, 0.5f, 0.5f })
     );
 
-    // ID=2 => "Grass" (solid, green)
+    // ID=2 => Grass (solid, green)
+    int grassID = registry.registerVoxel(
+        VoxelType("Grass", true, false, { 0.1f, 1.0f, 0.1f })
+    );
+
+    // ID=3 => Dirt (solid, brown)
     int dirtID = registry.registerVoxel(
         VoxelType("Dirt", true, false, { 0.6f, 0.4f, 0.2f })
     );
 
-    // ID=3 => "Water" (not solid, is liquid, blue)
-    int grassID = registry.registerVoxel(
-        VoxelType("Grass", false, true, { 0.1f, 1.0f, 0.1f })
-    );
-
+    // ID=4 => Water (not solid, blue)
     int waterID = registry.registerVoxel(
         VoxelType("Water", false, true, { 0.0f, 0.3f, 0.8f })
     );
     // ...Add more as needed...
     // e.g. "Sand", "Wood", "Leaves", etc.
 }
-

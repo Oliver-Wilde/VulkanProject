@@ -13,6 +13,8 @@
 class Chunk
 {
 public:
+
+
     // -----------------------------------------------------------------------------
     // Constants
     // -----------------------------------------------------------------------------
@@ -77,6 +79,15 @@ public:
      * @param outMax [out] The maximum corner (x_max, y_max, z_max).
      */
     void getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const;
+    // -------------------------------------------------------------------------
+   // Memory Usage Metrics
+   // -------------------------------------------------------------------------
+   /**
+    * Computes the number of active voxels and empty voxels in this chunk.
+    * @return A pair where the first value is the count of active (non-air) voxels,
+    *         and the second value is the count of empty (air) voxels.
+    */
+    std::pair<size_t, size_t> getVoxelUsage() const;
 
 private:
     // -----------------------------------------------------------------------------

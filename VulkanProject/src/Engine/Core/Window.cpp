@@ -13,11 +13,11 @@ Window::Window(int width, int height, const std::string& title)
         throw std::runtime_error("Failed to initialize GLFW.");
     }
 
-    // We don't want an OpenGL context, so disable it.
+    // we use vulkan
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    // Create the GLFW window.
+    // create window
     m_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!m_window) {
         throw std::runtime_error("Failed to create GLFW window.");

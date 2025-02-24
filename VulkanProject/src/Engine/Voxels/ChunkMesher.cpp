@@ -3,6 +3,7 @@
 #include "VoxelTypeRegistry.h"
 #include "VoxelType.h"
 #include <stdexcept>
+#include <iostream>
 
 //----------------------------------------------
 // isSolidID: checks if voxelID => a solid VoxelType
@@ -207,6 +208,7 @@ void ChunkMesher::generateMeshNaive(
             }
         }
     }
+
 }
 
 //----------------------------------------------
@@ -1024,7 +1026,10 @@ void ChunkMesher::generateMeshGreedy(
             }
         }
     }
-
+    //insert a debug to show the verts and chunks ind for chunk
+    std::cout << "[Mesh Debug] Chunk(" << cx << "," << cy << "," << cz
+        << ") => " << outVertices.size() << " verts, "
+        << outIndices.size() << " inds\n";
     // Done! outVertices/outIndices => fully greedy-merged geometry
 }
 

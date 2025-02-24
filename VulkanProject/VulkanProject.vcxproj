@@ -172,6 +172,7 @@
     <ClCompile Include="src\Engine\Voxels\VoxelTypeRegistry.cpp" />
     <ClCompile Include="src\Engine\Voxels\VoxelWorld.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\Engine\Utils\ThreadPool.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
@@ -494,6 +495,7 @@
     <ClInclude Include="src\Engine\Voxels\VoxelType.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelTypeRegistry.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelWorld.h" />
+    <ClInclude Include="src\Engine\Utils\ThreadPool.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />

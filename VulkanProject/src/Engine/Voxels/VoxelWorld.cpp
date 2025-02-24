@@ -4,6 +4,38 @@
 #include "Engine/Utils/Logger.h"
 #include <cmath>
 #include <stdexcept>
+#include <chrono>
+
+// ADD: Include your ThreadPool
+#include "Engine/Utils/ThreadPool.h"
+
+// We'll assume you have a global or external reference to a thread pool.
+// For example, declared somewhere in Application.cpp or a global header:
+//    extern ThreadPool gThreadPool;
+extern ThreadPool g_threadPool;
+
+// ------------- ADDED FOR TIMING -------------
+static double s_totalMeshTime = 0.0;  // accumulates total meshing time (in seconds)
+static int    s_meshCount = 0;       // how many chunks have been meshed so far
+
+// We'll provide a static getter at the bottom to return average meshing time
+// -------------------------------------------
+
+/**
+ * A small struct for passing mesh data from a worker thread back
+ * to the main thread for final GPU upload.
+ */
+struct MeshBuildResult
+{
+    Chunk* chunkPtr = nullptr;
+    std::vector<Vertex> verts;
+    std::vector<uint32_t> inds;
+    int cx = 0, cy = 0, cz = 0;
+};
+
+// We'll keep a container for "done" mesh results, protected by a mutex.
+static std::mutex                       s_resultMutex;
+static std::vector<MeshBuildResult>     s_pendingMeshResults;
 
 VoxelWorld::VoxelWorld(VulkanContext* context)
     : m_context(context)
@@ -26,38 +58,34 @@ void VoxelWorld::initWorld()
 {
     Logger::Info("initWorld() => Generating a region of procedural chunks around (0,0).");
 
-
+    // Instead of generating synchronously, enqueue generation tasks in the thread pool.
     for (int cx = -VIEW_DISTANCE; cx <= VIEW_DISTANCE; ++cx)
     {
         for (int cz = -VIEW_DISTANCE; cz <= VIEW_DISTANCE; ++cz)
         {
-            // If you only want one “vertical layer” for now, set cy = 0:
             int cy = 0;
-
-            // 1) Create (or retrieve) the chunk from the manager
             Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
 
-            // 2) Run your noise-based generator (stone/dirt/grass)
-            m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+            // Enqueue background generation:
+            g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
+                // 1) Generate chunk data
+                m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
 
-            // 3) Mark it dirty so we rebuild the mesh
-            newChunk->markDirty();
+                // 2) Mark chunk as dirty
+                newChunk->markDirty();
+                });
         }
     }
-
-    // 4) Now that all chunks are filled & dirty, do a one-pass meshing/upload
-    updateChunkMeshes();
-
-    Logger::Info("initWorld() => Completed static terrain generation in +/- "
-        + std::to_string(VIEW_DISTANCE) + " around (0,0).");
+    
+    // We won't call updateChunkMeshes() here yet, because generation is still happening in the background.
+    // Instead, we rely on updateChunksAroundPlayer(...) to poll for completed tasks.
+    Logger::Info("initWorld() => Queued generation tasks for +/- " + std::to_string(VIEW_DISTANCE) + " around (0,0).");
 }
-
 
 void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
 {
     VkDevice device = m_context->getDevice();
 
-    // Destroy vertex buffer if valid
     if (chunk.getVertexBuffer() != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, chunk.getVertexBuffer(), nullptr);
         chunk.setVertexBuffer(VK_NULL_HANDLE);
@@ -67,7 +95,6 @@ void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
         chunk.setVertexMemory(VK_NULL_HANDLE);
     }
 
-    // Destroy index buffer if valid
     if (chunk.getIndexBuffer() != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, chunk.getIndexBuffer(), nullptr);
         chunk.setIndexBuffer(VK_NULL_HANDLE);
@@ -77,7 +104,6 @@ void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
         chunk.setIndexMemory(VK_NULL_HANDLE);
     }
 
-    // Reset index count
     chunk.setIndexCount(0);
 }
 
@@ -86,12 +112,12 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     int centerChunkX = (int)std::floor(playerPosX / (float)Chunk::SIZE_X);
     int centerChunkZ = (int)std::floor(playerPosZ / (float)Chunk::SIZE_Z);
 
-    Logger::Info("Player at (" + std::to_string(playerPosX)
+    /*Logger::Info("Player at (" + std::to_string(playerPosX)
         + ", " + std::to_string(playerPosZ)
         + "), centerChunk = (" + std::to_string(centerChunkX)
-        + ", " + std::to_string(centerChunkZ) + ")");
+        + ", " + std::to_string(centerChunkZ) + ")");*/
 
-    // 1) Create any needed chunks
+    // 1) Create or queue generation for any needed chunks
     for (int cx = centerChunkX - VIEW_DISTANCE; cx <= centerChunkX + VIEW_DISTANCE; cx++) {
         for (int cz = centerChunkZ - VIEW_DISTANCE; cz <= centerChunkZ + VIEW_DISTANCE; cz++) {
             int cy = 0;
@@ -99,8 +125,14 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
                 Logger::Info("Needs chunk at (" + std::to_string(cx) + ","
                     + std::to_string(cy) + ","
                     + std::to_string(cz) + ")");
+
                 Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
-                m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+
+                // Enqueue background generation:
+                g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
+                    m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+                    newChunk->markDirty();
+                    });
             }
         }
     }
@@ -123,69 +155,127 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         if (oldC) {
             destroyChunkBuffers(*oldC);
         }
-        m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+        //m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
     }
 
-    // 3) Re-mesh changed or new chunks
-    updateChunkMeshes();
+    // 3) SCHEDULE meshing for changed/new chunks (OFF-MAIN-THREAD),
+    //    then poll for completed mesh results and finalize them (ON MAIN THREAD).
+    scheduleMeshingForDirtyChunks();
+    pollMeshBuildResults();
 }
 
-void VoxelWorld::updateChunkMeshes()
+/**
+ * Instead of synchronously meshing in updateChunkMeshes(),
+ * we schedule meshing tasks for each dirty chunk on the thread pool.
+ */
+void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
-    // Get all chunks from the manager
     const auto& allChunks = m_chunkManager.getAllChunks();
-
-    for (auto& kv : allChunks)
-    {
+    for (auto& kv : allChunks) {
         ChunkCoord coord = kv.first;
         Chunk* chunk = kv.second.get();
-        if (!chunk)
-            continue;
+        if (!chunk) continue;
 
-        // Only rebuild if the chunk is marked dirty (has updated voxel data)
-        if (!chunk->isDirty())
-            continue;
+        // If chunk is dirty, schedule a background meshing job.
+        if (chunk->isDirty()) {
+            chunk->clearDirty(); // so we don't schedule it multiple times
 
-        // We'll store the new mesh data here
-        std::vector<Vertex> verts;
-        std::vector<uint32_t> inds;
+            /*Logger::Info("Enqueuing meshing job for chunk ("
+                + std::to_string(coord.x) + ","
+                + std::to_string(coord.y) + ","
+                + std::to_string(coord.z) + ")");*/
 
-        // Compute the chunk’s offset in world space
-        int offsetX = coord.x * Chunk::SIZE_X;
-        int offsetY = coord.y * Chunk::SIZE_Y;
-        int offsetZ = coord.z * Chunk::SIZE_Z;
+            
 
-        // === GREEDY MESHING CALL ===
-        // Instead of the old naive call, do:
-        m_mesher.generateMeshGreedy(
-            *chunk,               // which chunk to mesh
-            coord.x, coord.y, coord.z,
-            verts, inds,
-            offsetX, offsetY, offsetZ,
-            m_chunkManager        // needed for adjacency checks
-        );
-        // ===========================
+            // Copy needed data for the job
+            int offsetX = coord.x * Chunk::SIZE_X;
+            int offsetY = coord.y * Chunk::SIZE_Y;
+            int offsetZ = coord.z * Chunk::SIZE_Z;
 
-        // Print debug info
-        Logger::Info(
-            "Greedy meshed chunk ("
-            + std::to_string(coord.x) + ", "
-            + std::to_string(coord.y) + ", "
-            + std::to_string(coord.z) + ") -> "
-            + std::to_string(verts.size()) + " verts, "
-            + std::to_string(inds.size()) + " indices"
-        );
+            g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ]() {
+                auto chunkStart = std::chrono::high_resolution_clock::now();
 
-        // Destroy any old GPU buffers on this chunk (to avoid leaks)
-        destroyChunkBuffers(*chunk);
+                std::vector<Vertex> verts;
+                std::vector<uint32_t> inds;
+                // Build geometry
+                m_mesher.generateMeshGreedy(
+                    *chunk,
+                    coord.x, coord.y, coord.z,
+                    verts, inds,
+                    offsetX, offsetY, offsetZ,
+                    m_chunkManager
+                );
 
-        // If we actually produced geometry, upload it
-        if (!verts.empty() && !inds.empty()) {
-            uploadMeshToChunk(*chunk, verts, inds);
+                auto chunkEnd = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> chunkDurationSec = (chunkEnd - chunkStart);
+
+                // Accumulate global meshing stats
+                {
+                    // local scope so as not to block a future extension
+                    s_totalMeshTime += chunkDurationSec.count();
+                    s_meshCount++;
+                }
+
+                // Now store the results for the main thread to finalize (upload to GPU).
+                MeshBuildResult result;
+                result.chunkPtr = chunk;
+                result.cx = coord.x;
+                result.cy = coord.y;
+                result.cz = coord.z;
+                result.verts = std::move(verts);
+                result.inds = std::move(inds);
+
+                // Add a quick log:
+                Logger::Info(
+                    "Meshing done for chunk("
+                    + std::to_string(result.cx) + ","
+                    + std::to_string(result.cy) + ","
+                    + std::to_string(result.cz) + ") with "
+                    + std::to_string(result.verts.size()) + " verts, "
+                    + std::to_string(result.inds.size()) + " inds"
+                );
+
+                // Lock and add to the pending results
+                {
+                    std::lock_guard<std::mutex> lk(s_resultMutex);
+                    s_pendingMeshResults.push_back(std::move(result));
+                }
+                });
         }
+    }
+}
 
-        // Done remeshing => clear the dirty flag
-        chunk->clearDirty();
+/**
+ * In the main thread, pick up any completed mesh results and do the GPU buffer upload.
+ */
+void VoxelWorld::pollMeshBuildResults()
+{
+    std::vector<MeshBuildResult> localCopy;
+    {
+        std::lock_guard<std::mutex> lk(s_resultMutex);
+        if (!s_pendingMeshResults.empty()) {
+            localCopy.swap(s_pendingMeshResults);
+            // s_pendingMeshResults is now empty, and we have them in localCopy
+        }
+    }
+
+    // Now localCopy has all the MeshBuildResult items
+    for (auto& res : localCopy) {
+        // Here 'res' is defined, including res.cx / res.cy / res.cz
+        if (res.chunkPtr && !res.verts.empty() && !res.inds.empty()) {
+
+            Logger::Info(
+                "Finalizing chunk mesh for ("
+                + std::to_string(res.cx) + ","
+                + std::to_string(res.cy) + ","
+                + std::to_string(res.cz) + ") => "
+                + std::to_string(res.verts.size()) + " verts, "
+                + std::to_string(res.inds.size()) + " inds"
+            );
+
+            destroyChunkBuffers(*res.chunkPtr);
+            uploadMeshToChunk(*res.chunkPtr, res.verts, res.inds);
+        }
     }
 }
 
@@ -198,37 +288,29 @@ void VoxelWorld::uploadMeshToChunk(
     VkDeviceSize vbSize = sizeof(Vertex) * verts.size();
     VkDeviceSize ibSize = sizeof(uint32_t) * inds.size();
 
-    //----------------------------------
-    // 1) Create device-local buffers
-    //----------------------------------
-    // We first create local variables for the newly created buffers/memory:
     VkBuffer       newVB = VK_NULL_HANDLE;
     VkDeviceMemory newVBMem = VK_NULL_HANDLE;
 
     VkBuffer       newIB = VK_NULL_HANDLE;
     VkDeviceMemory newIBMem = VK_NULL_HANDLE;
 
-    // Vertex buffer
     createBuffer(
         vbSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        /*out*/ newVB,
-        /*out*/ newVBMem
+        newVB,
+        newVBMem
     );
 
-    // Index buffer
     createBuffer(
         ibSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        /*out*/ newIB,
-        /*out*/ newIBMem
+        newIB,
+        newIBMem
     );
 
-    //----------------------------------
-    // 2) Create staging buffers
-    //----------------------------------
+    // Create staging buffers
     VkBuffer stagingVB = VK_NULL_HANDLE, stagingIB = VK_NULL_HANDLE;
     VkDeviceMemory stagingVBMem = VK_NULL_HANDLE, stagingIBMem = VK_NULL_HANDLE;
 
@@ -247,9 +329,7 @@ void VoxelWorld::uploadMeshToChunk(
         stagingIBMem
     );
 
-    //----------------------------------
-    // 3) Copy CPU data into staging
-    //----------------------------------
+    // Copy CPU data into staging
     {
         void* data;
         vkMapMemory(m_context->getDevice(), stagingVBMem, 0, vbSize, 0, &data);
@@ -261,9 +341,7 @@ void VoxelWorld::uploadMeshToChunk(
         vkUnmapMemory(m_context->getDevice(), stagingIBMem);
     }
 
-    //----------------------------------
-    // 4) Transfer staging -> device-local
-    //----------------------------------
+    // Transfer staging -> device-local
     copyBuffer(stagingVB, newVB, vbSize);
     copyBuffer(stagingIB, newIB, ibSize);
 
@@ -273,23 +351,16 @@ void VoxelWorld::uploadMeshToChunk(
     vkDestroyBuffer(m_context->getDevice(), stagingIB, nullptr);
     vkFreeMemory(m_context->getDevice(), stagingIBMem, nullptr);
 
-    //----------------------------------
-    // 5) Assign the new buffers to the chunk
-    //----------------------------------
+    // Assign the new buffers to the chunk
     chunk.setVertexBuffer(newVB);
     chunk.setVertexMemory(newVBMem);
     chunk.setIndexBuffer(newIB);
     chunk.setIndexMemory(newIBMem);
 
-    // Store index count for rendering
     chunk.setIndexCount(static_cast<uint32_t>(inds.size()));
     chunk.setVertexCount(static_cast<uint32_t>(verts.size()));
-    
 }
 
-//--------------------------------------------------
-// createBuffer, copyBuffer, findMemoryType
-//--------------------------------------------------
 void VoxelWorld::createBuffer(VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
@@ -376,3 +447,14 @@ uint32_t VoxelWorld::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props
     }
     throw std::runtime_error("Failed to find suitable memory type!");
 }
+
+// ------------- ADDED GETTER METHOD --------------
+double VoxelWorld::getAvgMeshTime()
+{
+    // Return average meshing time in seconds
+    if (s_meshCount == 0) {
+        return 0.0;
+    }
+    return s_totalMeshTime / s_meshCount;
+}
+// -------------------------------------------------

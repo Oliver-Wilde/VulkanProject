@@ -1,8 +1,11 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "TerrainGenerator.h"
 #include <cmath>
+
+// ---------- ADDED FOR TIMING ----------
+#include <chrono>        // for timing
+static double s_totalGenTime = 0.0;
+static int    s_genCount = 0;
+// --------------------------------------
 
 // -----------------------------------------------------------------------------
 // Constructor
@@ -20,6 +23,9 @@ TerrainGenerator::TerrainGenerator()
 // -----------------------------------------------------------------------------
 void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 {
+    using namespace std::chrono;
+    auto startTime = high_resolution_clock::now();
+
     // World offsets based on chunk coordinates
     int worldXOffset = cx * Chunk::SIZE_X;
     int worldZOffset = cz * Chunk::SIZE_Z;
@@ -33,7 +39,8 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
             int worldZ = worldZOffset + localZ;
 
             // Sample noise (range ~[-1..1])
-            float nVal = m_noise.GetNoise(static_cast<float>(worldX), static_cast<float>(worldZ));
+            float nVal = m_noise.GetNoise(static_cast<float>(worldX),
+                static_cast<float>(worldZ));
             // Convert to [0..1]
             float normalized = (nVal + 1.0f) * 0.5f;
 
@@ -46,18 +53,29 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
             for (int y = 0; y <= heightVal; y++)
             {
                 if (y == heightVal) {
-                    // Top layer: grass
-                    chunk.setBlock(localX, y, localZ, 3);
-                }
-                else if (y >= heightVal - 2) {
-                    // Next two layers: dirt
+                    // Top layer => Grass (ID=2)
                     chunk.setBlock(localX, y, localZ, 2);
                 }
+                else if (y >= heightVal - 2) {
+                    // Next two layers => Dirt (ID=3)
+                    chunk.setBlock(localX, y, localZ, 3);
+                }
                 else {
-                    // Below: stone
+                    // Below => Stone (ID=1)
                     chunk.setBlock(localX, y, localZ, 1);
                 }
             }
         }
     }
+
+    auto endTime = high_resolution_clock::now();
+    double elapsedSec = duration<double>(endTime - startTime).count();
+    s_totalGenTime += elapsedSec;
+    s_genCount++;
+}
+
+double TerrainGenerator::getAvgGenTime()
+{
+    if (s_genCount == 0) return 0.0;
+    return s_totalGenTime / s_genCount;
 }

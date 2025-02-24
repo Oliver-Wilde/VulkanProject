@@ -1,10 +1,8 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "Chunk.h"
 #include <stdexcept>
 #include <cstddef>         // for size_t
 #include <glm/vec3.hpp>    // for glm::vec3
+#include <utility>         // for std::pair
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -28,7 +26,6 @@ Chunk::~Chunk()
 {
     // Typically we don't destroy the chunk's GPU buffers here.
     // The manager or VoxelWorld might handle that before device destruction.
-    // So do nothing here.
 }
 
 // -----------------------------------------------------------------------------
@@ -93,4 +90,24 @@ void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 
     // Maximum corner is origin + (SIZE_X, SIZE_Y, SIZE_Z)
     outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
+}
+
+// -----------------------------------------------------------------------------
+// getVoxelUsage
+// -----------------------------------------------------------------------------
+std::pair<size_t, size_t> Chunk::getVoxelUsage() const
+{
+    size_t activeCount = 0;
+    size_t emptyCount = 0;
+
+    // Iterate over each voxel in the block array.
+    for (int voxel : m_blocks)
+    {
+        if (voxel == 0)
+            emptyCount++;
+        else
+            activeCount++;
+    }
+
+    return { activeCount, emptyCount };
 }

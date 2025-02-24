@@ -11,6 +11,10 @@
 #include "Engine/Core/Time.h"
 #include "../Utils/CpuProfiler.h"
 
+// ---------- ADDED for referencing getAvgGenTime() ----------
+#include "Engine/Voxels/Generation/TerrainGenerator.h"
+// -----------------------------------------------------------
+
 // Include ImGui + backends
 #include "../External Libraries/imgui/imgui.h"
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
@@ -24,15 +28,18 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <Engine/Utils/Logger.h>
+#include <deque>  // For rolling averages
+#include <Engine/Utils/ThreadPool.h>
 
 static CpuProfiler g_cpuProfiler;
+
 // -----------------------------------------------------------------------------
 // A helper to build the camera frustum from your current camera state
 // -----------------------------------------------------------------------------
 static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
     float aspect = float(extent.width) / float(extent.height);
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.05f, 100.0f);
     // Flip Y for Vulkan
     proj[1][1] *= -1.0f;
 
@@ -44,11 +51,16 @@ static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
     return frustum;
 }
 
+// ------------- ADD if you want to reference the global thread pool -------------
+
+extern ThreadPool g_threadPool; // declared in Application.cpp
+// ------------------------------------------------------------------------------
+
 // -----------------------------------------------------------------------------
 // Constructor
 // -----------------------------------------------------------------------------
-Renderer::Renderer(VulkanContext* context, Window* window)
-    : m_context(context), m_window(window)
+Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
+    : m_context(context), m_window(window) , m_voxelWorld(voxelWorld)
 {
     // 1) Create SwapChain
     m_swapChain = new SwapChain();
@@ -104,8 +116,8 @@ Renderer::Renderer(VulkanContext* context, Window* window)
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
     // 5) Create VoxelWorld
-    m_voxelWorld = new VoxelWorld(m_context);
-    m_voxelWorld->initWorld();
+    //m_voxelWorld = new VoxelWorld(m_context);
+    //m_voxelWorld->initWorld();
 
     // 6) Create MVP Uniform Buffer
     createMVPUniformBuffer();
@@ -283,7 +295,7 @@ Renderer::~Renderer()
     }
 
     // Clean up voxel world, managers, swapchain
-    delete m_voxelWorld;
+    
     delete m_rpManager;
     delete m_pipelineMgr;
     delete m_resourceMgr;
@@ -392,6 +404,26 @@ void Renderer::toggleWireframe()
 }
 
 // -----------------------------------------------------------------------------
+// Helpers for rolling averages
+// -----------------------------------------------------------------------------
+void Renderer::addSample(std::deque<float>& buffer, float value)
+{
+    if (buffer.size() >= ROLLING_AVG_SAMPLES)
+        buffer.pop_front();
+
+    buffer.push_back(value);
+}
+
+float Renderer::computeAverage(const std::deque<float>& buffer)
+{
+    if (buffer.empty()) return 0.0f;
+    float sum = 0.0f;
+    for (float val : buffer)
+        sum += val;
+    return sum / static_cast<float>(buffer.size());
+}
+
+// -----------------------------------------------------------------------------
 // renderFrame
 // -----------------------------------------------------------------------------
 void Renderer::renderFrame()
@@ -429,7 +461,7 @@ void Renderer::renderFrame()
     );
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // handle window resize if needed
+        // Handle window resize if needed
         return;
     }
     else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -463,7 +495,7 @@ void Renderer::renderFrame()
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 8) Pipeline + descriptor sets
+    // 8) Choose pipeline + descriptor sets
     std::string pipelineName = (m_wireframeOn) ? "voxel_wireframe" : "voxel_fill";
     PipelineInfo pipelineInfo = m_pipelineMgr->getPipeline(pipelineName);
 
@@ -474,47 +506,81 @@ void Renderer::renderFrame()
         0, 1, &m_mvpDescriptorSet,
         0, nullptr);
 
-    // 9) Draw chunks (frustum culling optional)
+    // 9) Draw chunks (with optional frustum culling)
     uint32_t totalVertices = 0;
     uint32_t drawCallCount = 0;
+
+    // Gather instantaneous dt, fps, CPU usage
     float dt = (m_time) ? m_time->getDeltaTime() : 0.0f;
     float fps = (dt > 0.f) ? 1.0f / dt : 0.0f;
+    float cpuUsage = g_cpuProfiler.GetCpuUsage();
 
+    // Update rolling averages
+    addSample(m_fpsSamples, fps);
+    addSample(m_cpuSamples, cpuUsage);
+    float avgFps = computeAverage(m_fpsSamples);
+    float avgCpu = computeAverage(m_cpuSamples);
+
+    // Iterate all loaded chunks
     const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
-    for (auto& kv : allChunks) {
+    for (auto& kv : allChunks)
+    {
+        // kv.first is a ChunkCoord: (x, y, z)
+        const ChunkCoord& coord = kv.first;
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
+
+        // Debug print
+        /*Logger::Info(
+            "Renderer sees chunk ("
+            + std::to_string(coord.x) + ", "
+            + std::to_string(coord.y) + ", "
+            + std::to_string(coord.z) + ") => "
+            + std::to_string(chunk->getVertexCount()) + " verts, "
+            + std::to_string(chunk->getIndexCount()) + " inds, "
+            + "VB = " + (chunk->getVertexBuffer() == VK_NULL_HANDLE ? "NULL" : "OK") + ", "
+            + "IB = " + (chunk->getIndexBuffer() == VK_NULL_HANDLE ? "NULL" : "OK")
+        );*/
+
+        // Skip chunks that have no buffers yet
         if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
             chunk->getIndexBuffer() == VK_NULL_HANDLE)
         {
             continue;
         }
 
+        // Skip chunks if frustum culling is enabled and they're outside the view
         if (m_enableFrustumCulling) {
             glm::vec3 minB, maxB;
             chunk->getBoundingBox(minB, maxB);
-            
-
             if (!frustum.intersectsAABB(minB, maxB)) {
                 continue;
             }
         }
 
+        // Sum up vertex counts for stats
         totalVertices += chunk->getVertexCount();
 
+        // Bind vertex buffer
         VkDeviceSize offsets[] = { 0 };
         VkBuffer vb = chunk->getVertexBuffer();
         vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
+
+        // Bind index buffer
         vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
+        // Grab index count & skip if 0
         uint32_t idxCount = chunk->getIndexCount();
-        if (idxCount > 0) {
-            vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
-            drawCallCount++;
+        if (idxCount == 0) {
+            continue;
         }
+
+        // Draw call
+        vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
+        drawCallCount++;
     }
 
-    // 10) ImGui
+    // 10) ImGui debug overlay
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -523,18 +589,39 @@ void Renderer::renderFrame()
     ImGui::Text("Wireframe is %s", m_wireframeOn ? "ON" : "OFF");
     ImGui::Checkbox("Frustum Culling", &m_enableFrustumCulling);
     ImGui::Separator();
-    ImGui::Text("Delta Time:  %.3f s", dt);
-    ImGui::Text("FPS:         %.2f", fps);
-    ImGui::Text("Vertex Count:%u", totalVertices);
-    ImGui::Text("Draw Calls:  %u", drawCallCount);
-    ImGui::Text("Chunk Count: %zu", allChunks.size());
+    ImGui::Text("Delta Time:           %.3f s", dt);
+    ImGui::Text("FPS (Instant):        %.2f", fps);
+    ImGui::Text("FPS (Average):        %.2f", avgFps);
+    ImGui::Text("CPU Usage (Instant):  %.1f%%", cpuUsage);
+    ImGui::Text("CPU Usage (Average):  %.1f%%", avgCpu);
 
-    // New: Display CPU usage:
-    float cpuUsage = g_cpuProfiler.GetCpuUsage();
-    ImGui::Text("CPU Usage:   %.1f%%", cpuUsage);
+    ImGui::Separator();
+    ImGui::Text("Vertex Count:         %u", totalVertices);
+    ImGui::Text("Draw Calls:           %u", drawCallCount);
+    ImGui::Text("Chunk Count:          %zu", allChunks.size());
+
+    // Voxel usage (if tracked)
+    std::pair<size_t, size_t> voxelUsage = m_voxelWorld->getChunkManager().getTotalVoxelUsage();
+    ImGui::Text("Active Voxels:        %zu", voxelUsage.first);
+    ImGui::Text("Empty Voxels:         %zu", voxelUsage.second);
+
+    // Average generation & meshing times
+    double avgGenMs = TerrainGenerator::getAvgGenTime() * 1000.0;
+    double avgMeshMs = VoxelWorld::getAvgMeshTime() * 1000.0;
+    ImGui::Separator();
+    ImGui::Text("Avg Generation Time (ms):  %.2f", avgGenMs);
+    ImGui::Text("Avg Meshing Time   (ms):   %.2f", avgMeshMs);
+
+    // ThreadPool stats (if implemented in your ThreadPool)
+    {
+        size_t threadCount = g_threadPool.getThreadCount();
+        size_t queuedTasks = g_threadPool.getQueueSize();
+        ImGui::Separator();
+        ImGui::Text("ThreadPool: %zu threads", threadCount);
+        ImGui::Text("Queued Tasks: %zu", queuedTasks);
+    }
+
     ImGui::End();
-
-    
 
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuf);
@@ -564,7 +651,9 @@ void Renderer::renderFrame()
     submitInfo.pSignalSemaphores = signalSemaphores;
 
     // Use the fence for this frame
-    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo, m_frames[m_currentFrame].inFlightFence) != VK_SUCCESS) {
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo,
+        m_frames[m_currentFrame].inFlightFence) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to submit draw command buffer!");
     }
 
@@ -572,7 +661,7 @@ void Renderer::renderFrame()
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores; // wait on the same "renderFinishedSemaphore"
+    presentInfo.pWaitSemaphores = signalSemaphores; // wait on "renderFinishedSemaphore"
     VkSwapchainKHR swapchains[] = { m_swapChain->getSwapChain() };
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = swapchains;
@@ -580,7 +669,7 @@ void Renderer::renderFrame()
 
     result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        // handle swapchain recreation if needed
+        // Handle swapchain recreation if needed
     }
     else if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to present swapchain image!");
@@ -622,7 +711,6 @@ void Renderer::createBuffer(
     if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory!");
     }
-
 
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }

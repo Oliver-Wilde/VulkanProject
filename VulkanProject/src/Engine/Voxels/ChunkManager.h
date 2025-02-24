@@ -109,6 +109,7 @@ public:
         return m_chunks;
     }
 
+    std::pair<size_t, size_t> getTotalVoxelUsage() const;
 private:
     // -----------------------------------------------------------------------------
     // Member Variables

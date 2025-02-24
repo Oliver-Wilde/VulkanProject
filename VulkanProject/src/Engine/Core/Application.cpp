@@ -1,6 +1,3 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "Application.h"
 #include "Window.h"
 #include "Time.h"
@@ -12,7 +9,19 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
 
+
+
 #include <stdexcept>
+#include <iostream>
+
+// ----------------------------------------------
+// ADD: ThreadPool
+#include "Engine/Utils/ThreadPool.h"
+
+// Define a global thread pool that VoxelWorld (and others) can use.
+// Using 0 means "auto-pick" thread count (hardware_concurrency - 1).
+ThreadPool g_threadPool(0);
+// ----------------------------------------------
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -32,13 +41,15 @@ Application::~Application()
 // -----------------------------------------------------------------------------
 void Application::init()
 {
-    // 1) Register voxel types (IDs for Stone, Grass, etc.)
+    // 1) register all voxel types from VoxelTypeRegistry.
     registerAllVoxels();
+    std::cout << "DEBUG: Registered all voxel types." << std::endl;
 
-    // 2) Create window
+    // 2) Create GLFW window
     m_window = new Window(800, 600, "My Voxel Engine");
+    std::cout << "DEBUG:  Created Window " << std::endl;
 
-    // 3) Time / DeltaTime
+    // 3) Time / DeltaTime -- this is for tracking the time between frames.
     m_time = new Time();
 
     // 4) Vulkan context + init
@@ -50,7 +61,7 @@ void Application::init()
     m_voxelWorld->initWorld();
 
     // 6) Create Renderer
-    m_renderer = new Renderer(m_vulkanCtx, m_window);
+    m_renderer = new Renderer(m_vulkanCtx, m_window, m_voxelWorld);
 
     m_renderer->setTime(m_time);
 
@@ -100,10 +111,12 @@ void Application::handleInput(Camera& cam, float dt)
 
 void Application::runLoop()
 {
+    // create the camera and set its initial position
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
     bool wireframeWasPressed = false;
 
     while (m_isRunning && !m_window->shouldClose()) {
+
         m_window->pollEvents();
         m_time->update();
         float dt = m_time->getDeltaTime();
@@ -162,6 +175,10 @@ void Application::cleanup()
         delete m_time;
         m_time = nullptr;
     }
+
+    // (Optional) We can explicitly shut down the thread pool:
+    // g_threadPool.shutdown();
+    // But it's also called automatically in its destructor.
 
     m_isRunning = false;
 }

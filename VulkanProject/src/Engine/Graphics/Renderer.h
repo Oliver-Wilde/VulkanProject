@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------------
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include <deque>    // For rolling averages
 #include "Engine/Scene/Camera.h"
 
 // -----------------------------------------------------------------------------
@@ -49,7 +50,12 @@ public:
     // -------------------------------------------------------------------------
     // Constructor / Destructor
     // -------------------------------------------------------------------------
-    Renderer(VulkanContext* context, Window* window);
+    /**
+     * @param context       Pointer to the VulkanContext.
+     * @param window        Pointer to the main window (GLFW).
+     * @param voxelWorld    Pointer to the existing VoxelWorld (so we don't create a second one).
+     */
+    Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld);
     ~Renderer();
 
     // -------------------------------------------------------------------------
@@ -113,28 +119,38 @@ private:
      */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
+    /**
+     * Adds a new sample to the rolling buffer, popping the oldest if at capacity.
+     */
+    void addSample(std::deque<float>& buffer, float value);
+
+    /**
+     * Computes the average of the rolling buffer.
+     */
+    float computeAverage(const std::deque<float>& buffer);
+
 private:
     // -------------------------------------------------------------------------
     // Member Variables
     // -------------------------------------------------------------------------
-    VulkanContext* m_context = nullptr; ///< Pointer to the Vulkan context
-    Window* m_window = nullptr; ///< Pointer to the window
+    VulkanContext* m_context = nullptr;   ///< Pointer to the Vulkan context
+    Window* m_window = nullptr;           ///< Pointer to the window
 
-    SwapChain* m_swapChain = nullptr; ///< Manages the swap chain
-    ResourceManager* m_resourceMgr = nullptr; ///< Manages shader modules, etc.
-    PipelineManager* m_pipelineMgr = nullptr; ///< Manages graphics pipelines
-    RenderPassManager* m_rpManager = nullptr; ///< Manages render passes
-    VoxelWorld* m_voxelWorld = nullptr; ///< Voxel-based world pointer
+    SwapChain* m_swapChain = nullptr;              ///< Manages the swap chain
+    ResourceManager* m_resourceMgr = nullptr;      ///< Manages shader modules, etc.
+    PipelineManager* m_pipelineMgr = nullptr;      ///< Manages graphics pipelines
+    RenderPassManager* m_rpManager = nullptr;      ///< Manages render passes
+    VoxelWorld* m_voxelWorld = nullptr;            ///< Now passed in via constructor
 
     // MVP Data
-    VkBuffer             m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory       m_mvpMemory = VK_NULL_HANDLE;
+    VkBuffer       m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_mvpMemory = VK_NULL_HANDLE;
     VkDescriptorPool     m_mvpDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
     VkDescriptorSet      m_mvpDescriptorSet = VK_NULL_HANDLE;
 
     // ImGui descriptor pool
-    VkDescriptorPool     m_imguiDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
 
     // Number of frames we can process simultaneously
     static const int MAX_FRAMES_IN_FLIGHT = 2;
@@ -146,8 +162,13 @@ private:
     uint32_t       m_currentFrame = 0;
 
     // Internal flags / data
-    bool   m_wireframeOn = false; ///< Whether wireframe mode is on
-    bool   m_enableFrustumCulling = false; ///< Whether frustum culling is enabled
+    bool   m_wireframeOn = false;           ///< Whether wireframe mode is on
+    bool   m_enableFrustumCulling = false;  ///< Whether frustum culling is enabled
     Camera m_camera;
     Time* m_time = nullptr;
+
+    // Rolling averages
+    static constexpr int ROLLING_AVG_SAMPLES = 60; ///< Number of samples for rolling averages
+    std::deque<float> m_fpsSamples;
+    std::deque<float> m_cpuSamples;
 };

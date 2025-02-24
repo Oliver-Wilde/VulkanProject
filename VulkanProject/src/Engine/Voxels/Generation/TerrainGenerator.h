@@ -31,6 +31,7 @@ public:
      * @param cz    Chunk Z coordinate (in chunk-space).
      */
     void generateChunk(Chunk& chunk, int cx, int cy, int cz);
+    static double getAvgGenTime(); // <-- Add this
 
 private:
     // -----------------------------------------------------------------------------

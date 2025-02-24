@@ -17,7 +17,6 @@ CpuProfiler::CpuProfiler()
         throw std::runtime_error("Failed to add CPU usage counter.");
     }
 
-
     // Do an initial collection
     PdhCollectQueryData(m_cpuQuery);
 }
@@ -39,4 +38,32 @@ float CpuProfiler::GetCpuUsage()
         return 0.0f;
     }
     return static_cast<float>(counterVal.doubleValue);
+}
+
+// --- New rolling average FPS implementation ---
+
+void CpuProfiler::UpdateFPS(float fps)
+{
+    // If we haven't filled our sample buffer yet, add the new FPS sample.
+    if (m_fpsSamples.size() < kMaxFPSamples) {
+        m_fpsSamples.push_back(fps);
+    }
+    else {
+        // Replace the oldest sample with the new one.
+        m_fpsSamples[m_nextSampleIndex] = fps;
+        m_nextSampleIndex = (m_nextSampleIndex + 1) % kMaxFPSamples;
+    }
+}
+
+float CpuProfiler::GetRollingAverageFPS() const
+{
+    if (m_fpsSamples.empty())
+        return 0.0f;
+
+    float sum = 0.0f;
+    for (float sample : m_fpsSamples)
+    {
+        sum += sample;
+    }
+    return sum / static_cast<float>(m_fpsSamples.size());
 }
