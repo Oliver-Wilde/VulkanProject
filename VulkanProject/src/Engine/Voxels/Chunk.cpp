@@ -11,15 +11,14 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     : m_worldX(worldX)
     , m_worldY(worldY)
     , m_worldZ(worldZ)
+    , m_dirty(true)        // By default, it's dirty => needs initial mesh
+    , m_isUploading(false) // Not uploading initially
 {
     // Allocate block data
     size_t total = static_cast<size_t>(SIZE_X)
         * static_cast<size_t>(SIZE_Y)
         * static_cast<size_t>(SIZE_Z);
     m_blocks.resize(total, 0); // 0 => "Air"
-
-    // By default, it's dirty => needs initial mesh
-    m_dirty = true;
 }
 
 Chunk::~Chunk()

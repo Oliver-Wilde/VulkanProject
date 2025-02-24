@@ -11,7 +11,7 @@
 
 // We'll assume you have a global or external reference to a thread pool.
 // For example, declared somewhere in Application.cpp or a global header:
-//    extern ThreadPool gThreadPool;
+//    extern ThreadPool g_threadPool;
 extern ThreadPool g_threadPool;
 
 // ------------- ADDED FOR TIMING -------------
@@ -34,8 +34,8 @@ struct MeshBuildResult
 };
 
 // We'll keep a container for "done" mesh results, protected by a mutex.
-static std::mutex                       s_resultMutex;
-static std::vector<MeshBuildResult>     s_pendingMeshResults;
+static std::mutex           s_resultMutex;
+static std::vector<MeshBuildResult> s_pendingMeshResults;
 
 VoxelWorld::VoxelWorld(VulkanContext* context)
     : m_context(context)
@@ -76,10 +76,13 @@ void VoxelWorld::initWorld()
                 });
         }
     }
-    
+
     // We won't call updateChunkMeshes() here yet, because generation is still happening in the background.
     // Instead, we rely on updateChunksAroundPlayer(...) to poll for completed tasks.
-    Logger::Info("initWorld() => Queued generation tasks for +/- " + std::to_string(VIEW_DISTANCE) + " around (0,0).");
+    Logger::Info(
+        "initWorld() => Queued generation tasks for +/- "
+        + std::to_string(VIEW_DISTANCE) + " around (0,0)."
+    );
 }
 
 void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
@@ -105,6 +108,7 @@ void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
     }
 
     chunk.setIndexCount(0);
+    chunk.setVertexCount(0);
 }
 
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
@@ -112,19 +116,17 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     int centerChunkX = (int)std::floor(playerPosX / (float)Chunk::SIZE_X);
     int centerChunkZ = (int)std::floor(playerPosZ / (float)Chunk::SIZE_Z);
 
-    /*Logger::Info("Player at (" + std::to_string(playerPosX)
-        + ", " + std::to_string(playerPosZ)
-        + "), centerChunk = (" + std::to_string(centerChunkX)
-        + ", " + std::to_string(centerChunkZ) + ")");*/
-
     // 1) Create or queue generation for any needed chunks
     for (int cx = centerChunkX - VIEW_DISTANCE; cx <= centerChunkX + VIEW_DISTANCE; cx++) {
         for (int cz = centerChunkZ - VIEW_DISTANCE; cz <= centerChunkZ + VIEW_DISTANCE; cz++) {
             int cy = 0;
             if (!m_chunkManager.hasChunk(cx, cy, cz)) {
-                Logger::Info("Needs chunk at (" + std::to_string(cx) + ","
+                Logger::Info(
+                    "Needs chunk at ("
+                    + std::to_string(cx) + ","
                     + std::to_string(cy) + ","
-                    + std::to_string(cz) + ")");
+                    + std::to_string(cz) + ")"
+                );
 
                 Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
 
@@ -138,11 +140,13 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
 
     // 2) Unload chunks out of range
+    //    (We do a device wait to ensure the GPU isn't using them
+    //     before we destroy their buffers. This is a brute force but safe approach.)
     std::vector<ChunkCoord> toRemove;
     const auto& allChunks = m_chunkManager.getAllChunks();
     for (auto& kv : allChunks) {
         const ChunkCoord& cc = kv.first;
-        if (cc.y != 0) continue; // ignoring multi-layer
+        if (cc.y != 0) continue; // ignoring multi-layer for now
 
         int distX = std::abs(cc.x - centerChunkX);
         int distZ = std::abs(cc.z - centerChunkZ);
@@ -153,9 +157,12 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     for (auto& rc : toRemove) {
         Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
         if (oldC) {
+            // Wait until the GPU is idle (brute force solution)
+            vkDeviceWaitIdle(m_context->getDevice());
+
             destroyChunkBuffers(*oldC);
+            m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
         }
-        //m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
     }
 
     // 3) SCHEDULE meshing for changed/new chunks (OFF-MAIN-THREAD),
@@ -178,16 +185,10 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
 
         // If chunk is dirty, schedule a background meshing job.
         if (chunk->isDirty()) {
-            chunk->clearDirty(); // so we don't schedule it multiple times
+            // Mark chunk as "uploading" so the renderer can skip it if needed
+            chunk->clearDirty();
+            chunk->setIsUploading(true);
 
-            /*Logger::Info("Enqueuing meshing job for chunk ("
-                + std::to_string(coord.x) + ","
-                + std::to_string(coord.y) + ","
-                + std::to_string(coord.z) + ")");*/
-
-            
-
-            // Copy needed data for the job
             int offsetX = coord.x * Chunk::SIZE_X;
             int offsetY = coord.y * Chunk::SIZE_Y;
             int offsetZ = coord.z * Chunk::SIZE_Z;
@@ -211,12 +212,11 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
 
                 // Accumulate global meshing stats
                 {
-                    // local scope so as not to block a future extension
                     s_totalMeshTime += chunkDurationSec.count();
                     s_meshCount++;
                 }
 
-                // Now store the results for the main thread to finalize (upload to GPU).
+                // Store the results for the main thread to finalize (upload to GPU).
                 MeshBuildResult result;
                 result.chunkPtr = chunk;
                 result.cx = coord.x;
@@ -225,17 +225,15 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                 result.verts = std::move(verts);
                 result.inds = std::move(inds);
 
-                // Add a quick log:
                 Logger::Info(
                     "Meshing done for chunk("
                     + std::to_string(result.cx) + ","
                     + std::to_string(result.cy) + ","
-                    + std::to_string(result.cz) + ") with "
+                    + std::to_string(result.cz) + ") => "
                     + std::to_string(result.verts.size()) + " verts, "
                     + std::to_string(result.inds.size()) + " inds"
                 );
 
-                // Lock and add to the pending results
                 {
                     std::lock_guard<std::mutex> lk(s_resultMutex);
                     s_pendingMeshResults.push_back(std::move(result));
@@ -255,15 +253,17 @@ void VoxelWorld::pollMeshBuildResults()
         std::lock_guard<std::mutex> lk(s_resultMutex);
         if (!s_pendingMeshResults.empty()) {
             localCopy.swap(s_pendingMeshResults);
-            // s_pendingMeshResults is now empty, and we have them in localCopy
+            // s_pendingMeshResults is now empty
         }
     }
 
-    // Now localCopy has all the MeshBuildResult items
+    // localCopy has all the MeshBuildResult items
     for (auto& res : localCopy) {
-        // Here 'res' is defined, including res.cx / res.cy / res.cz
-        if (res.chunkPtr && !res.verts.empty() && !res.inds.empty()) {
-
+        if (!res.chunkPtr) {
+            continue;
+        }
+        // If we have geometry
+        if (!res.verts.empty() && !res.inds.empty()) {
             Logger::Info(
                 "Finalizing chunk mesh for ("
                 + std::to_string(res.cx) + ","
@@ -273,9 +273,19 @@ void VoxelWorld::pollMeshBuildResults()
                 + std::to_string(res.inds.size()) + " inds"
             );
 
+            // First, destroy the old buffers
             destroyChunkBuffers(*res.chunkPtr);
+
+            // Next, upload new geometry
             uploadMeshToChunk(*res.chunkPtr, res.verts, res.inds);
         }
+        else {
+            // If no geometry, just destroy any old buffers
+            destroyChunkBuffers(*res.chunkPtr);
+        }
+
+        // Mark chunk as no longer uploading => safe to render
+        res.chunkPtr->setIsUploading(false);
     }
 }
 
@@ -311,20 +321,22 @@ void VoxelWorld::uploadMeshToChunk(
     );
 
     // Create staging buffers
-    VkBuffer stagingVB = VK_NULL_HANDLE, stagingIB = VK_NULL_HANDLE;
-    VkDeviceMemory stagingVBMem = VK_NULL_HANDLE, stagingIBMem = VK_NULL_HANDLE;
-
+    VkBuffer stagingVB = VK_NULL_HANDLE;
+    VkDeviceMemory stagingVBMem = VK_NULL_HANDLE;
     createBuffer(
         vbSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
         stagingVB,
         stagingVBMem
     );
+
+    VkBuffer stagingIB = VK_NULL_HANDLE;
+    VkDeviceMemory stagingIBMem = VK_NULL_HANDLE;
     createBuffer(
         ibSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
         stagingIB,
         stagingIBMem
     );
@@ -373,9 +385,7 @@ void VoxelWorld::createBuffer(VkDeviceSize size,
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(m_context->getDevice(), &bufferInfo, nullptr, &buffer)
-        != VK_SUCCESS)
-    {
+    if (vkCreateBuffer(m_context->getDevice(), &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create buffer!");
     }
 
@@ -387,9 +397,7 @@ void VoxelWorld::createBuffer(VkDeviceSize size,
     allocInfo.allocationSize = memReq.size;
     allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, properties);
 
-    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &memory)
-        != VK_SUCCESS)
-    {
+    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &memory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory!");
     }
 
@@ -437,8 +445,7 @@ uint32_t VoxelWorld::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &memProps);
 
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
-    {
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
         if ((filter & (1 << i)) &&
             (memProps.memoryTypes[i].propertyFlags & props) == props)
         {

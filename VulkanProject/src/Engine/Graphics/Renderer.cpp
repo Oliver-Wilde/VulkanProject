@@ -52,7 +52,6 @@ static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 }
 
 // ------------- ADD if you want to reference the global thread pool -------------
-
 extern ThreadPool g_threadPool; // declared in Application.cpp
 // ------------------------------------------------------------------------------
 
@@ -60,7 +59,7 @@ extern ThreadPool g_threadPool; // declared in Application.cpp
 // Constructor
 // -----------------------------------------------------------------------------
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
-    : m_context(context), m_window(window) , m_voxelWorld(voxelWorld)
+    : m_context(context), m_window(window), m_voxelWorld(voxelWorld)
 {
     // 1) Create SwapChain
     m_swapChain = new SwapChain();
@@ -115,11 +114,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    // 5) Create VoxelWorld
-    //m_voxelWorld = new VoxelWorld(m_context);
-    //m_voxelWorld->initWorld();
-
-    // 6) Create MVP Uniform Buffer
+    // 5) Create MVP Uniform Buffer
     createMVPUniformBuffer();
 
     // -----------------------------------------
@@ -294,8 +289,7 @@ Renderer::~Renderer()
         m_imguiDescriptorPool = VK_NULL_HANDLE;
     }
 
-    // Clean up voxel world, managers, swapchain
-    
+    // Clean up managers, swapchain
     delete m_rpManager;
     delete m_pipelineMgr;
     delete m_resourceMgr;
@@ -530,17 +524,11 @@ void Renderer::renderFrame()
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
 
-        // Debug print
-        /*Logger::Info(
-            "Renderer sees chunk ("
-            + std::to_string(coord.x) + ", "
-            + std::to_string(coord.y) + ", "
-            + std::to_string(coord.z) + ") => "
-            + std::to_string(chunk->getVertexCount()) + " verts, "
-            + std::to_string(chunk->getIndexCount()) + " inds, "
-            + "VB = " + (chunk->getVertexBuffer() == VK_NULL_HANDLE ? "NULL" : "OK") + ", "
-            + "IB = " + (chunk->getIndexBuffer() == VK_NULL_HANDLE ? "NULL" : "OK")
-        );*/
+        // ---------- NEW: Skip if chunk is uploading ----------
+        if (chunk->isUploading()) {
+            continue;
+        }
+        // -----------------------------------------------------
 
         // Skip chunks that have no buffers yet
         if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
