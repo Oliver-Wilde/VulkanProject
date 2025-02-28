@@ -600,13 +600,8 @@ void Renderer::renderFrame()
     ImGui::Text("Avg Generation Time (ms):  %.2f", avgGenMs);
     ImGui::Text("Avg Meshing Time   (ms):   %.2f", avgMeshMs);
 
-    // ThreadPool stats (if implemented in your ThreadPool)
-    {
-        size_t threadCount = g_threadPool.getThreadCount();
-        size_t queuedTasks = g_threadPool.getQueueSize();
-        ImGui::Separator();
-        ImGui::Text("ThreadPool: %zu threads", threadCount);
-        ImGui::Text("Queued Tasks: %zu", queuedTasks);
+    if (m_voxelWorld) {
+        ImGui::Text("Chunk Count: %zu", m_voxelWorld->getChunkManager().getAllChunks().size());
     }
 
     ImGui::End();
