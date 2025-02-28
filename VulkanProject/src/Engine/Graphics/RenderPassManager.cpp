@@ -1,6 +1,3 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "RenderPassManager.h"
 #include "SwapChain.h"
 #include "Engine/Graphics/VulkanContext.h"
@@ -12,39 +9,15 @@
 // Constructor / Destructor
 // -----------------------------------------------------------------------------
 RenderPassManager::RenderPassManager(VulkanContext* context, SwapChain* swapChain)
-    : m_context(context), m_swapChain(swapChain)
+    : m_context(context)
+    , m_swapChain(swapChain)
 {
 }
 
 RenderPassManager::~RenderPassManager()
 {
-    VkDevice device = m_context->getDevice();
-
-    // Destroy framebuffers
-    for (auto fb : m_framebuffers) {
-        vkDestroyFramebuffer(device, fb, nullptr);
-    }
-    m_framebuffers.clear();
-
-    // Destroy render pass
-    if (m_renderPass) {
-        vkDestroyRenderPass(device, m_renderPass, nullptr);
-        m_renderPass = VK_NULL_HANDLE;
-    }
-
-    // Destroy depth resources
-    if (m_depthImageView) {
-        vkDestroyImageView(device, m_depthImageView, nullptr);
-        m_depthImageView = VK_NULL_HANDLE;
-    }
-    if (m_depthImage) {
-        vkDestroyImage(device, m_depthImage, nullptr);
-        m_depthImage = VK_NULL_HANDLE;
-    }
-    if (m_depthMemory) {
-        vkFreeMemory(device, m_depthMemory, nullptr);
-        m_depthMemory = VK_NULL_HANDLE;
-    }
+    // We call our cleanup() to destroy resources:
+    cleanup();
 }
 
 // -----------------------------------------------------------------------------
@@ -54,9 +27,7 @@ void RenderPassManager::createRenderPass()
 {
     VkFormat swapchainFormat = m_swapChain->getColorFormat();
 
-    // -----------------------------------------------------------------------------
     // 1) The color attachment
-    // -----------------------------------------------------------------------------
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = swapchainFormat;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -71,13 +42,11 @@ void RenderPassManager::createRenderPass()
     colorRef.attachment = 0;  // We'll index this as 0
     colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    // -----------------------------------------------------------------------------
     // 2) The depth attachment
-    // -----------------------------------------------------------------------------
     VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = m_depthFormat; // e.g. VK_FORMAT_D32_SFLOAT
+    depthAttachment.format = m_depthFormat;
     depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;    // clear every frame
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;    // clear each frame
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -88,35 +57,26 @@ void RenderPassManager::createRenderPass()
     depthRef.attachment = 1; // We'll index this as 1
     depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    // -----------------------------------------------------------------------------
     // 3) Subpass
-    // -----------------------------------------------------------------------------
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
-    subpass.pDepthStencilAttachment = &depthRef;  // <--- Depth attachment
+    subpass.pDepthStencilAttachment = &depthRef;  // depth
 
-    // -----------------------------------------------------------------------------
-    // 4) Dependencies
-    // -----------------------------------------------------------------------------
+    // 4) Dependency
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+        | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependency.srcAccessMask = 0;
-    dependency.dstStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask =
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+        | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+        | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-    // -----------------------------------------------------------------------------
     // 5) Create the render pass
-    // -----------------------------------------------------------------------------
     std::array<VkAttachmentDescription, 2> attachments = {
         colorAttachment,
         depthAttachment
@@ -142,17 +102,14 @@ void RenderPassManager::createFramebuffers()
     auto& imageViews = m_swapChain->getImageViews();
     auto extent = m_swapChain->getExtent();
 
-    // -----------------------------------------------------------------------------
-    // Create the depth image & view
-    // -----------------------------------------------------------------------------
-    createDepthResources();  // <-- Creates depth image, allocates memory, creates view
+    // 1) Create depth resources (image, mem, view)
+    createDepthResources();
 
     m_framebuffers.resize(imageViews.size());
 
-    // -----------------------------------------------------------------------------
-    // Build framebuffers for each swap chain image
-    // -----------------------------------------------------------------------------
-    for (size_t i = 0; i < imageViews.size(); i++) {
+    // 2) Build framebuffers for each swapchain image
+    for (size_t i = 0; i < imageViews.size(); i++)
+    {
         std::array<VkImageView, 2> attachments = {
             imageViews[i],
             m_depthImageView
@@ -173,6 +130,37 @@ void RenderPassManager::createFramebuffers()
     }
 }
 
+void RenderPassManager::cleanup()
+{
+    VkDevice device = m_context->getDevice();
+
+    // 1) Destroy framebuffers
+    for (auto fb : m_framebuffers) {
+        vkDestroyFramebuffer(device, fb, nullptr);
+    }
+    m_framebuffers.clear();
+
+    // 2) Destroy depth resources
+    if (m_depthImageView) {
+        vkDestroyImageView(device, m_depthImageView, nullptr);
+        m_depthImageView = VK_NULL_HANDLE;
+    }
+    if (m_depthImage) {
+        vkDestroyImage(device, m_depthImage, nullptr);
+        m_depthImage = VK_NULL_HANDLE;
+    }
+    if (m_depthMemory) {
+        vkFreeMemory(device, m_depthMemory, nullptr);
+        m_depthMemory = VK_NULL_HANDLE;
+    }
+
+    // 3) Destroy render pass
+    if (m_renderPass) {
+        vkDestroyRenderPass(device, m_renderPass, nullptr);
+        m_renderPass = VK_NULL_HANDLE;
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Private Methods
 // -----------------------------------------------------------------------------
@@ -181,9 +169,7 @@ void RenderPassManager::createDepthResources()
     VkDevice device = m_context->getDevice();
     auto extent = m_swapChain->getExtent();
 
-    // -----------------------------------------------------------------------------
-    // 1) Create the depth image
-    // -----------------------------------------------------------------------------
+    // 1) Create depth image
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -203,21 +189,15 @@ void RenderPassManager::createDepthResources()
         throw std::runtime_error("Failed to create depth image!");
     }
 
-    // -----------------------------------------------------------------------------
     // 2) Allocate memory
-    // -----------------------------------------------------------------------------
-    VkMemoryRequirements memReq{};
+    VkMemoryRequirements memReq;
     vkGetImageMemoryRequirements(device, m_depthImage, &memReq);
 
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReq.size;
-
-    // We'll reuse the same memory-finding approach as in your VoxelWorld or Renderer
-    allocInfo.memoryTypeIndex = findMemoryType(
-        memReq.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
+    allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate depth image memory!");
@@ -225,9 +205,7 @@ void RenderPassManager::createDepthResources()
 
     vkBindImageMemory(device, m_depthImage, m_depthMemory, 0);
 
-    // -----------------------------------------------------------------------------
     // 3) Create image view
-    // -----------------------------------------------------------------------------
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = m_depthImage;
@@ -257,5 +235,5 @@ uint32_t RenderPassManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlag
             return i;
         }
     }
-    throw std::runtime_error("Failed to find suitable memory type for depth image!");
+    throw std::runtime_error("Failed to find suitable memory type!");
 }

@@ -53,7 +53,7 @@ VoxelWorld::~VoxelWorld()
         }
     }
 }
-
+//
 void VoxelWorld::initWorld()
 {
     Logger::Info("initWorld() => Generating a region of procedural chunks around (0,0).");

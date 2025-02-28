@@ -1,61 +1,54 @@
 #pragma once
 
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include <string>
-#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
-// -----------------------------------------------------------------------------
-// Class Definition
-// -----------------------------------------------------------------------------
 class Window
 {
 public:
-    // -----------------------------------------------------------------------------
-    // Constructor / Destructor
-    // -----------------------------------------------------------------------------
     /**
-     * Constructs a new window with the specified width, height, and title.
-     *
-     * @param width  The width of the window.
-     * @param height The height of the window.
-     * @param title  The title of the window.
+     * Creates a GLFW window of the specified width and height,
+     * with the given title. Also sets up Vulkan-related window hints.
      */
     Window(int width, int height, const std::string& title);
-
-    /**
-     * Destroys the window and terminates GLFW.
-     */
     ~Window();
 
-    // -----------------------------------------------------------------------------
-    // Public Methods
-    // -----------------------------------------------------------------------------
     /**
-     * Checks if the window should close (e.g., if the user has requested to close it).
-     *
-     * @return true if the window should close, false otherwise.
+     * @return true if the window should close (e.g., user pressed the X button).
      */
     bool shouldClose() const;
 
     /**
-     * Polls for window events (keyboard, mouse, etc.).
+     * Polls for and processes events (e.g., keyboard, mouse, resize).
      */
     void pollEvents();
 
     /**
-     * Retrieves the underlying GLFWwindow handle.
-     * This can be used by VulkanContext or other systems that need the GLFW window.
-     *
-     * @return Pointer to the GLFWwindow.
+     * @return The underlying GLFWwindow* pointer (useful for Vulkan surface creation).
      */
     GLFWwindow* getGLFWwindow() const { return m_window; }
 
+    /**
+     * @return true if the framebuffer was resized since last check.
+     */
+    bool wasResized() const { return m_framebufferResized; }
+
+    /**
+     * Resets the 'wasResized' flag to false.
+     * Call this after you handle a resize event.
+     */
+    void resetResizedFlag() { m_framebufferResized = false; }
+
 private:
-    // -----------------------------------------------------------------------------
-    // Member Variables
-    // -----------------------------------------------------------------------------
-    GLFWwindow* m_window = nullptr; ///< Pointer to the GLFW window
+    /**
+     * This static callback is used by GLFW to inform us when the framebuffer size changes.
+     * We store that info in m_framebufferResized so the rest of the code can react.
+     */
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
+
+private:
+    GLFWwindow* m_window = nullptr;
+
+    // Tracks whether the framebuffer was resized this frame.
+    bool m_framebufferResized = false;
 };

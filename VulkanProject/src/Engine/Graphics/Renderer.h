@@ -1,174 +1,186 @@
 #pragma once
 
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include <vulkan/vulkan.h>
-#include <glm/glm.hpp>
-#include <deque>    // For rolling averages
-#include "Engine/Scene/Camera.h"
+#include <glm/mat4x4.hpp>
+#include <vector>
+#include <string>
+#include <deque> // For std::deque usage
 
-// -----------------------------------------------------------------------------
-// Forward Declarations
-// -----------------------------------------------------------------------------
-class Window;              // We rely on this forward declaration instead of including the header
+// Include full Camera definition so we can store it by value:
+#include "Engine/Scene/Camera.h" 
+
+// Forward declarations
 class VulkanContext;
-class SwapChain;
+class Window;
 class ResourceManager;
 class PipelineManager;
 class RenderPassManager;
 class VoxelWorld;
 class Time;
 
-// -----------------------------------------------------------------------------
-// Structs
-// -----------------------------------------------------------------------------
 /**
- * A simple uniform block holding our MVP matrix.
+ * A small struct for the MVP uniform buffer block.
  */
-struct MVPBlock {
+struct MVPBlock
+{
     glm::mat4 mvp;
 };
 
 /**
- * Holds per-frame Vulkan resources, used in the "frames in flight" approach.
- * Each frame has its own command buffer, semaphores, and fence.
+ * A small struct holding the objects needed per frame:
+ * - A command buffer
+ * - Semaphores for image-available and render-finished
+ * - A fence to ensure GPU completion
  */
-struct FrameResources {
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkSemaphore     imageAvailableSemaphore = VK_NULL_HANDLE;
-    VkSemaphore     renderFinishedSemaphore = VK_NULL_HANDLE;
-    VkFence         inFlightFence = VK_NULL_HANDLE;
+struct FrameData
+{
+    VkCommandBuffer   commandBuffer = VK_NULL_HANDLE;
+    VkSemaphore       imageAvailableSemaphore = VK_NULL_HANDLE;
+    VkSemaphore       renderFinishedSemaphore = VK_NULL_HANDLE;
+    VkFence           inFlightFence = VK_NULL_HANDLE;
 };
 
-// -----------------------------------------------------------------------------
-// Class Definition
-// -----------------------------------------------------------------------------
+/**
+ * The Renderer class handles:
+ *   - Creating the SwapChain
+ *   - Creating the RenderPass & Framebuffers
+ *   - Setting up pipelines (fill / wireframe)
+ *   - Recording command buffers to draw voxel chunks
+ *   - Managing ImGui integration
+ *   - Recreating resources on window resize
+ */
 class Renderer
 {
 public:
-    // -------------------------------------------------------------------------
-    // Constructor / Destructor
-    // -------------------------------------------------------------------------
     /**
-     * @param context       Pointer to the VulkanContext.
-     * @param window        Pointer to the main window (GLFW).
-     * @param voxelWorld    Pointer to the existing VoxelWorld (so we don't create a second one).
+     * Constructor: creates the swapchain, render pass, pipelines, etc.
+     * @param context     The VulkanContext (must be initialized).
+     * @param window      The Window pointer for size queries and ImGui usage.
+     * @param voxelWorld  A pointer to the VoxelWorld, so we can draw it.
      */
     Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld);
+
+    /**
+     * Destructor: cleans up Vulkan resources in the proper order.
+     */
     ~Renderer();
 
-    // -------------------------------------------------------------------------
-    // Rendering and Updates
-    // -------------------------------------------------------------------------
     /**
-     * Renders one frame. Acquires a swapchain image, records command buffers,
-     * submits, and presents.
+     * Sets the Time pointer so we can query deltaTime, for debugging display (FPS).
      */
-    void renderFrame();
+    void setTime(Time* time) { m_time = time; }
 
     /**
-     * Sets the camera used for rendering (updates the internal camera state).
+     * Sets the camera so we can build MVP to pass to the shaders.
      */
     void setCamera(const Camera& cam);
 
     /**
-     * Toggles the wireframe pipeline vs. the fill pipeline.
+     * Toggles wireframe rendering on/off.
      */
     void toggleWireframe();
 
     /**
-     * Sets the Time pointer (so we can retrieve delta time, etc.).
+     * The per-frame render function: acquires a swapchain image, records
+     * and submits a command buffer, then presents the image.
      */
-    void setTime(Time* timePtr) { m_time = timePtr; }
-
-    // -------------------------------------------------------------------------
-    // Frustum Culling Toggle
-    // -------------------------------------------------------------------------
-    /**
-     * Enables or disables frustum culling for chunk rendering.
-     * @param enabled True to enable culling, false to disable.
-     */
-    void setFrustumCullingEnabled(bool enabled) { m_enableFrustumCulling = enabled; }
-
-    /**
-     * @return True if frustum culling is currently enabled, false otherwise.
-     */
-    bool isFrustumCullingEnabled() const { return m_enableFrustumCulling; }
+    void renderFrame();
 
 private:
-    // -------------------------------------------------------------------------
-    // Internal Helper Methods
-    // -------------------------------------------------------------------------
+    /**
+     * Creates the MVP uniform buffer and descriptor set for passing the MVP matrix.
+     */
     void createMVPUniformBuffer();
+
+    /**
+     * Helper to update the MVP uniform buffer each frame.
+     */
     void updateMVP();
 
     /**
-     * Helper to create a Vulkan buffer + memory allocation.
+     * Recreates the swapchain and all dependent resources when the window size changes
+     * or if the swapchain becomes invalid.
      */
-    void createBuffer(
-        VkDeviceSize size,
+    void recreateSwapChain();
+
+    /**
+     * A helper to create a buffer (vertex, index, uniform, etc.),
+     * allocate memory, and bind them together.
+     */
+    void createBuffer(VkDeviceSize size,
         VkBufferUsageFlags usage,
         VkMemoryPropertyFlags properties,
         VkBuffer& buffer,
-        VkDeviceMemory& bufferMemory
-    );
+        VkDeviceMemory& bufferMemory);
 
     /**
-     * Finds a suitable memory type index for a buffer.
-     */
-    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
-
-    /**
-     * Adds a new sample to the rolling buffer, popping the oldest if at capacity.
+     * Adds a new sample to a deque (removing the oldest if we exceed ROLLING_AVG_SAMPLES).
      */
     void addSample(std::deque<float>& buffer, float value);
 
     /**
-     * Computes the average of the rolling buffer.
+     * Computes the average of the values in a std::deque<float>.
      */
-    float computeAverage(const std::deque<float>& buffer);
+    static float computeAverage(const std::deque<float>& buffer);
+
+    /**
+     * Finds a suitable memory type on the GPU that matches the filter and properties.
+     */
+    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
 private:
-    // -------------------------------------------------------------------------
-    // Member Variables
-    // -------------------------------------------------------------------------
-    VulkanContext* m_context = nullptr;   ///< Pointer to the Vulkan context
-    Window* m_window = nullptr;           ///< Pointer to the window
+    // Constants
+    static const int MAX_FRAMES_IN_FLIGHT = 2;
 
-    SwapChain* m_swapChain = nullptr;              ///< Manages the swap chain
-    ResourceManager* m_resourceMgr = nullptr;      ///< Manages shader modules, etc.
-    PipelineManager* m_pipelineMgr = nullptr;      ///< Manages graphics pipelines
-    RenderPassManager* m_rpManager = nullptr;      ///< Manages render passes
-    VoxelWorld* m_voxelWorld = nullptr;            ///< Now passed in via constructor
+    // You may want an extra constant for your rolling average buffer size:
+    static const int ROLLING_AVG_SAMPLES = 60;
 
-    // MVP Data
-    VkBuffer       m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_mvpMemory = VK_NULL_HANDLE;
-    VkDescriptorPool     m_mvpDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
-    VkDescriptorSet      m_mvpDescriptorSet = VK_NULL_HANDLE;
+    // The VulkanContext provides instance, device, queues, etc.
+    VulkanContext* m_context = nullptr;
+
+    // The Window for size queries and ImGui setup
+    Window* m_window = nullptr;
+
+    // A pointer to the Time system for reading dt/fps (optional)
+    Time* m_time = nullptr;
+
+    // The swapchain we create for drawing to the screen
+    class SwapChain* m_swapChain = nullptr;
+
+    // Resource + pipeline managers
+    ResourceManager* m_resourceMgr = nullptr;
+    PipelineManager* m_pipelineMgr = nullptr;
+    RenderPassManager* m_rpManager = nullptr;
+
+    // The voxel world to draw
+    VoxelWorld* m_voxelWorld = nullptr;
 
     // ImGui descriptor pool
     VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
 
-    // Number of frames we can process simultaneously
-    static const int MAX_FRAMES_IN_FLIGHT = 2;
+    // MVP uniform buffer
+    VkBuffer             m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory       m_mvpMemory = VK_NULL_HANDLE;
+    VkDescriptorPool     m_mvpDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
+    VkDescriptorSet       m_mvpDescriptorSet = VK_NULL_HANDLE;
 
-    // Per-frame resources (command buffer, semaphores, fence)
-    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
+    // Whether wireframe mode is on
+    bool m_wireframeOn = false;
 
-    // Which frame index we're currently on
-    uint32_t       m_currentFrame = 0;
+    // Whether to use frustum culling
+    bool m_enableFrustumCulling = false;
 
-    // Internal flags / data
-    bool   m_wireframeOn = false;           ///< Whether wireframe mode is on
-    bool   m_enableFrustumCulling = false;  ///< Whether frustum culling is enabled
-    Camera m_camera;
-    Time* m_time = nullptr;
-
-    // Rolling averages
-    static constexpr int ROLLING_AVG_SAMPLES = 60; ///< Number of samples for rolling averages
+    // Rolling average containers for FPS, CPU usage, or anything else
     std::deque<float> m_fpsSamples;
     std::deque<float> m_cpuSamples;
+
+    // Camera
+    Camera m_camera;
+
+    // Each frame in flight has its own command buffer, semaphores, fence, etc.
+    FrameData m_frames[MAX_FRAMES_IN_FLIGHT];
+
+    // Current frame index (0 or 1 when using double-buffering)
+    int m_currentFrame = 0;
 };
