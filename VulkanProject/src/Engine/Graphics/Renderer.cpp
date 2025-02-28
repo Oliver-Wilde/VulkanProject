@@ -1,5 +1,5 @@
 #include "Renderer.h"
-#include "Engine/Core/Window.h"         // For m_window->getGLFWwindow()
+#include "Engine/Core/Window.h"
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Graphics/SwapChain.h"
 #include "Engine/Resources/ResourceManager.h"
@@ -11,12 +11,10 @@
 #include "Engine/Core/Time.h"
 #include "../Utils/CpuProfiler.h"
 
-// Include ImGui + backends
 #include "../External Libraries/imgui/imgui.h"
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
 #include "../External Libraries/imgui/backends/imgui_impl_vulkan.h"
 
-// Include your Frustum utility
 #include "Frustum.h"
 
 #include <stdexcept>
@@ -24,22 +22,17 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <Engine/Utils/Logger.h>
-#include <deque>  // needed for addSample, computeAverage usag
-#include <Engine/Utils/ThreadPool.h>// needed for addSample, computeAverage usage
+#include <deque>
+#include <Engine/Utils/ThreadPool.h>
 
-// A global CPU profiler used for display in ImGui
+// If you want to query CPU usage
 static CpuProfiler g_cpuProfiler;
 
-// If you want to reference the global thread pool:
-extern ThreadPool g_threadPool;
-
-// -----------------------------------------------------------------------------
-// A helper to build the camera frustum from your current camera state
-// -----------------------------------------------------------------------------
+// For frustum build
 static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
     float aspect = float(extent.width) / float(extent.height);
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(45.f), aspect, 0.1f, 1000.f);
     // Flip Y for Vulkan
     proj[1][1] *= -1.f;
 
@@ -51,30 +44,25 @@ static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
     return frustum;
 }
 
-// -----------------------------------------------------------------------------
-// Constructor
-// -----------------------------------------------------------------------------
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
     : m_context(context)
     , m_window(window)
     , m_voxelWorld(voxelWorld)
 {
-    // 1) Create SwapChain (pass the Window to init so we can query size)
+    // 1) Create swapchain
     m_swapChain = new SwapChain();
     m_swapChain->init(m_context, m_window);
 
-    // 2) Create Managers
+    // 2) Create resource & pipeline managers
     m_resourceMgr = new ResourceManager(m_context);
     m_pipelineMgr = new PipelineManager(m_context, m_resourceMgr);
     m_rpManager = new RenderPassManager(m_context, m_swapChain);
 
-    // 3) Create Render Pass & Framebuffers
+    // 3) Render pass & framebuffers
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
-    // -----------------------------------------
-    // Create an ImGui descriptor pool
-    // -----------------------------------------
+    // 4) Create an ImGui descriptor pool
     {
         VkDescriptorPoolSize poolSizes[] = {
             { VK_DESCRIPTOR_TYPE_SAMPLER,                1000 },
@@ -104,26 +92,20 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         }
     }
 
-    // 4) Pipelines
+    // 5) Pipelines
     auto extent = m_swapChain->getExtent();
     auto renderPass = m_rpManager->getRenderPass();
 
-    // Create a descriptor set layout for MVP
     m_mvpLayout = m_pipelineMgr->createMVPDescriptorSetLayout();
-
-    // Create fill + wireframe pipelines
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    // 5) Create MVP Uniform Buffer
+    // 6) MVP Uniform Buffer
     createMVPUniformBuffer();
 
-    // -----------------------------------------
-    // Create 2 frames in flight
-    // -----------------------------------------
+    // 7) Create 2 frames in flight
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        // Command buffer
         VkCommandBufferAllocateInfo cmdAlloc{};
         cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         cmdAlloc.commandPool = m_context->getCommandPool();
@@ -147,7 +129,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
             throw std::runtime_error("Failed to create semaphores for frame " + std::to_string(i));
         }
 
-        // Fence (start signaled so we can use it immediately)
+        // Fence
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -159,19 +141,18 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         }
     }
 
-    // -----------------------------------------
-    // Initialize ImGui for Vulkan + GLFW
-    // -----------------------------------------
+    // 8) Initialize ImGui
     {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
+        // If you need advanced config, do it here
 
-        // Initialize ImGui for GLFW
+        // Setup ImGui for GLFW
         GLFWwindow* glfwWindow = m_window->getGLFWwindow();
         ImGui_ImplGlfw_InitForVulkan(glfwWindow, true);
 
-        // Setup ImGui Vulkan init info
+        // Setup ImGui Vulkan init
         ImGui_ImplVulkan_InitInfo init_info{};
         init_info.Instance = m_context->getInstance();
         init_info.PhysicalDevice = m_context->getPhysicalDevice();
@@ -209,7 +190,6 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
 
         vkEndCommandBuffer(cmdBuf);
 
-        // Submit & wait
         VkSubmitInfo submitInfo2{};
         submitInfo2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo2.commandBufferCount = 1;
@@ -223,97 +203,98 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     }
 }
 
-// -----------------------------------------------------------------------------
-// Destructor
-// -----------------------------------------------------------------------------
 Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // Clean per-frame resources
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (m_frames[i].commandBuffer) {
+    // Per-frame
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (m_frames[i].commandBuffer)
+        {
             vkFreeCommandBuffers(m_context->getDevice(),
                 m_context->getCommandPool(),
                 1,
                 &m_frames[i].commandBuffer);
             m_frames[i].commandBuffer = VK_NULL_HANDLE;
         }
-        if (m_frames[i].imageAvailableSemaphore) {
+        if (m_frames[i].imageAvailableSemaphore)
+        {
             vkDestroySemaphore(m_context->getDevice(),
-                m_frames[i].imageAvailableSemaphore,
-                nullptr);
+                m_frames[i].imageAvailableSemaphore, nullptr);
             m_frames[i].imageAvailableSemaphore = VK_NULL_HANDLE;
         }
-        if (m_frames[i].renderFinishedSemaphore) {
+        if (m_frames[i].renderFinishedSemaphore)
+        {
             vkDestroySemaphore(m_context->getDevice(),
-                m_frames[i].renderFinishedSemaphore,
-                nullptr);
+                m_frames[i].renderFinishedSemaphore, nullptr);
             m_frames[i].renderFinishedSemaphore = VK_NULL_HANDLE;
         }
-        if (m_frames[i].inFlightFence) {
+        if (m_frames[i].inFlightFence)
+        {
             vkDestroyFence(m_context->getDevice(),
-                m_frames[i].inFlightFence,
-                nullptr);
+                m_frames[i].inFlightFence, nullptr);
             m_frames[i].inFlightFence = VK_NULL_HANDLE;
         }
     }
 
-    // Cleanup MVP
-    if (m_mvpBuffer) {
+    // MVP
+    if (m_mvpBuffer)
+    {
         vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
         m_mvpBuffer = VK_NULL_HANDLE;
     }
-    if (m_mvpMemory) {
+    if (m_mvpMemory)
+    {
         vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
         m_mvpMemory = VK_NULL_HANDLE;
     }
-    if (m_mvpDescriptorPool) {
+    if (m_mvpDescriptorPool)
+    {
         vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
         m_mvpDescriptorPool = VK_NULL_HANDLE;
     }
-    if (m_mvpLayout) {
+    if (m_mvpLayout)
+    {
         vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
         m_mvpLayout = VK_NULL_HANDLE;
     }
 
-    // ImGui Shutdown
+    // ImGui
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    // Destroy ImGui descriptor pool
-    if (m_imguiDescriptorPool) {
+    if (m_imguiDescriptorPool)
+    {
         vkDestroyDescriptorPool(m_context->getDevice(), m_imguiDescriptorPool, nullptr);
         m_imguiDescriptorPool = VK_NULL_HANDLE;
     }
 
-    // If your Application is the actual owner of m_voxelWorld, remove this line:
-    // delete m_voxelWorld;
-
+    // Managers
     delete m_rpManager;
     delete m_pipelineMgr;
     delete m_resourceMgr;
 
-    if (m_swapChain) {
+    if (m_swapChain)
+    {
         m_swapChain->cleanup();
         delete m_swapChain;
         m_swapChain = nullptr;
     }
 }
 
-// -----------------------------------------------------------------------------
-// createMVPUniformBuffer
-// -----------------------------------------------------------------------------
 void Renderer::createMVPUniformBuffer()
 {
     VkDeviceSize bufferSize = sizeof(MVPBlock);
 
-    createBuffer(bufferSize,
+    createBuffer(
+        bufferSize,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_mvpBuffer,
-        m_mvpMemory);
+        m_mvpMemory
+    );
 
     // Create descriptor pool for exactly 1 UBO
     VkDescriptorPoolSize poolSize{};
@@ -359,26 +340,26 @@ void Renderer::createMVPUniformBuffer()
     vkUpdateDescriptorSets(m_context->getDevice(), 1, &descWrite, 0, nullptr);
 }
 
-// -----------------------------------------------------------------------------
-// setCamera
-// -----------------------------------------------------------------------------
 void Renderer::setCamera(const Camera& cam)
 {
     m_camera = cam;
 }
 
-// -----------------------------------------------------------------------------
-// updateMVP
-// -----------------------------------------------------------------------------
+void Renderer::toggleWireframe()
+{
+    m_wireframeOn = !m_wireframeOn;
+}
+
 void Renderer::updateMVP()
 {
-    glm::mat4 model = glm::mat4(1.f);
+    glm::mat4 model = glm::mat4(1.0f);
     glm::mat4 view = m_camera.getViewMatrix();
-    glm::mat4 proj = glm::perspective(glm::radians(45.f),
-        float(m_swapChain->getExtent().width) /
-        float(m_swapChain->getExtent().height),
-        0.1f, 100.f);
-    proj[1][1] *= -1.f; // Flip Y for Vulkan
+    glm::mat4 proj = glm::perspective(
+        glm::radians(45.f),
+        float(m_swapChain->getExtent().width) / float(m_swapChain->getExtent().height),
+        0.1f, 1000.f
+    );
+    proj[1][1] *= -1.f; // flip Y for Vulkan
 
     MVPBlock block{};
     block.mvp = proj * view * model;
@@ -389,62 +370,41 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
-// -----------------------------------------------------------------------------
-// toggleWireframe
-// -----------------------------------------------------------------------------
-void Renderer::toggleWireframe()
+/**
+ * A simple function to decide LOD level based on distance to chunk center.
+ * You can tweak thresholds or do a more advanced approach.
+ */
+static int computeLODLevel(float dist)
 {
-    m_wireframeOn = !m_wireframeOn;
+    if (dist < 40.f) return 0;  // close => LOD0
+    else if (dist < 80.f) return 1;
+    else return 2;             // far => LOD2
 }
 
-// -----------------------------------------------------------------------------
-// Rolling-average helpers
-// -----------------------------------------------------------------------------
-void Renderer::addSample(std::deque<float>& buffer, float value)
-{
-    if (buffer.size() >= ROLLING_AVG_SAMPLES) {
-        buffer.pop_front();
-    }
-    buffer.push_back(value);
-}
-
-float Renderer::computeAverage(const std::deque<float>& buffer)
-{
-    if (buffer.empty()) return 0.0f;
-    float sum = 0.f;
-    for (float val : buffer) {
-        sum += val;
-    }
-    return sum / static_cast<float>(buffer.size());
-}
-
-// -----------------------------------------------------------------------------
-// renderFrame
-// -----------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
-    // 1) Wait for this frame’s fence => ensure GPU is done with last usage
+    // Wait on the fence for this frame
     vkWaitForFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence,
         VK_TRUE,
         UINT64_MAX);
 
-    // 2) Reset fence so we can use it again
+    // Reset it
     vkResetFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence);
 
-    // 3) Update MVP
+    // Update MVP
     updateMVP();
 
-    // (Optional) Build the frustum if culling is on
+    // Possibly build frustum if culling
     Frustum frustum;
     if (m_enableFrustumCulling) {
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
-    // 4) Acquire swapchain image
+    // Acquire swapchain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
@@ -454,7 +414,6 @@ void Renderer::renderFrame()
         VK_NULL_HANDLE,
         &imageIndex
     );
-
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         recreateSwapChain();
         return;
@@ -463,35 +422,36 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to acquire swapchain image!");
     }
 
-    // 5) Reset command buffer
+    // Reset command buffer
     VkCommandBuffer cmdBuf = m_frames[m_currentFrame].commandBuffer;
     vkResetCommandBuffer(cmdBuf, 0);
 
-    // 6) Begin command buffer
+    // Begin command buffer
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS) {
+    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-    // 7) Render pass
+    // Begin render pass
     VkClearValue clearVals[2];
-    clearVals[0].color = { { 0.1f, 0.2f, 0.3f, 1.f } };
+    clearVals[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clearVals[1].depthStencil = { 1.f, 0 };
 
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpBegin.renderPass = m_rpManager->getRenderPass();
     rpBegin.framebuffer = m_rpManager->getFramebuffers()[imageIndex];
-    rpBegin.renderArea.offset = { 0, 0 };
+    rpBegin.renderArea.offset = { 0,0 };
     rpBegin.renderArea.extent = m_swapChain->getExtent();
     rpBegin.clearValueCount = 2;
     rpBegin.pClearValues = clearVals;
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 8) Pipeline + descriptor sets
-    std::string pipelineName = (m_wireframeOn) ? "voxel_wireframe" : "voxel_fill";
+    // Choose pipeline
+    std::string pipelineName = (m_wireframeOn ? "voxel_wireframe" : "voxel_fill");
     PipelineInfo pipelineInfo = m_pipelineMgr->getPipeline(pipelineName);
 
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
@@ -501,36 +461,85 @@ void Renderer::renderFrame()
         0, 1, &m_mvpDescriptorSet,
         0, nullptr);
 
-    // 9) Draw chunks from m_voxelWorld
+    // Stats counters
     uint32_t totalVertices = 0;
     uint32_t drawCallCount = 0;
-    float dt = (m_time) ? m_time->getDeltaTime() : 0.f;
-    float fps = (dt > 0.f) ? 1.f / dt : 0.f;
+    float dt = (m_time ? m_time->getDeltaTime() : 0.f);
+    float fps = (dt > 0.f ? 1.f / dt : 0.f);
 
-    // We'll push the fps sample, then compute average if we want it:
     addSample(m_fpsSamples, fps);
     float avgFps = computeAverage(m_fpsSamples);
 
-    // CPU usage
     float cpuUsage = g_cpuProfiler.GetCpuUsage();
     addSample(m_cpuSamples, cpuUsage);
     float avgCpu = computeAverage(m_cpuSamples);
 
-    // If there's a voxel world, draw it:
-    if (m_voxelWorld) {
+    // Draw chunks
+    if (m_voxelWorld)
+    {
         const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
-        for (auto& kv : allChunks) {
+        for (auto& kv : allChunks)
+        {
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
-                chunk->getIndexBuffer() == VK_NULL_HANDLE)
+            // Compute distance from camera to chunk center
+            // e.g. chunk center = (chunk->worldX() + 0.5)*Chunk::SIZE_X, etc.
+            float chunkCenterX = (chunk->worldX() + 0.5f) * float(Chunk::SIZE_X);
+            float chunkCenterY = (chunk->worldY() + 0.5f) * float(Chunk::SIZE_Y);
+            float chunkCenterZ = (chunk->worldZ() + 0.5f) * float(Chunk::SIZE_Z);
+
+            glm::vec3 diff = (m_camera.position
+                - glm::vec3(chunkCenterX, chunkCenterY, chunkCenterZ));
+            float dist = glm::length(diff);
+
+            // Decide which LOD to use
+            int lodLevel = computeLODLevel(dist);
+
+            // Access chunk’s LOD data
+            const auto& lodData = chunk->getLODData(lodLevel);
+
+            // If LOD not valid, skip or fallback
+            if (!lodData.valid)
+            {
+                // Fallback to LOD0 if available
+                const auto& fallbackLOD = chunk->getLODData(0);
+                if (!fallbackLOD.valid) {
+                    // skip entirely
+                    continue;
+                }
+                else {
+                    // use LOD0
+                    // But LOD0 is basically chunk->getVertexBuffer()...
+                    // We'll do:
+                    if (fallbackLOD.vertexBuffer == VK_NULL_HANDLE
+                        || fallbackLOD.indexBuffer == VK_NULL_HANDLE
+                        || fallbackLOD.indexCount == 0)
+                    {
+                        continue;
+                    }
+                    VkDeviceSize offsets[] = { 0 };
+                    vkCmdBindVertexBuffers(cmdBuf, 0, 1, &fallbackLOD.vertexBuffer, offsets);
+                    vkCmdBindIndexBuffer(cmdBuf, fallbackLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    vkCmdDrawIndexed(cmdBuf, fallbackLOD.indexCount, 1, 0, 0, 0);
+                    totalVertices += fallbackLOD.vertexCount;
+                    drawCallCount++;
+                }
+                continue;
+            }
+
+            // If LOD data is valid
+            if (lodData.vertexBuffer == VK_NULL_HANDLE
+                || lodData.indexBuffer == VK_NULL_HANDLE
+                || lodData.indexCount == 0)
             {
                 continue;
             }
 
-            // Frustum cull if enabled
-            if (m_enableFrustumCulling) {
+            // Optional frustum cull
+            if (m_enableFrustumCulling)
+            {
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
                 if (!frustum.intersectsAABB(minB, maxB)) {
@@ -538,22 +547,18 @@ void Renderer::renderFrame()
                 }
             }
 
-            totalVertices += chunk->getVertexCount();
-
+            // Bind and draw
             VkDeviceSize offsets[] = { 0 };
-            VkBuffer vb = chunk->getVertexBuffer();
-            vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
-            vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdBindVertexBuffers(cmdBuf, 0, 1, &lodData.vertexBuffer, offsets);
+            vkCmdBindIndexBuffer(cmdBuf, lodData.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-            uint32_t idxCount = chunk->getIndexCount();
-            if (idxCount > 0) {
-                vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
-                drawCallCount++;
-            }
+            vkCmdDrawIndexed(cmdBuf, lodData.indexCount, 1, 0, 0, 0);
+            totalVertices += lodData.vertexCount;
+            drawCallCount++;
         }
     }
 
-    // 10) ImGui
+    // ImGui overlay
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -571,32 +576,26 @@ void Renderer::renderFrame()
     ImGui::Text("Vertex Count:  %u", totalVertices);
     ImGui::Text("Draw Calls:    %u", drawCallCount);
 
-    // If there's a voxel world, show chunk stats
     if (m_voxelWorld) {
         auto& chunkMgr = m_voxelWorld->getChunkManager();
-        ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
-
-        // If you also track total voxel usage:
+        ImGui::Text("Chunk Count: %zu", chunkMgr.getAllChunks().size());
         auto usage = chunkMgr.getTotalVoxelUsage();
         ImGui::Text("Active Voxels: %zu", usage.first);
         ImGui::Text("Empty Voxels:  %zu", usage.second);
     }
-
-    // Show the ImGui panel
     ImGui::End();
 
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuf);
 
-    // End render pass
     vkCmdEndRenderPass(cmdBuf);
 
-    // End command buffer
-    if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS) {
+    if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to record command buffer!");
     }
 
-    // 11) Submit
+    // Submit
     VkSemaphore waitSemaphores[] = { m_frames[m_currentFrame].imageAvailableSemaphore };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
     VkSemaphore signalSemaphores[] = { m_frames[m_currentFrame].renderFinishedSemaphore };
@@ -617,7 +616,7 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to submit draw command buffer!");
     }
 
-    // 12) Present
+    // Present
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -628,27 +627,77 @@ void Renderer::renderFrame()
     presentInfo.pImageIndices = &imageIndex;
 
     result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    {
         recreateSwapChain();
     }
-    else if (result != VK_SUCCESS) {
+    else if (result != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to present swapchain image!");
     }
 
-    // 13) Advance frame index
+    // Advance
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-// -----------------------------------------------------------------------------
-// createBuffer & findMemoryType
-// -----------------------------------------------------------------------------
+/**
+ * Recreate swapchain on resize or invalidation.
+ */
+void Renderer::recreateSwapChain()
+{
+    int width, height;
+    glfwGetFramebufferSize(m_window->getGLFWwindow(), &width, &height);
+    if (width == 0 || height == 0) {
+        return; // window minimized
+    }
+
+    vkDeviceWaitIdle(m_context->getDevice());
+
+    m_rpManager->cleanup();
+    m_swapChain->cleanup();
+
+    m_swapChain->init(m_context, m_window);
+    m_rpManager->createRenderPass();
+    m_rpManager->createFramebuffers();
+
+    // Rebuild pipelines
+    vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
+    m_mvpLayout = VK_NULL_HANDLE;
+
+    auto extent = m_swapChain->getExtent();
+    auto renderPass = m_rpManager->getRenderPass();
+
+    m_mvpLayout = m_pipelineMgr->createMVPDescriptorSetLayout();
+    m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
+    m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
+
+    // Recreate the MVP uniform + descriptor
+    if (m_mvpBuffer) {
+        vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
+        m_mvpBuffer = VK_NULL_HANDLE;
+    }
+    if (m_mvpMemory) {
+        vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
+        m_mvpMemory = VK_NULL_HANDLE;
+    }
+    if (m_mvpDescriptorPool) {
+        vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
+        m_mvpDescriptorPool = VK_NULL_HANDLE;
+    }
+
+    createMVPUniformBuffer();
+
+    // If ImGui needs updating:
+    ImGui_ImplVulkan_SetMinImageCount(2);
+    
+}
+
 void Renderer::createBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
     VkBuffer& buffer,
-    VkDeviceMemory& bufferMemory
-)
+    VkDeviceMemory& bufferMemory)
 {
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -680,7 +729,8 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &memProps);
 
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+    {
         if ((filter & (1 << i)) &&
             (memProps.memoryTypes[i].propertyFlags & props) == props)
         {
@@ -690,65 +740,20 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-// -----------------------------------------------------------------------------
-// recreateSwapChain
-// -----------------------------------------------------------------------------
-void Renderer::recreateSwapChain()
+void Renderer::addSample(std::deque<float>& buffer, float value)
 {
-    // If window is minimized (width=0 or height=0), just pause
-    int width = 0, height = 0;
-    glfwGetFramebufferSize(m_window->getGLFWwindow(), &width, &height);
-    if (width == 0 || height == 0) {
-        return;
+    if (buffer.size() >= ROLLING_AVG_SAMPLES) {
+        buffer.pop_front();
     }
+    buffer.push_back(value);
+}
 
-    vkDeviceWaitIdle(m_context->getDevice());
-
-    // 1) Cleanup old framebuffers/render pass
-    m_rpManager->cleanup();
-
-    // 2) Cleanup old swapchain
-    m_swapChain->cleanup();
-
-    // 3) Re-init the swapchain with updated size
-    m_swapChain->init(m_context, m_window);
-
-    // 4) Recreate the render pass + framebuffers
-    m_rpManager->createRenderPass();
-    m_rpManager->createFramebuffers();
-
-    // 5) Recreate pipelines
-    vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
-    m_mvpLayout = VK_NULL_HANDLE;
-
-    auto extent = m_swapChain->getExtent();
-    auto renderPass = m_rpManager->getRenderPass();
-
-    m_mvpLayout = m_pipelineMgr->createMVPDescriptorSetLayout();
-    m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
-    m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
-
-    // 6) Recreate the MVP uniform buffer + descriptor set
-    if (m_mvpBuffer) {
-        vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
-        m_mvpBuffer = VK_NULL_HANDLE;
+float Renderer::computeAverage(const std::deque<float>& buffer)
+{
+    if (buffer.empty()) return 0.f;
+    float sum = 0.f;
+    for (float val : buffer) {
+        sum += val;
     }
-    if (m_mvpMemory) {
-        vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
-        m_mvpMemory = VK_NULL_HANDLE;
-    }
-    if (m_mvpDescriptorPool) {
-        vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
-        m_mvpDescriptorPool = VK_NULL_HANDLE;
-    }
-
-    createMVPUniformBuffer();
-
-    // 7) If needed, re-init ImGui for the new swapchain size
-    ImGui_ImplVulkan_SetMinImageCount(2);
-
-    // If your ImGui version has no ImGui_ImplVulkanH_CreateOrResizeWindow, comment it out:
-    // ImGui_ImplVulkanH_CreateOrResizeWindow(...);
-
-    // Next frame will proceed with the updated swapchain
+    return sum / float(buffer.size());
 }

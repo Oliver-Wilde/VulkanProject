@@ -1,50 +1,34 @@
 #pragma once
 
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include <vector>
 #include "Chunk.h"
 #include "ChunkManager.h"
 
-// -----------------------------------------------------------------------------
-// Struct Definition
-// -----------------------------------------------------------------------------
 /**
  * Represents a single mesh vertex with position and color (or any other attribute).
  */
 struct Vertex
 {
     float px, py, pz; ///< Position (x, y, z)
-    float cx, cy, cz; ///< Color (r, g, b) or other attribute
+    float cx, cy, cz; ///< Color (r, g, b)
 
     Vertex(float px_, float py_, float pz_,
         float cx_, float cy_, float cz_)
         : px(px_), py(py_), pz(pz_),
         cx(cx_), cy(cy_), cz(cz_)
-    {
-    }
+    {}
 };
 
-// -----------------------------------------------------------------------------
-// Class Definition
-// -----------------------------------------------------------------------------
+/**
+ * The ChunkMesher class can build a mesh (vertices + indices) from a chunk’s voxel data.
+ * It supports naive or "greedy" meshing, plus a new method to mesh from a custom array.
+ */
 class ChunkMesher
 {
 public:
-    // -----------------------------------------------------------------------------
-    // Public Methods
-    // -----------------------------------------------------------------------------
-
     /**
-     * Generates a naive mesh of the given chunk by checking each visible face.
-     *
-     * @param chunk         Reference to the chunk from which to generate mesh data.
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space).
-     * @param outVertices   Output vector of vertices.
-     * @param outIndices    Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offset to apply to all positions (usually world position).
-     * @param manager       Reference to the ChunkManager for neighbor checks.
+     * Generates a naive mesh of the given chunk by checking each visible face
+     * in chunk space, also checking neighbor chunks if needed.
      */
     void generateMeshNaive(
         const Chunk& chunk,
@@ -56,14 +40,7 @@ public:
     );
 
     /**
-     * Generates a "greedy" mesh of the given chunk by merging faces where possible.
-     *
-     * @param chunk         Reference to the chunk from which to generate mesh data.
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space).
-     * @param outVertices   Output vector of vertices.
-     * @param outIndices    Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offset to apply to all positions (usually world position).
-     * @param manager       Reference to the ChunkManager for neighbor checks.
+     * Greedy meshing approach that merges faces where possible, for fewer triangles.
      */
     void generateMeshGreedy(
         const Chunk& chunk,
@@ -75,12 +52,7 @@ public:
     );
 
     /**
-     * A simple test function demonstrating naive mesh creation without neighbor checks.
-     *
-     * @param chunk         Reference to the chunk.
-     * @param outVerts      Output vector of vertices.
-     * @param outInds       Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offsets for positioning in world space.
+     * A simpler, naive approach used for testing. Ignores adjacency with neighbor chunks.
      */
     void generateMeshNaiveTest(
         const Chunk& chunk,
@@ -90,16 +62,8 @@ public:
     );
 
     /**
-     * Checks if the chunk is dirty and, if so, generates a mesh using either naive or greedy meshing.
-     *
-     * @param chunk         Reference to the chunk (non-const because we may clear the dirty flag).
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space).
-     * @param outVertices   Output vector of vertices.
-     * @param outIndices    Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offsets for positioning in world space.
-     * @param manager       Reference to the ChunkManager for neighbor checks.
-     * @param useGreedy     If true, uses greedy meshing; otherwise, uses naive meshing.
-     * @return true if the mesh was generated (chunk was dirty), false otherwise.
+     * Checks if the chunk is dirty and, if so, generates a mesh (either naive or greedy).
+     * This is your existing function, focusing on LOD0 usage.
      */
     bool generateChunkMeshIfDirty(
         Chunk& chunk,
@@ -111,27 +75,39 @@ public:
         bool useGreedy = true
     );
 
-private:
-    // -----------------------------------------------------------------------------
-    // Private Helper Methods
-    // -----------------------------------------------------------------------------
-
+    // -------------------------------------------------------------------------
+    // NEW: For building an LOD mesh from a *downsampled* voxel array.
+    // -------------------------------------------------------------------------
     /**
-     * Checks if a given voxelID represents a solid block.
+     * Builds a mesh (naive or greedy) from an in-memory voxel array that
+     * doesn't necessarily match the chunk's full resolution. This allows
+     * generating LOD1, LOD2, etc. from a smaller array.
      *
-     * @param voxelID The ID of the voxel to check.
-     * @return true if solid, false if not.
+     * @param voxelArray  A downsampled array of size dsX * dsY * dsZ.
+     * @param dsX, dsY, dsZ  Dimensions of the voxelArray.
+     * @param worldOffsetX,Y,Z  The world-space offset for these voxels.
+     * @param outVertices / outIndices  Where the mesh data is appended.
+     * @param useGreedy   If true, merges faces with a greedy approach.
+     * @note If you want to consider adjacency with neighbor chunks at LOD,
+     *       you'll need more advanced logic. Usually we skip neighbor adjacency at coarser LODs.
+     */
+    void generateMeshFromArray(
+        const std::vector<int>& voxelArray,
+        int dsX, int dsY, int dsZ,
+        int worldOffsetX, int worldOffsetY, int worldOffsetZ,
+        std::vector<Vertex>& outVertices,
+        std::vector<uint32_t>& outIndices,
+        bool useGreedy = false
+    );
+
+private:
+    /**
+     * Checks if a voxelID is "solid" by looking up its VoxelType in VoxelTypeRegistry.
      */
     static bool isSolidID(int voxelID);
 
     /**
-     * Checks if a voxel is solid in the global sense, taking into account neighboring chunks.
-     *
-     * @param currentChunk  Reference to the current chunk.
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space) of the current chunk.
-     * @param x, y, z       Local coordinates within the chunk.
-     * @param manager       Reference to the ChunkManager for neighbor checks.
-     * @return true if solid, false otherwise.
+     * Checks if (x,y,z) is solid, considering neighbor chunks. (Used by naive/greedy mesh.)
      */
     static bool isSolidGlobal(
         const Chunk& currentChunk,
@@ -140,9 +116,9 @@ private:
         const ChunkManager& manager
     );
 
-    // -----------------------------------------------------------------------------
-    // Build Quad Methods (used in greedy meshing)
-    // -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Internal buildQuad... methods for the greedy approach
+    // -------------------------------------------------------------------------
     void buildQuadPosZ(
         int startX, int startY, int width, int height, int z,
         int offsetX, int offsetY, int offsetZ, int blockID,

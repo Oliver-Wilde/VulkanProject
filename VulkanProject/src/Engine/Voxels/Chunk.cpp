@@ -1,35 +1,32 @@
 #include "Chunk.h"
 #include <stdexcept>
-#include <cstddef>         // for size_t
-#include <glm/vec3.hpp>    // for glm::vec3
-#include <utility>         // for std::pair
+#include <cstddef>       // for size_t
+#include <glm/vec3.hpp>  // for glm::vec3
+#include <utility>       // for std::pair
 
-// -----------------------------------------------------------------------------
-// Constructor / Destructor
-// -----------------------------------------------------------------------------
 Chunk::Chunk(int worldX, int worldY, int worldZ)
     : m_worldX(worldX)
     , m_worldY(worldY)
     , m_worldZ(worldZ)
-    , m_dirty(true)        // By default, it's dirty => needs initial mesh
-    , m_isUploading(false) // Not uploading initially
 {
-    // Allocate block data
+    // Allocate block data: 16x16x16 by default => 4096 ints
     size_t total = static_cast<size_t>(SIZE_X)
         * static_cast<size_t>(SIZE_Y)
         * static_cast<size_t>(SIZE_Z);
     m_blocks.resize(total, 0); // 0 => "Air"
+
+    // Initially, mark all LODs dirty (true). 
+    // Already done in the member initializer list: {true,true,true}
+    // so there's no extra code needed here for LOD dirty flags.
 }
 
 Chunk::~Chunk()
 {
-    // Typically we don't destroy the chunk's GPU buffers here.
-    // The manager or VoxelWorld might handle that before device destruction.
+    // Typically, GPU buffer destruction is done elsewhere (e.g. VoxelWorld)
+    // so no special cleanup here. 
+    // (But if desired, you could do it here.)
 }
 
-// -----------------------------------------------------------------------------
-// Block Access
-// -----------------------------------------------------------------------------
 int Chunk::getBlock(int x, int y, int z) const
 {
     // Bounds check
@@ -37,15 +34,16 @@ int Chunk::getBlock(int x, int y, int z) const
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        // Return -1 or "Air" ID to indicate out-of-bounds
+        // Return -1 if out-of-bounds => treat as air
         return -1;
     }
 
-    // Calculate 1D index
+    // Flatten (x,y,z) => index
     size_t idx = static_cast<size_t>(x)
         + static_cast<size_t>(SIZE_X) * (
             static_cast<size_t>(y)
-            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
+            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z)
+            );
     return m_blocks[idx];
 }
 
@@ -56,57 +54,55 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        return; // out of bounds
+        return; // out of range => do nothing
     }
 
-    // Calculate 1D index
+    // Flatten index
     size_t idx = static_cast<size_t>(x)
         + static_cast<size_t>(SIZE_X) * (
             static_cast<size_t>(y)
-            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
+            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z)
+            );
 
     int oldVal = m_blocks[idx];
     if (oldVal != voxelID) {
-        // Update the block ID
+        // Update the block
         m_blocks[idx] = voxelID;
-        // Mark chunk as needing re-mesh
-        m_dirty = true;
+
+        // Mark *all* LODs dirty, because the chunk changed
+        markAllLODsDirty();
     }
 }
 
-// -----------------------------------------------------------------------------
-// getBoundingBox
-// -----------------------------------------------------------------------------
+void Chunk::markAllLODsDirty()
+{
+    // Mark every LOD level as dirty
+    for (int level = 0; level < MAX_LOD_LEVELS; level++) {
+        m_lodDirty[level] = true;
+    }
+}
+
 void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 {
-    // Calculate the world-space offset of this chunk
     float chunkOriginX = static_cast<float>(m_worldX * SIZE_X);
     float chunkOriginY = static_cast<float>(m_worldY * SIZE_Y);
     float chunkOriginZ = static_cast<float>(m_worldZ * SIZE_Z);
 
-    // Minimum corner is the chunk origin
     outMin = glm::vec3(chunkOriginX, chunkOriginY, chunkOriginZ);
-
-    // Maximum corner is origin + (SIZE_X, SIZE_Y, SIZE_Z)
     outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
 }
 
-// -----------------------------------------------------------------------------
-// getVoxelUsage
-// -----------------------------------------------------------------------------
 std::pair<size_t, size_t> Chunk::getVoxelUsage() const
 {
     size_t activeCount = 0;
     size_t emptyCount = 0;
 
-    // Iterate over each voxel in the block array.
     for (int voxel : m_blocks)
     {
-        if (voxel == 0)
+        if (voxel == 0)  // air
             emptyCount++;
         else
             activeCount++;
     }
-
     return { activeCount, emptyCount };
 }
