@@ -1,4 +1,4 @@
-#include "VoxelWorld.h"
+﻿#include "VoxelWorld.h"
 #include "Chunk.h"
 #include <cmath>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Utils/Logger.h"
 
-// We'll assume you have a global thread pool declared somewhere:
+// We'll assume you have a global thread pool declared somewhere
 #include "Engine/Utils/ThreadPool.h"
 #include "LODDownsampler.h"
 extern ThreadPool g_threadPool;
@@ -25,10 +25,35 @@ struct LODMeshBuildResult
     std::vector<uint32_t> inds;
 };
 
-// A global container for completed LOD mesh data from worker threads.
 static std::mutex s_resultMutexLOD;
 static std::vector<LODMeshBuildResult> s_pendingLODResults;
 
+// ─────────────────────────────────────────────────────────────────────────
+// A local helper for marking neighbors (no changes needed):
+// ─────────────────────────────────────────────────────────────────────────
+static void markNeighborsDirty(ChunkManager& manager, int cx, int cy, int cz)
+{
+    static const int offsets[6][3] = {
+        { 1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+    };
+    for (auto& off : offsets)
+    {
+        int nx = cx + off[0];
+        int ny = cy + off[1];
+        int nz = cz + off[2];
+        if (manager.hasChunk(nx, ny, nz))
+        {
+            Chunk* nChunk = manager.getChunk(nx, ny, nz);
+            if (nChunk) {
+                nChunk->markAllLODsDirty();
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// VoxelWorld Implementation
+// ─────────────────────────────────────────────────────────────────────────
 VoxelWorld::VoxelWorld(VulkanContext* context)
     : m_context(context)
 {
@@ -36,12 +61,10 @@ VoxelWorld::VoxelWorld(VulkanContext* context)
 
 VoxelWorld::~VoxelWorld()
 {
-    // Destroy GPU buffers for each chunk & each LOD.
     auto& allChunks = m_chunkManager.getAllChunks();
     for (auto& kv : allChunks) {
         Chunk* c = kv.second.get();
         if (c) {
-            // Remove all LOD buffers
             for (int L = 0; L < LOD_COUNT; L++) {
                 destroyChunkLOD(*c, L);
             }
@@ -60,28 +83,25 @@ void VoxelWorld::initWorld()
             int cy = 0;
             Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
 
-            // Enqueue background generation
-            g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
-                // 1) Generate chunk data
-                m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+            // ─────────────────────────────────────────────────────────────────
+            // BACKGROUND GENERATION, but do NOT call markNeighborsDirty here.
+            // Instead, we stash the chunk coords for the main thread to handle.
+            // ─────────────────────────────────────────────────────────────────
+            g_threadPool.enqueueTask([this, cx, cy, cz, newChunk]()
+                {
+                    m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+                    newChunk->markAllLODsDirty();
 
-                // 2) Mark chunk as dirty for all LOD
-                newChunk->markAllLODsDirty();
+                    // Instead of calling markNeighborsDirty directly:
+                    {
+                        std::lock_guard<std::mutex> lock(m_neighborMutex);
+                        m_pendingNeighborDirty.emplace_back(cx, cy, cz);
+                    }
                 });
         }
     }
     Logger::Info("initWorld() => Queued generation tasks for +/- "
         + std::to_string(VIEW_DISTANCE) + " around (0,0).");
-}
-
-/**
- * Called when we want to remove a chunk entirely (all LODs).
- * This older method was only removing LOD0 buffers, so we can either
- * keep it for backward compatibility or expand it.
- */
-void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
-{
-    destroyChunkLOD(chunk, 0);
 }
 
 /**
@@ -119,59 +139,79 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     int centerChunkX = (int)std::floor(playerPosX / (float)Chunk::SIZE_X);
     int centerChunkZ = (int)std::floor(playerPosZ / (float)Chunk::SIZE_Z);
 
-    // 1) Create or queue generation for any needed chunks
+    // 1) Create or queue generation for needed chunks
     for (int cx = centerChunkX - VIEW_DISTANCE; cx <= centerChunkX + VIEW_DISTANCE; cx++)
     {
         for (int cz = centerChunkZ - VIEW_DISTANCE; cz <= centerChunkZ + VIEW_DISTANCE; cz++)
         {
             int cy = 0;
-            if (!m_chunkManager.hasChunk(cx, cy, cz)) {
+            if (!m_chunkManager.hasChunk(cx, cy, cz))
+            {
                 Logger::Info("Needs chunk at (" + std::to_string(cx) + ","
                     + std::to_string(cy) + "," + std::to_string(cz) + ")");
                 Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
 
-                // Enqueue background generation
-                g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
-                    m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
-                    newChunk->markAllLODsDirty();
+                g_threadPool.enqueueTask([this, cx, cy, cz, newChunk]()
+                    {
+                        m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+                        newChunk->markAllLODsDirty();
+
+                        // Again, do NOT call markNeighborsDirty here:
+                        std::lock_guard<std::mutex> lock(m_neighborMutex);
+                        m_pendingNeighborDirty.emplace_back(cx, cy, cz);
                     });
             }
         }
     }
 
     // 2) Unload chunks out of range
-    std::vector<ChunkCoord> toRemove;
-    const auto& allChunks = m_chunkManager.getAllChunks();
-    for (auto& kv : allChunks) {
-        const ChunkCoord& cc = kv.first;
-        if (cc.y != 0) continue; // ignoring multi-layer for now
+    // (unchanged from your code)
+    {
+        std::vector<ChunkCoord> toRemove;
+        const auto& allChunks = m_chunkManager.getAllChunks();
+        for (auto& kv : allChunks) {
+            const ChunkCoord& cc = kv.first;
+            if (cc.y != 0) continue;
 
-        int distX = std::abs(cc.x - centerChunkX);
-        int distZ = std::abs(cc.z - centerChunkZ);
-        if (distX > VIEW_DISTANCE || distZ > VIEW_DISTANCE) {
-            toRemove.push_back(cc);
-        }
-    }
-    // Actually remove them
-    for (auto& rc : toRemove) {
-        Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
-        if (oldC) {
-            vkDeviceWaitIdle(m_context->getDevice());
-            for (int L = 0; L < LOD_COUNT; L++) {
-                destroyChunkLOD(*oldC, L);
+            int distX = std::abs(cc.x - centerChunkX);
+            int distZ = std::abs(cc.z - centerChunkZ);
+            if (distX > VIEW_DISTANCE || distZ > VIEW_DISTANCE) {
+                toRemove.push_back(cc);
             }
-            m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+        }
+        for (auto& rc : toRemove) {
+            Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
+            if (oldC) {
+                vkDeviceWaitIdle(m_context->getDevice());
+                for (int L = 0; L < LOD_COUNT; L++) {
+                    destroyChunkLOD(*oldC, L);
+                }
+                m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+            }
         }
     }
 
-    // 3) SCHEDULE meshing for changed/new chunks, then poll for results
+    // ─────────────────────────────────────────────────────────────────
+    // [NEW] Mark any neighbors for newly generated chunks on the main thread
+    // ─────────────────────────────────────────────────────────────────
+    {
+        std::lock_guard<std::mutex> lock(m_neighborMutex);
+        for (auto& cCoord : m_pendingNeighborDirty)
+        {
+            // Now we can safely call markNeighborsDirty on the main thread
+            markNeighborsDirty(m_chunkManager, cCoord.x, cCoord.y, cCoord.z);
+        }
+        m_pendingNeighborDirty.clear();
+    }
+
+    // 3) Schedule meshing for dirty chunks, then poll results
     scheduleMeshingForDirtyChunks();
     pollMeshBuildResults();
 }
 
 /**
  * For each chunk, if LOD i is dirty => schedule a job that:
- *   1) Possibly downsample the chunk�s data for LOD i
+ *   1) Possibly downsample the chunk’s data for LOD i
  *   2) Build the mesh from that array (or from chunk for LOD0)
  *   3) Store results in s_pendingLODResults
  */
@@ -209,86 +249,83 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
         int offsetZ = coord.z * Chunk::SIZE_Z;
 
         // Enqueue a job that handles all dirty LODs
-        g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ]() {
-            auto chunkStart = std::chrono::high_resolution_clock::now();
-
-            std::vector<LODMeshBuildResult> localResults;
-
-            for (int L = 0; L < LOD_COUNT; L++)
+        g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ]()
             {
-                if (!chunk->isLODDirty(L)) {
-                    continue; // skip if not dirty
-                }
-                chunk->clearLODDirty(L);
+                auto chunkStart = std::chrono::high_resolution_clock::now();
 
-                std::vector<Vertex> verts;
-                std::vector<uint32_t> inds;
+                std::vector<LODMeshBuildResult> localResults;
 
-                if (L == 0)
+                for (int L = 0; L < LOD_COUNT; L++)
                 {
-                    // LOD0 => normal meshing
-                    m_mesher.generateMeshGreedy(*chunk,
-                        coord.x, coord.y, coord.z,
-                        verts, inds,
-                        offsetX, offsetY, offsetZ,
-                        m_chunkManager);
+                    if (!chunk->isLODDirty(L)) {
+                        continue; // skip if not dirty
+                    }
+                    chunk->clearLODDirty(L);
+
+                    std::vector<Vertex> verts;
+                    std::vector<uint32_t> inds;
+
+                    if (L == 0)
+                    {
+                        // LOD0 => normal meshing (greedy + boundary merging)
+                        m_mesher.generateMeshGreedy(*chunk,
+                            coord.x, coord.y, coord.z,
+                            verts, inds,
+                            offsetX, offsetY, offsetZ,
+                            m_chunkManager);
+                    }
+                    else
+                    {
+                        // LOD>0 => downsample => build from smaller array
+                        const std::vector<int>& fullData = chunk->getBlocks();
+
+                        // Downsample
+                        std::vector<int> dsData = downsampleVoxelData(
+                            fullData,
+                            Chunk::SIZE_X,
+                            Chunk::SIZE_Y,
+                            Chunk::SIZE_Z,
+                            L
+                        );
+
+                        int dsX = Chunk::SIZE_X >> L;
+                        int dsY = Chunk::SIZE_Y >> L;
+                        int dsZ = Chunk::SIZE_Z >> L;
+
+                        // Build from that array (greedy or naive at LOD)
+                        // This approach doesn't consider external neighbors at LOD.
+                        m_mesher.generateMeshFromArray(dsData,
+                            dsX, dsY, dsZ,
+                            offsetX, offsetY, offsetZ,
+                            verts, inds,
+                            true /*useGreedy*/);
+                    }
+
+                    LODMeshBuildResult res;
+                    res.chunkPtr = chunk;
+                    res.cx = coord.x;
+                    res.cy = coord.y;
+                    res.cz = coord.z;
+                    res.lodLevel = L;
+                    res.verts = std::move(verts);
+                    res.inds = std::move(inds);
+                    localResults.push_back(std::move(res));
                 }
-                else
+
+                auto chunkEnd = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> chunkDurSec = (chunkEnd - chunkStart);
                 {
-                    // LOD>0 => downsample => build from smaller array
-                    // Use chunk->getBlocks() instead of direct chunk->m_blocks
-                    const std::vector<int>& fullData = chunk->getBlocks();
-
-                    // Downsample
-                    std::vector<int> dsData = downsampleVoxelData(
-                        fullData,
-                        Chunk::SIZE_X,
-                        Chunk::SIZE_Y,
-                        Chunk::SIZE_Z,
-                        L
-                    );
-
-                    int dsX = Chunk::SIZE_X >> L;
-                    int dsY = Chunk::SIZE_Y >> L;
-                    int dsZ = Chunk::SIZE_Z >> L;
-
-                    // Build from that array
-                    m_mesher.generateMeshFromArray(dsData,
-                        dsX, dsY, dsZ,
-                        offsetX, offsetY, offsetZ,
-                        verts, inds,
-                        true /*useGreedy*/);
-
-                    // The "fake" approach: also do a naive pass. 
-                    // If you want real LOD, remove or comment out below:
-                   
+                    s_totalMeshTime += chunkDurSec.count();
+                    s_meshCount++;
                 }
 
-                LODMeshBuildResult res;
-                res.chunkPtr = chunk;
-                res.cx = coord.x;
-                res.cy = coord.y;
-                res.cz = coord.z;
-                res.lodLevel = L;
-                res.verts = std::move(verts);
-                res.inds = std::move(inds);
-                localResults.push_back(std::move(res));
-            }
-
-            auto chunkEnd = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> chunkDurSec = (chunkEnd - chunkStart);
-            {
-                s_totalMeshTime += chunkDurSec.count();
-                s_meshCount++;
-            }
-
-            // Lock & push all results to the global queue
-            {
-                std::lock_guard<std::mutex> lk(s_resultMutexLOD);
-                for (auto& r : localResults) {
-                    s_pendingLODResults.push_back(std::move(r));
+                // Lock & push all results to the global queue
+                {
+                    std::lock_guard<std::mutex> lk(s_resultMutexLOD);
+                    for (auto& r : localResults) {
+                        s_pendingLODResults.push_back(std::move(r));
+                    }
                 }
-            }
             });
     }
 }

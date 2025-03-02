@@ -6,6 +6,7 @@
 
 /**
  * Determines if a voxel ID is solid by checking the VoxelTypeRegistry.
+ * (Still used in e.g. LOD generation or if you want to treat >0 as solid.)
  */
 bool ChunkMesher::isSolidID(int voxelID)
 {
@@ -15,70 +16,61 @@ bool ChunkMesher::isSolidID(int voxelID)
 }
 
 /**
- * Checks if local coords (x,y,z) are solid, possibly in a neighbor chunk.
- * Used by naive and greedy meshing for adjacency checks.
+ * NEW helper: returns the actual block ID in current or neighbor chunk,
+ * or if the neighbor chunk doesn’t exist, we treat it as the same ID
+ * so we don't show a boundary face for a missing neighbor.
  */
-bool ChunkMesher::isSolidGlobal(
+int ChunkMesher::getBlockIDGlobal(
     const Chunk& currentChunk,
     int cx, int cy, int cz,
     int x, int y, int z,
     const ChunkManager& manager)
 {
-    // If in-range => check current chunk's data
+    // If in-range => read from current chunk
     if (x >= 0 && x < Chunk::SIZE_X &&
         y >= 0 && y < Chunk::SIZE_Y &&
         z >= 0 && z < Chunk::SIZE_Z)
     {
-        int id = currentChunk.getBlock(x, y, z);
-        return (id > 0) ? isSolidID(id) : false;
+        return currentChunk.getBlock(x, y, z);
     }
     else
     {
-        // Out-of-bounds => neighbor chunk
+        // Out-of-bounds => find neighbor
         int nx = cx, ny = cy, nz = cz;
-        int localX = x, localY = y, localZ = z;
+        int lx = x, ly = y, lz = z;
 
-        // Shift coords to neighbor
-        if (x < 0) {
-            nx -= 1;
-            localX += Chunk::SIZE_X;
+        // Shift local coords so they fall within the neighbor
+        if (lx < 0) {
+            nx -= 1;  lx += Chunk::SIZE_X;
         }
-        else if (x >= Chunk::SIZE_X) {
-            nx += 1;
-            localX -= Chunk::SIZE_X;
+        else if (lx >= Chunk::SIZE_X) {
+            nx += 1;  lx -= Chunk::SIZE_X;
         }
-        if (y < 0) {
-            ny -= 1;
-            localY += Chunk::SIZE_Y;
+        if (ly < 0) {
+            ny -= 1;  ly += Chunk::SIZE_Y;
         }
-        else if (y >= Chunk::SIZE_Y) {
-            ny += 1;
-            localY -= Chunk::SIZE_Y;
+        else if (ly >= Chunk::SIZE_Y) {
+            ny += 1;  ly -= Chunk::SIZE_Y;
         }
-        if (z < 0) {
-            nz -= 1;
-            localZ += Chunk::SIZE_Z;
+        if (lz < 0) {
+            nz -= 1;  lz += Chunk::SIZE_Z;
         }
-        else if (z >= Chunk::SIZE_Z) {
-            nz += 1;
-            localZ -= Chunk::SIZE_Z;
+        else if (lz >= Chunk::SIZE_Z) {
+            nz += 1;  lz -= Chunk::SIZE_Z;
         }
 
-        // Grab neighbor
         const Chunk* neighbor = manager.getChunk(nx, ny, nz);
         if (!neighbor) {
-            // no neighbor => treat as air
-            return false;
+            // If neighbor not loaded, treat it as the same ID => no boundary face
+            return 0;
         }
-        int blockID = neighbor->getBlock(localX, localY, localZ);
-        return (blockID > 0) ? isSolidID(blockID) : false;
+        return neighbor->getBlock(lx, ly, lz);
     }
 }
 
 /**
- * Naive mesh generation with adjacency checks.
- * For each voxel, if it’s solid and the neighbor is not solid,
- * we add a face for that side.
+ * Naive mesh generation with adjacency checks, but now we do "boundary merging"
+ * by comparing the neighbor's block ID vs. our own.
  */
 void ChunkMesher::generateMeshNaive(
     const Chunk& chunk,
@@ -100,7 +92,6 @@ void ChunkMesher::generateMeshNaive(
                 int voxelID = chunk.getBlock(x, y, z);
                 if (voxelID <= 0) continue; // skip air
 
-                // Color from the voxel type
                 const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
                 float r = vt.color.r;
                 float g = vt.color.g;
@@ -110,101 +101,113 @@ void ChunkMesher::generateMeshNaive(
                 float baseY = float(y + offsetY);
                 float baseZ = float(z + offsetZ);
 
-                // +X
-                if (!isSolidGlobal(chunk, cx, cy, cz, x + 1, y, z, manager))
+                // +X face => if neighbor ID != voxelID
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x + 1, y, z, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
-                // -X
-                if (!isSolidGlobal(chunk, cx, cy, cz, x - 1, y, z, manager))
+                // -X face
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x - 1, y, z, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
-                // +Y
-                if (!isSolidGlobal(chunk, cx, cy, cz, x, y + 1, z, manager))
+                // +Y face
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y + 1, z, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
-                // -Y
-                if (!isSolidGlobal(chunk, cx, cy, cz, x, y - 1, z, manager))
+                // -Y face
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y - 1, z, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
-                // +Z
-                if (!isSolidGlobal(chunk, cx, cy, cz, x, y, z + 1, manager))
+                // +Z face
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z + 1, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
-                // -Z
-                if (!isSolidGlobal(chunk, cx, cy, cz, x, y, z - 1, manager))
+                // -Z face
                 {
-                    int startIdx = (int)outVertices.size();
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
+                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z - 1, manager);
+                    if (neighborID != voxelID) {
+                        int startIdx = (int)outVertices.size();
+                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
+                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
 
-                    outIndices.push_back(startIdx + 0);
-                    outIndices.push_back(startIdx + 1);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 2);
-                    outIndices.push_back(startIdx + 3);
-                    outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 0);
+                        outIndices.push_back(startIdx + 1);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 2);
+                        outIndices.push_back(startIdx + 3);
+                        outIndices.push_back(startIdx + 0);
+                    }
                 }
             }
         }
@@ -213,6 +216,8 @@ void ChunkMesher::generateMeshNaive(
 
 /**
  * Checks if LOD0 is dirty and re-meshes if needed (naive or greedy).
+ * (Unchanged except it calls generateMeshNaive or generateMeshGreedy
+ * which now do boundary merging by ID.)
  */
 bool ChunkMesher::generateChunkMeshIfDirty(
     Chunk& chunk,
@@ -232,23 +237,26 @@ bool ChunkMesher::generateChunkMeshIfDirty(
     outIndices.clear();
 
     if (useGreedy) {
-        generateMeshGreedy(chunk, cx, cy, cz,
+        generateMeshGreedy(
+            chunk, cx, cy, cz,
             outVertices, outIndices,
-            offsetX, offsetY, offsetZ,
-            manager);
+            offsetX, offsetY, offsetZ, manager
+        );
     }
     else {
-        generateMeshNaive(chunk, cx, cy, cz,
+        generateMeshNaive(
+            chunk, cx, cy, cz,
             outVertices, outIndices,
             offsetX, offsetY, offsetZ,
-            manager);
+            manager
+        );
     }
     return true;
 }
 
 /**
  * A simpler test method ignoring adjacency with neighbor chunks.
- * (Your original code.)
+ * (No changes needed for boundary merging, but kept for reference.)
  */
 void ChunkMesher::generateMeshNaiveTest(
     const Chunk& chunk,
@@ -259,6 +267,7 @@ void ChunkMesher::generateMeshNaiveTest(
     outVerts.clear();
     outInds.clear();
 
+    // ... same as before (no neighbor logic here) ...
     for (int x = 0; x < Chunk::SIZE_X; x++)
     {
         for (int y = 0; y < Chunk::SIZE_Y; y++)
@@ -269,12 +278,11 @@ void ChunkMesher::generateMeshNaiveTest(
                 if (blockID <= 0) continue;
 
                 float r = 0.5f, g = 0.5f, b = 0.5f; // Hard-coded color
-
                 float bx = float(x + offsetX);
                 float by = float(y + offsetY);
                 float bz = float(z + offsetZ);
 
-                // (+X) face
+                // +X face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
@@ -289,7 +297,7 @@ void ChunkMesher::generateMeshNaiveTest(
                     outInds.push_back(startIdx + 3);
                     outInds.push_back(startIdx + 0);
                 }
-                // (-X) face
+                // -X face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx, by, bz + 1, r, g, b));
@@ -304,7 +312,7 @@ void ChunkMesher::generateMeshNaiveTest(
                     outInds.push_back(startIdx + 3);
                     outInds.push_back(startIdx + 0);
                 }
-                // (+Y) face
+                // +Y face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx, by + 1, bz, r, g, b));
@@ -319,7 +327,7 @@ void ChunkMesher::generateMeshNaiveTest(
                     outInds.push_back(startIdx + 3);
                     outInds.push_back(startIdx + 0);
                 }
-                // (-Y) face
+                // -Y face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
@@ -334,7 +342,7 @@ void ChunkMesher::generateMeshNaiveTest(
                     outInds.push_back(startIdx + 3);
                     outInds.push_back(startIdx + 0);
                 }
-                // (+Z) face
+                // +Z face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx, by, bz + 1, r, g, b));
@@ -349,7 +357,7 @@ void ChunkMesher::generateMeshNaiveTest(
                     outInds.push_back(startIdx + 3);
                     outInds.push_back(startIdx + 0);
                 }
-                // (-Z) face
+                // -Z face
                 {
                     int startIdx = (int)outVerts.size();
                     outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
@@ -370,8 +378,8 @@ void ChunkMesher::generateMeshNaiveTest(
 }
 
 /**
- * The "greedy" meshing approach for LOD0, merging faces in each direction.
- * (Same as your original code, with debug print at the end.)
+ * The "greedy" meshing approach for LOD0, merging faces internally. We now also do
+ * boundary merging by checking for neighbor’s block ID != our own.
  */
 void ChunkMesher::generateMeshGreedy(
     const Chunk& chunk,
@@ -387,6 +395,7 @@ void ChunkMesher::generateMeshGreedy(
     // +Z direction
     for (int z = 0; z < Chunk::SIZE_Z; z++)
     {
+        // Instead of checking isSolidGlobal(..., z+1), we compare ID
         std::vector<int> mask(Chunk::SIZE_X * Chunk::SIZE_Y, -1);
         for (int y = 0; y < Chunk::SIZE_Y; y++)
         {
@@ -395,7 +404,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x, y, z + 1, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z + 1, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(y) * Chunk::SIZE_X + x;
@@ -403,6 +413,7 @@ void ChunkMesher::generateMeshGreedy(
                 }
             }
         }
+        // Then the standard "greedy" pass (width/height).
         for (int row = 0; row < Chunk::SIZE_Y; row++)
         {
             int col = 0;
@@ -420,7 +431,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((col + width) < Chunk::SIZE_X)
                 {
                     size_t idx2 = static_cast<size_t>(row) * Chunk::SIZE_X + (col + width);
-                    if (mask[idx2] == bid) width++; else break;
+                    if (mask[idx2] == bid) width++;
+                    else break;
                 }
                 // find height
                 int height = 1;
@@ -440,9 +452,12 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) height++;
                 }
-                buildQuadPosZ(col, row, width, height, z,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
+                // Build the +Z quad
+                buildQuadPosZ(
+                    col, row, width, height, z,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
 
                 // mark used
                 for (int rr = 0; rr < height; rr++)
@@ -469,7 +484,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x, y, z - 1, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z - 1, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(y) * Chunk::SIZE_X + x;
@@ -477,6 +493,7 @@ void ChunkMesher::generateMeshGreedy(
                 }
             }
         }
+        // The normal “greedy” row-by-row
         for (int row = 0; row < Chunk::SIZE_Y; row++)
         {
             int col = 0;
@@ -493,7 +510,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((col + width) < Chunk::SIZE_X)
                 {
                     size_t idx2 = static_cast<size_t>(row) * Chunk::SIZE_X + (col + width);
-                    if (mask[idx2] == bid) width++; else break;
+                    if (mask[idx2] == bid) width++;
+                    else break;
                 }
                 int height = 1;
                 bool done = false;
@@ -512,9 +530,11 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) height++;
                 }
-                buildQuadNegZ(col, row, width, height, z,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
+                buildQuadNegZ(
+                    col, row, width, height, z,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
 
                 for (int rr = 0; rr < height; rr++)
                 {
@@ -540,7 +560,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x + 1, y, z, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x + 1, y, z, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(z) * Chunk::SIZE_Y + y;
@@ -563,7 +584,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((startY + height) < Chunk::SIZE_Y)
                 {
                     size_t idx2 = static_cast<size_t>(startZ) * Chunk::SIZE_Y + (startY + height);
-                    if (mask[idx2] == bid) height++; else break;
+                    if (mask[idx2] == bid) height++;
+                    else break;
                 }
                 int depth = 1;
                 bool done = false;
@@ -582,10 +604,11 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) depth++;
                 }
-                buildQuadPosX(startY, startZ, height, depth, x,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
-
+                buildQuadPosX(
+                    startY, startZ, height, depth, x,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
                 for (int dz = 0; dz < depth; dz++)
                 {
                     for (int hy = 0; hy < height; hy++)
@@ -610,7 +633,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x - 1, y, z, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x - 1, y, z, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(z) * Chunk::SIZE_Y + y;
@@ -633,7 +657,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((startY + height) < Chunk::SIZE_Y)
                 {
                     size_t idx2 = static_cast<size_t>(startZ) * Chunk::SIZE_Y + (startY + height);
-                    if (mask[idx2] == bid) height++; else break;
+                    if (mask[idx2] == bid) height++;
+                    else break;
                 }
                 int depth = 1;
                 bool done = false;
@@ -652,10 +677,11 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) depth++;
                 }
-                buildQuadNegX(startY, startZ, height, depth, x,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
-
+                buildQuadNegX(
+                    startY, startZ, height, depth, x,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
                 for (int dz = 0; dz < depth; dz++)
                 {
                     for (int hy = 0; hy < height; hy++)
@@ -680,7 +706,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x, y + 1, z, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y + 1, z, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(z) * Chunk::SIZE_X + x;
@@ -703,7 +730,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((startX + width) < Chunk::SIZE_X)
                 {
                     size_t idx2 = static_cast<size_t>(startZ) * Chunk::SIZE_X + (startX + width);
-                    if (mask[idx2] == bid) width++; else break;
+                    if (mask[idx2] == bid) width++;
+                    else break;
                 }
                 int depth = 1;
                 bool done = false;
@@ -722,10 +750,11 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) depth++;
                 }
-                buildQuadPosY(startX, startZ, width, depth, y,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
-
+                buildQuadPosY(
+                    startX, startZ, width, depth, y,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
                 for (int dz = 0; dz < depth; dz++)
                 {
                     for (int wx = 0; wx < width; wx++)
@@ -750,7 +779,8 @@ void ChunkMesher::generateMeshGreedy(
                 int id = chunk.getBlock(x, y, z);
                 if (id <= 0) continue;
 
-                bool exposed = !isSolidGlobal(chunk, cx, cy, cz, x, y - 1, z, manager);
+                int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y - 1, z, manager);
+                bool exposed = (neighborID != id);
                 if (exposed)
                 {
                     size_t idx = static_cast<size_t>(z) * Chunk::SIZE_X + x;
@@ -773,7 +803,8 @@ void ChunkMesher::generateMeshGreedy(
                 while ((startX + width) < Chunk::SIZE_X)
                 {
                     size_t idx2 = static_cast<size_t>(startZ) * Chunk::SIZE_X + (startX + width);
-                    if (mask[idx2] == bid) width++; else break;
+                    if (mask[idx2] == bid) width++;
+                    else break;
                 }
                 int depth = 1;
                 bool done = false;
@@ -792,10 +823,11 @@ void ChunkMesher::generateMeshGreedy(
                     }
                     if (!done) depth++;
                 }
-                buildQuadNegY(startX, startZ, width, depth, y,
-                    offsetX, offsetY, offsetZ,
-                    bid, outVertices, outIndices);
-
+                buildQuadNegY(
+                    startX, startZ, width, depth, y,
+                    offsetX, offsetY, offsetZ, bid,
+                    outVertices, outIndices
+                );
                 for (int dz = 0; dz < depth; dz++)
                 {
                     for (int wx = 0; wx < width; wx++)
@@ -809,16 +841,16 @@ void ChunkMesher::generateMeshGreedy(
         }
     }
 
-    // Debug output
+    // Debug
     std::cout << "[Mesh Debug] Chunk(" << cx << "," << cy << "," << cz
         << ") => " << outVertices.size() << " verts, "
         << outIndices.size() << " inds\n";
 }
 
 /**
- * Builds a mesh from a generic in-memory voxel array of size dsX * dsY * dsZ,
- * which can be used for LOD > 0 (downsampled arrays).
- * If useGreedy == true, you’d adapt your greedy approach to these smaller dims.
+ * Builds a mesh from a generic in-memory voxel array of size dsX * dsY * dsZ.
+ * If useGreedy == true, adapt the same boundary logic inside that code path.
+ * For now, we skip boundary adjacency for LOD arrays, or treat them as “no neighbor.”
  */
 void ChunkMesher::generateMeshFromArray(
     const std::vector<int>& voxelArray,
@@ -832,9 +864,9 @@ void ChunkMesher::generateMeshFromArray(
     outVertices.clear();
     outIndices.clear();
 
+    // Basic naive approach ignoring chunk neighbors at LOD:
     if (!useGreedy)
     {
-        // Simple naive adjacency within dsX, dsY, dsZ (no neighbor chunks).
         for (int x = 0; x < dsX; x++)
         {
             for (int y = 0; y < dsY; y++)
@@ -851,19 +883,21 @@ void ChunkMesher::generateMeshFromArray(
                     float by = float(y + worldOffsetY);
                     float bz = float(z + worldOffsetZ);
 
-                    // A small lambda to check if the neighbor is solid (in-bounds).
-                    auto getBlock = [&](int xx, int yy, int zz) -> int {
-                        if (xx < 0 || xx >= dsX ||
-                            yy < 0 || yy >= dsY ||
-                            zz < 0 || zz >= dsZ)
+                    // Helper for local adjacency
+                    auto getLocalID = [&](int xx, int yy, int zz)
                         {
-                            return -1; // treat out-of-range as air
-                        }
-                        return voxelArray[xx + dsX * (yy + dsY * zz)];
+                            if (xx < 0 || xx >= dsX ||
+                                yy < 0 || yy >= dsY ||
+                                zz < 0 || zz >= dsZ)
+                            {
+                                return -1; // out of range => treat as air
+                            }
+                            return voxelArray[xx + dsX * (yy + dsY * zz)];
                         };
 
                     // +X
-                    if (!isSolidID(getBlock(x + 1, y, z))) {
+                    if (getLocalID(x + 1, y, z) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx + 1, by, bz, r, g, b));
                         outVertices.push_back(Vertex(bx + 1, by, bz + 1, r, g, b));
@@ -878,7 +912,8 @@ void ChunkMesher::generateMeshFromArray(
                         outIndices.push_back(startIdx + 0);
                     }
                     // -X
-                    if (!isSolidID(getBlock(x - 1, y, z))) {
+                    if (getLocalID(x - 1, y, z) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx, by, bz + 1, r, g, b));
                         outVertices.push_back(Vertex(bx, by, bz, r, g, b));
@@ -893,7 +928,8 @@ void ChunkMesher::generateMeshFromArray(
                         outIndices.push_back(startIdx + 0);
                     }
                     // +Y
-                    if (!isSolidID(getBlock(x, y + 1, z))) {
+                    if (getLocalID(x, y + 1, z) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx, by + 1, bz, r, g, b));
                         outVertices.push_back(Vertex(bx + 1, by + 1, bz, r, g, b));
@@ -908,7 +944,8 @@ void ChunkMesher::generateMeshFromArray(
                         outIndices.push_back(startIdx + 0);
                     }
                     // -Y
-                    if (!isSolidID(getBlock(x, y - 1, z))) {
+                    if (getLocalID(x, y - 1, z) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx + 1, by, bz, r, g, b));
                         outVertices.push_back(Vertex(bx, by, bz, r, g, b));
@@ -923,7 +960,8 @@ void ChunkMesher::generateMeshFromArray(
                         outIndices.push_back(startIdx + 0);
                     }
                     // +Z
-                    if (!isSolidID(getBlock(x, y, z + 1))) {
+                    if (getLocalID(x, y, z + 1) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx, by, bz + 1, r, g, b));
                         outVertices.push_back(Vertex(bx + 1, by, bz + 1, r, g, b));
@@ -938,7 +976,8 @@ void ChunkMesher::generateMeshFromArray(
                         outIndices.push_back(startIdx + 0);
                     }
                     // -Z
-                    if (!isSolidID(getBlock(x, y, z - 1))) {
+                    if (getLocalID(x, y, z - 1) != voxelID)
+                    {
                         int startIdx = (int)outVertices.size();
                         outVertices.push_back(Vertex(bx + 1, by, bz, r, g, b));
                         outVertices.push_back(Vertex(bx, by, bz, r, g, b));
@@ -958,19 +997,565 @@ void ChunkMesher::generateMeshFromArray(
     }
     else
     {
-        // (Optional) If you want a "greedy" approach for LOD data,
-        // adapt your code from generateMeshGreedy to handle dsX, dsY, dsZ, 
-        // ignoring neighbor chunks. Omitted here for brevity.
+        // We'll define a small lambda to get the voxel ID or -1 if out-of-bounds
+        auto getLocalID = [&](int xx, int yy, int zz) -> int {
+            if (xx < 0 || xx >= dsX ||
+                yy < 0 || yy >= dsY ||
+                zz < 0 || zz >= dsZ)
+            {
+                return -1; // treat out-of-bounds as empty
+            }
+            return voxelArray[xx + dsX * (yy + dsY * zz)];
+            };
+
+        // For LOD or small arrays, you could adapt your "greedy" approach here if you like.
+        // For simplicity, we skip neighbor merges in LOD arrays. So here's a brief sample:
+
+        // +Z direction
+        for (int z = 0; z < dsZ; z++)
+        {
+            std::vector<int> mask(dsX * dsY, -1);
+            for (int y = 0; y < dsY; y++)
+            {
+                for (int x = 0; x < dsX; x++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x, y, z + 1);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(y) * dsX + x;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int row = 0; row < dsY; row++)
+            {
+                int col = 0;
+                while (col < dsX)
+                {
+                    size_t idx = static_cast<size_t>(row) * dsX + col;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        col++;
+                        continue;
+                    }
+                    int width = 1;
+                    while ((col + width) < dsX)
+                    {
+                        size_t idx2 = static_cast<size_t>(row) * dsX + (col + width);
+                        if (mask[idx2] == bid) width++;
+                        else break;
+                    }
+                    int height = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nextRow = row + height;
+                        if (nextRow >= dsY) break;
+                        for (int c2 = 0; c2 < width; c2++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nextRow) * dsX + (col + c2);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) height++;
+                    }
+
+                    float zPos = float(z + 1 + worldOffsetZ);
+                    float X0 = float(col + worldOffsetX);
+                    float Y0 = float(row + worldOffsetY);
+                    float X1 = float(col + width + worldOffsetX);
+                    float Y1 = float(row + height + worldOffsetY);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    outVertices.push_back(Vertex(X0, Y0, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X1, Y0, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X1, Y1, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X0, Y1, zPos, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int rr = 0; rr < height; rr++)
+                    {
+                        for (int cc = 0; cc < width; cc++)
+                        {
+                            size_t idx4 = static_cast<size_t>(row + rr) * dsX + (col + cc);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    col += width;
+                }
+            }
+        }
+
+        // -Z direction
+        for (int z = 0; z < dsZ; z++)
+        {
+            std::vector<int> mask(dsX * dsY, -1);
+            for (int y = 0; y < dsY; y++)
+            {
+                for (int x = 0; x < dsX; x++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x, y, z - 1);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(y) * dsX + x;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int row = 0; row < dsY; row++)
+            {
+                int col = 0;
+                while (col < dsX)
+                {
+                    size_t idx = static_cast<size_t>(row) * dsX + col;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        col++;
+                        continue;
+                    }
+                    int width = 1;
+                    while ((col + width) < dsX)
+                    {
+                        size_t idx2 = static_cast<size_t>(row) * dsX + (col + width);
+                        if (mask[idx2] == bid) width++;
+                        else break;
+                    }
+                    int height = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nr = row + height;
+                        if (nr >= dsY) break;
+                        for (int c2 = 0; c2 < width; c2++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nr) * dsX + (col + c2);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) height++;
+                    }
+
+                    float zPos = float(z + worldOffsetZ);
+                    float X0 = float(col + worldOffsetX);
+                    float Y0 = float(row + worldOffsetY);
+                    float X1 = float(col + width + worldOffsetX);
+                    float Y1 = float(row + height + worldOffsetY);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    // -Z => normal points negative Z, so wind in reversed X order
+                    outVertices.push_back(Vertex(X1, Y0, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X0, Y0, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X0, Y1, zPos, r, g, b));
+                    outVertices.push_back(Vertex(X1, Y1, zPos, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int rr = 0; rr < height; rr++)
+                    {
+                        for (int cc = 0; cc < width; cc++)
+                        {
+                            size_t idx4 = static_cast<size_t>(row + rr) * dsX + (col + cc);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    col += width;
+                }
+            }
+        }
+
+        // +X direction
+        for (int x = 0; x < dsX; x++)
+        {
+            std::vector<int> mask(dsY * dsZ, -1);
+            for (int z = 0; z < dsZ; z++)
+            {
+                for (int y = 0; y < dsY; y++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x + 1, y, z);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(z) * dsY + y;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int startZ = 0; startZ < dsZ; startZ++)
+            {
+                int startY = 0;
+                while (startY < dsY)
+                {
+                    size_t idx = static_cast<size_t>(startZ) * dsY + startY;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        startY++;
+                        continue;
+                    }
+                    int height = 1;
+                    while ((startY + height) < dsY)
+                    {
+                        size_t idx2 = static_cast<size_t>(startZ) * dsY + (startY + height);
+                        if (mask[idx2] == bid) height++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nz = startZ + depth;
+                        if (nz >= dsZ) break;
+                        for (int hy = 0; hy < height; hy++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nz) * dsY + (startY + hy);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+
+                    float xPos = float((x + 1) + worldOffsetX);
+                    float Y0 = float(startY + worldOffsetY);
+                    float Z0 = float(startZ + worldOffsetZ);
+                    float Y1 = float(startY + height + worldOffsetY);
+                    float Z1 = float(startZ + depth + worldOffsetZ);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    outVertices.push_back(Vertex(xPos, Y0, Z0, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y0, Z1, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y1, Z1, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y1, Z0, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int dz = 0; dz < depth; dz++)
+                    {
+                        for (int hy = 0; hy < height; hy++)
+                        {
+                            size_t idx4 = static_cast<size_t>(startZ + dz) * dsY + (startY + hy);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    startY += height;
+                }
+            }
+        }
+
+        // -X direction
+        for (int x = 0; x < dsX; x++)
+        {
+            std::vector<int> mask(dsY * dsZ, -1);
+            for (int z = 0; z < dsZ; z++)
+            {
+                for (int y = 0; y < dsY; y++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x - 1, y, z);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(z) * dsY + y;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int startZ = 0; startZ < dsZ; startZ++)
+            {
+                int startY = 0;
+                while (startY < dsY)
+                {
+                    size_t idx = static_cast<size_t>(startZ) * dsY + startY;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        startY++;
+                        continue;
+                    }
+                    int height = 1;
+                    while ((startY + height) < dsY)
+                    {
+                        size_t idx2 = static_cast<size_t>(startZ) * dsY + (startY + height);
+                        if (mask[idx2] == bid) height++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nz = startZ + depth;
+                        if (nz >= dsZ) break;
+                        for (int hy = 0; hy < height; hy++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nz) * dsY + (startY + hy);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+
+                    float xPos = float(x + worldOffsetX);
+                    float Y0 = float(startY + worldOffsetY);
+                    float Z0 = float(startZ + worldOffsetZ);
+                    float Y1 = float(startY + height + worldOffsetY);
+                    float Z1 = float(startZ + depth + worldOffsetZ);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    // -X => normal in negative X
+                    outVertices.push_back(Vertex(xPos, Y0, Z1, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y0, Z0, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y1, Z0, r, g, b));
+                    outVertices.push_back(Vertex(xPos, Y1, Z1, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int dz = 0; dz < depth; dz++)
+                    {
+                        for (int hy = 0; hy < height; hy++)
+                        {
+                            size_t idx4 = static_cast<size_t>(startZ + dz) * dsY + (startY + hy);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    startY += height;
+                }
+            }
+        }
+
+        // +Y direction
+        for (int y = 0; y < dsY; y++)
+        {
+            std::vector<int> mask(dsX * dsZ, -1);
+            for (int z = 0; z < dsZ; z++)
+            {
+                for (int x = 0; x < dsX; x++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x, y + 1, z);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(z) * dsX + x;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int startZ = 0; startZ < dsZ; startZ++)
+            {
+                int startX = 0;
+                while (startX < dsX)
+                {
+                    size_t idx = static_cast<size_t>(startZ) * dsX + startX;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        startX++;
+                        continue;
+                    }
+                    int width = 1;
+                    while ((startX + width) < dsX)
+                    {
+                        size_t idx2 = static_cast<size_t>(startZ) * dsX + (startX + width);
+                        if (mask[idx2] == bid) width++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nz = startZ + depth;
+                        if (nz >= dsZ) break;
+                        for (int wx = 0; wx < width; wx++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nz) * dsX + (startX + wx);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+
+                    float yPos = float((y + 1) + worldOffsetY);
+                    float X0 = float(startX + worldOffsetX);
+                    float Z0 = float(startZ + worldOffsetZ);
+                    float X1 = float(startX + width + worldOffsetX);
+                    float Z1 = float(startZ + depth + worldOffsetZ);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    outVertices.push_back(Vertex(X0, yPos, Z0, r, g, b));
+                    outVertices.push_back(Vertex(X1, yPos, Z0, r, g, b));
+                    outVertices.push_back(Vertex(X1, yPos, Z1, r, g, b));
+                    outVertices.push_back(Vertex(X0, yPos, Z1, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int dz = 0; dz < depth; dz++)
+                    {
+                        for (int wx = 0; wx < width; wx++)
+                        {
+                            size_t idx4 = static_cast<size_t>(startZ + dz) * dsX + (startX + wx);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    startX += width;
+                }
+            }
+        }
+
+        // -Y direction
+        for (int y = 0; y < dsY; y++)
+        {
+            std::vector<int> mask(dsX * dsZ, -1);
+            for (int z = 0; z < dsZ; z++)
+            {
+                for (int x = 0; x < dsX; x++)
+                {
+                    int id = getLocalID(x, y, z);
+                    if (id <= 0) continue;
+
+                    int neighborID = getLocalID(x, y - 1, z);
+                    bool exposed = (neighborID != id);
+                    if (exposed) {
+                        size_t idx = static_cast<size_t>(z) * dsX + x;
+                        mask[idx] = id;
+                    }
+                }
+            }
+            for (int startZ = 0; startZ < dsZ; startZ++)
+            {
+                int startX = 0;
+                while (startX < dsX)
+                {
+                    size_t idx = static_cast<size_t>(startZ) * dsX + startX;
+                    int bid = mask[idx];
+                    if (bid < 0) {
+                        startX++;
+                        continue;
+                    }
+                    int width = 1;
+                    while ((startX + width) < dsX)
+                    {
+                        size_t idx2 = static_cast<size_t>(startZ) * dsX + (startX + width);
+                        if (mask[idx2] == bid) width++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done)
+                    {
+                        int nz = startZ + depth;
+                        if (nz >= dsZ) break;
+                        for (int wx = 0; wx < width; wx++)
+                        {
+                            size_t idx3 = static_cast<size_t>(nz) * dsX + (startX + wx);
+                            if (mask[idx3] != bid)
+                            {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+
+                    float yPos = float(y + worldOffsetY);
+                    float X0 = float(startX + worldOffsetX);
+                    float Z0 = float(startZ + worldOffsetZ);
+                    float X1 = float(startX + width + worldOffsetX);
+                    float Z1 = float(startZ + depth + worldOffsetZ);
+
+                    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(bid);
+                    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+
+                    int startIndex = (int)outVertices.size();
+                    // -Y => normal in negative Y
+                    outVertices.push_back(Vertex(X1, yPos, Z0, r, g, b));
+                    outVertices.push_back(Vertex(X0, yPos, Z0, r, g, b));
+                    outVertices.push_back(Vertex(X0, yPos, Z1, r, g, b));
+                    outVertices.push_back(Vertex(X1, yPos, Z1, r, g, b));
+
+                    outIndices.push_back(startIndex + 0);
+                    outIndices.push_back(startIndex + 1);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 2);
+                    outIndices.push_back(startIndex + 3);
+                    outIndices.push_back(startIndex + 0);
+
+                    for (int dz = 0; dz < depth; dz++)
+                    {
+                        for (int wx = 0; wx < width; wx++)
+                        {
+                            size_t idx4 = static_cast<size_t>(startZ + dz) * dsX + (startX + wx);
+                            mask[idx4] = -1;
+                        }
+                    }
+                    startX += width;
+                }
+            }
+        }
     }
 }
 
-/**
- * These buildQuadPosZ, buildQuadNegZ, etc. are used by the greedy approach
- * to add quads after merging. They’re defined below.
- * - See your original code for the specifics. We keep them unchanged.
- */
-
- // +Z
 void ChunkMesher::buildQuadPosZ(
     int startX, int startY, int width, int height, int z,
     int offsetX, int offsetY, int offsetZ, int blockID,

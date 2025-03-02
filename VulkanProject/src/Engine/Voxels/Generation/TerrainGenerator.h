@@ -38,6 +38,6 @@ private:
     // Member Variables
     // -----------------------------------------------------------------------------
     FastNoiseLite m_noise;    ///< The noise generator used for creating terrain.
-    float         m_frequency = 0.01f; ///< Frequency for the noise function.
+    float         m_frequency = 0.005f; ///< Frequency for the noise function.
     int           m_seed = 1337;  ///< Seed for the noise generator.
 };

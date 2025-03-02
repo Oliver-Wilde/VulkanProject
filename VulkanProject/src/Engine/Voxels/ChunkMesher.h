@@ -21,14 +21,18 @@ struct Vertex
 
 /**
  * The ChunkMesher class can build a mesh (vertices + indices) from a chunk’s voxel data.
- * It supports naive or "greedy" meshing, plus a new method to mesh from a custom array.
+ * It supports naive or "greedy" meshing, plus a method to mesh from a custom array.
+ *
+ * Features:
+ *  - Boundary merging: if a neighbor chunk has the same voxel ID, skip that face.
+ *  - LOD meshing with local adjacency checks if desired.
  */
 class ChunkMesher
 {
 public:
     /**
      * Generates a naive mesh of the given chunk by checking each visible face
-     * in chunk space, also checking neighbor chunks if needed.
+     * in chunk space, comparing block IDs across chunk boundaries.
      */
     void generateMeshNaive(
         const Chunk& chunk,
@@ -40,7 +44,8 @@ public:
     );
 
     /**
-     * Greedy meshing approach that merges faces where possible, for fewer triangles.
+     * Greedy meshing approach that merges faces where possible (fewer triangles),
+     * also skipping boundaries shared with neighbor chunks if they have the same voxel ID.
      */
     void generateMeshGreedy(
         const Chunk& chunk,
@@ -52,7 +57,8 @@ public:
     );
 
     /**
-     * A simpler, naive approach used for testing. Ignores adjacency with neighbor chunks.
+     * A simple naive approach used for testing. Ignores adjacency with neighbor chunks.
+     * (Doesn't do cross-chunk boundary merges.)
      */
     void generateMeshNaiveTest(
         const Chunk& chunk,
@@ -62,7 +68,7 @@ public:
     );
 
     /**
-     * Checks if the chunk is dirty and, if so, generates a mesh (either naive or greedy).
+     * Checks if LOD0 is dirty and, if so, generates a mesh (either naive or greedy).
      * This is your existing function, focusing on LOD0 usage.
      */
     bool generateChunkMeshIfDirty(
@@ -76,20 +82,17 @@ public:
     );
 
     // -------------------------------------------------------------------------
-    // NEW: For building an LOD mesh from a *downsampled* voxel array.
+    // For building an LOD mesh from a downsampled voxel array.
     // -------------------------------------------------------------------------
     /**
      * Builds a mesh (naive or greedy) from an in-memory voxel array that
-     * doesn't necessarily match the chunk's full resolution. This allows
-     * generating LOD1, LOD2, etc. from a smaller array.
+     * doesn't necessarily match the chunk's full resolution (dsX * dsY * dsZ).
      *
-     * @param voxelArray  A downsampled array of size dsX * dsY * dsZ.
-     * @param dsX, dsY, dsZ  Dimensions of the voxelArray.
-     * @param worldOffsetX,Y,Z  The world-space offset for these voxels.
-     * @param outVertices / outIndices  Where the mesh data is appended.
-     * @param useGreedy   If true, merges faces with a greedy approach.
-     * @note If you want to consider adjacency with neighbor chunks at LOD,
-     *       you'll need more advanced logic. Usually we skip neighbor adjacency at coarser LODs.
+     * @param voxelArray   Downsampled array (dsX * dsY * dsZ) of block IDs.
+     * @param dsX, dsY, dsZ  Dimensions of that downsampled array.
+     * @param worldOffsetX,Y,Z  World-space offset for these voxels.
+     * @param outVertices / outIndices  Output mesh data.
+     * @param useGreedy    Whether to merge faces. Typically no neighbor adjacency at LOD.
      */
     void generateMeshFromArray(
         const std::vector<int>& voxelArray,
@@ -103,11 +106,14 @@ public:
 private:
     /**
      * Checks if a voxelID is "solid" by looking up its VoxelType in VoxelTypeRegistry.
+     * Still used in some older code or for quick checks (LOD, etc.).
      */
     static bool isSolidID(int voxelID);
 
     /**
-     * Checks if (x,y,z) is solid, considering neighbor chunks. (Used by naive/greedy mesh.)
+     * OLD method that returns 'true' if (x,y,z) is solid in current or neighbor chunk.
+     * This is kept for backward compatibility, but boundary merges now rely on
+     * exact block ID comparison (see getBlockIDGlobal below).
      */
     static bool isSolidGlobal(
         const Chunk& currentChunk,
@@ -116,8 +122,20 @@ private:
         const ChunkManager& manager
     );
 
+    /**
+     * NEW helper: returns the actual block ID from current chunk or neighbor chunk,
+     * or -1 if the neighbor chunk is missing or out-of-bounds. Used to unify boundaries.
+     */
+    static int getBlockIDGlobal(
+        const Chunk& currentChunk,
+        int cx, int cy, int cz,
+        int x, int y, int z,
+        const ChunkManager& manager
+    );
+
     // -------------------------------------------------------------------------
-    // Internal buildQuad... methods for the greedy approach
+    // Internal buildQuad... methods for the greedy approach.
+    // These remain the same, no direct boundary logic here.
     // -------------------------------------------------------------------------
     void buildQuadPosZ(
         int startX, int startY, int width, int height, int z,

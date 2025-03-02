@@ -19,9 +19,10 @@ struct ChunkCoord
     int y;
     int z;
 
-    /**
-     * Equality operator for ChunkCoord.
-     */
+    ChunkCoord(int x_, int y_, int z_)
+        : x(x_), y(y_), z(z_) {}
+
+    // This operator allows '==' to compile:
     bool operator==(const ChunkCoord& other) const
     {
         return (x == other.x && y == other.y && z == other.z);
