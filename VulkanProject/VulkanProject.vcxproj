@@ -143,6 +143,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\Engine\Voxels\ChunkMesherNaive.cpp" />
     <ClCompile Include="src\Engine\Voxels\LODDownsampler.cpp" />
     <ClCompile Include="src\Engine\Utils\CpuProfiler.cpp" />
     <ClCompile Include="External Libraries\glm\detail\glm.cpp" />

@@ -27,7 +27,7 @@ private:
     // ─────────────────────────────────────────────────────────────────────────
     // The maximum distance (in chunk coords) from the player
     // ─────────────────────────────────────────────────────────────────────────
-    static constexpr int VIEW_DISTANCE = 16;
+    static constexpr int VIEW_DISTANCE = 12;
 
     // Number of LOD levels
     static constexpr int LOD_COUNT = 3;
@@ -46,7 +46,7 @@ private:
     std::vector<ChunkCoord> m_pendingNeighborDirty;
 
     // Mesh scheduling & finalization
-    void scheduleMeshingForDirtyChunks();
+    void scheduleMeshingForDirtyChunks(int centerChunkX, int centerChunkZ);
     void pollMeshBuildResults();
     void uploadLODMeshToChunk(Chunk& chunk, int lodLevel,
         const std::vector<Vertex>& verts,
@@ -56,7 +56,7 @@ private:
     void destroyChunkBuffers(Chunk& chunk);
 
     void createBuffer(VkDeviceSize size,
-        VkBufferUsageFlags usage,
+        VkBufferUsageFlags usage,             
         VkMemoryPropertyFlags properties,
         VkBuffer& buffer,
         VkDeviceMemory& memory);

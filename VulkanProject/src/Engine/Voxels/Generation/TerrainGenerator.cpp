@@ -62,11 +62,11 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
                 }
                 else {
                     // Below => Stone (ID=1)
-                    chunk.setBlock(localX, y, localZ, 1);
-                }
+                chunk.setBlock(localX, y, localZ, 1);
             }
         }
     }
+}
 
     auto endTime = high_resolution_clock::now();
     double elapsedSec = duration<double>(endTime - startTime).count();

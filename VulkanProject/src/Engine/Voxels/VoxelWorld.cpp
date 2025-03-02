@@ -164,8 +164,7 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         }
     }
 
-    // 2) Unload chunks out of range
-    // (unchanged from your code)
+    // 2) Unload chunks out of range (unchanged)
     {
         std::vector<ChunkCoord> toRemove;
         const auto& allChunks = m_chunkManager.getAllChunks();
@@ -192,30 +191,28 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // [NEW] Mark any neighbors for newly generated chunks on the main thread
+    // Mark any neighbors for newly generated chunks on the main thread
     // ─────────────────────────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lock(m_neighborMutex);
         for (auto& cCoord : m_pendingNeighborDirty)
         {
-            // Now we can safely call markNeighborsDirty on the main thread
             markNeighborsDirty(m_chunkManager, cCoord.x, cCoord.y, cCoord.z);
         }
         m_pendingNeighborDirty.clear();
     }
 
     // 3) Schedule meshing for dirty chunks, then poll results
-    scheduleMeshingForDirtyChunks();
+    scheduleMeshingForDirtyChunks(centerChunkX, centerChunkZ); // << pass center coords
     pollMeshBuildResults();
 }
 
 /**
- * For each chunk, if LOD i is dirty => schedule a job that:
- *   1) Possibly downsample the chunk’s data for LOD i
- *   2) Build the mesh from that array (or from chunk for LOD0)
- *   3) Store results in s_pendingLODResults
+ * For each chunk, decide which single LOD to build based on distance,
+ * then possibly downsample and build the mesh for that LOD.
  */
-void VoxelWorld::scheduleMeshingForDirtyChunks()
+ // BEGIN DISTANCE-BASED LOD
+void VoxelWorld::scheduleMeshingForDirtyChunks(int centerChunkX, int centerChunkZ)
 {
     const auto& allChunks = m_chunkManager.getAllChunks();
     for (auto& kv : allChunks) {
@@ -228,7 +225,7 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             continue;
         }
 
-        // Check if ANY LOD is dirty
+        // If no LOD is dirty, skip
         bool anyLODDirty = false;
         for (int L = 0; L < LOD_COUNT; L++) {
             if (chunk->isLODDirty(L)) {
@@ -240,32 +237,59 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             continue;
         }
 
+        // Decide the single LOD we want based on distance² from center
+        int dx = coord.x - centerChunkX;
+        int dz = coord.z - centerChunkZ;
+        int distSq = dx * dx + dz * dz;
+
+        // Example thresholds: 
+        // distSq <= 25 => LOD0 (5-chunk radius)
+        // distSq <= 100 => LOD1 (10-chunk radius)
+        // else => LOD2
+        int chosenLOD = 0;
+        if (distSq > 25) {
+            chosenLOD = 1;
+        }
+        if (distSq > 100) {
+            chosenLOD = 2;
+        }
+        // clamp to max
+        if (chosenLOD >= LOD_COUNT) {
+            chosenLOD = LOD_COUNT - 1;
+        }
+
         // Mark chunk as uploading
         chunk->setIsUploading(true);
 
-        // For reference in meshing
+        // We'll forcibly clear dirty flags for all LOD except 'chosenLOD',
+        // so we build exactly that one.
+        for (int L = 0; L < LOD_COUNT; L++) {
+            if (L != chosenLOD) {
+                chunk->clearLODDirty(L);
+            }
+        }
+
+        // Build offset for meshing
         int offsetX = coord.x * Chunk::SIZE_X;
         int offsetY = coord.y * Chunk::SIZE_Y;
         int offsetZ = coord.z * Chunk::SIZE_Z;
 
-        // Enqueue a job that handles all dirty LODs
-        g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ]()
+        // Enqueue a job that builds just 'chosenLOD'
+        g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ, chosenLOD]()
             {
                 auto chunkStart = std::chrono::high_resolution_clock::now();
 
                 std::vector<LODMeshBuildResult> localResults;
 
-                for (int L = 0; L < LOD_COUNT; L++)
-                {
-                    if (!chunk->isLODDirty(L)) {
-                        continue; // skip if not dirty
-                    }
-                    chunk->clearLODDirty(L);
+                // If this chosenLOD was dirty, build it now
+                // (We already cleared the others.)
+                if (chunk->isLODDirty(chosenLOD)) {
+                    chunk->clearLODDirty(chosenLOD);
 
                     std::vector<Vertex> verts;
                     std::vector<uint32_t> inds;
 
-                    if (L == 0)
+                    if (chosenLOD == 0)
                     {
                         // LOD0 => normal meshing (greedy + boundary merging)
                         m_mesher.generateMeshGreedy(*chunk,
@@ -279,21 +303,18 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                         // LOD>0 => downsample => build from smaller array
                         const std::vector<int>& fullData = chunk->getBlocks();
 
-                        // Downsample
                         std::vector<int> dsData = downsampleVoxelData(
                             fullData,
                             Chunk::SIZE_X,
                             Chunk::SIZE_Y,
                             Chunk::SIZE_Z,
-                            L
+                            chosenLOD
                         );
 
-                        int dsX = Chunk::SIZE_X >> L;
-                        int dsY = Chunk::SIZE_Y >> L;
-                        int dsZ = Chunk::SIZE_Z >> L;
+                        int dsX = Chunk::SIZE_X >> chosenLOD;
+                        int dsY = Chunk::SIZE_Y >> chosenLOD;
+                        int dsZ = Chunk::SIZE_Z >> chosenLOD;
 
-                        // Build from that array (greedy or naive at LOD)
-                        // This approach doesn't consider external neighbors at LOD.
                         m_mesher.generateMeshFromArray(dsData,
                             dsX, dsY, dsZ,
                             offsetX, offsetY, offsetZ,
@@ -306,7 +327,7 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                     res.cx = coord.x;
                     res.cy = coord.y;
                     res.cz = coord.z;
-                    res.lodLevel = L;
+                    res.lodLevel = chosenLOD;
                     res.verts = std::move(verts);
                     res.inds = std::move(inds);
                     localResults.push_back(std::move(res));
@@ -329,6 +350,7 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             });
     }
 }
+// END DISTANCE-BASED LOD
 
 void VoxelWorld::pollMeshBuildResults()
 {

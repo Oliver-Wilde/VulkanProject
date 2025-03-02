@@ -34,14 +34,14 @@ public:
      * Generates a naive mesh of the given chunk by checking each visible face
      * in chunk space, comparing block IDs across chunk boundaries.
      */
-    void generateMeshNaive(
+    /*void generateMeshNaive(
         const Chunk& chunk,
         int cx, int cy, int cz,
         std::vector<Vertex>& outVertices,
         std::vector<uint32_t>& outIndices,
         int offsetX, int offsetY, int offsetZ,
         const ChunkManager& manager
-    );
+    );*/
 
     /**
      * Greedy meshing approach that merges faces where possible (fewer triangles),
@@ -60,12 +60,12 @@ public:
      * A simple naive approach used for testing. Ignores adjacency with neighbor chunks.
      * (Doesn't do cross-chunk boundary merges.)
      */
-    void generateMeshNaiveTest(
+    /*void generateMeshNaiveTest(
         const Chunk& chunk,
         std::vector<Vertex>& outVerts,
         std::vector<uint32_t>& outInds,
         int offsetX, int offsetY, int offsetZ
-    );
+    );*/
 
     /**
      * Checks if LOD0 is dirty and, if so, generates a mesh (either naive or greedy).
@@ -80,6 +80,7 @@ public:
         const ChunkManager& manager,
         bool useGreedy = true
     );
+
 
     // -------------------------------------------------------------------------
     // For building an LOD mesh from a downsampled voxel array.
@@ -115,12 +116,12 @@ private:
      * This is kept for backward compatibility, but boundary merges now rely on
      * exact block ID comparison (see getBlockIDGlobal below).
      */
-    static bool isSolidGlobal(
+    /*static bool isSolidGlobal(
         const Chunk& currentChunk,
         int cx, int cy, int cz,
         int x, int y, int z,
         const ChunkManager& manager
-    );
+    );*/
 
     /**
      * NEW helper: returns the actual block ID from current chunk or neighbor chunk,

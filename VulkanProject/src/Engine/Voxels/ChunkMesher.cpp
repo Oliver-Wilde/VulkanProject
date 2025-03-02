@@ -4,16 +4,7 @@
 #include <stdexcept>
 #include <iostream>
 
-/**
- * Determines if a voxel ID is solid by checking the VoxelTypeRegistry.
- * (Still used in e.g. LOD generation or if you want to treat >0 as solid.)
- */
-bool ChunkMesher::isSolidID(int voxelID)
-{
-    if (voxelID < 0) return false; // negative => treat as air
-    const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
-    return vt.isSolid;
-}
+
 
 /**
  * NEW helper: returns the actual block ID in current or neighbor chunk,
@@ -68,151 +59,6 @@ int ChunkMesher::getBlockIDGlobal(
     }
 }
 
-/**
- * Naive mesh generation with adjacency checks, but now we do "boundary merging"
- * by comparing the neighbor's block ID vs. our own.
- */
-void ChunkMesher::generateMeshNaive(
-    const Chunk& chunk,
-    int cx, int cy, int cz,
-    std::vector<Vertex>& outVertices,
-    std::vector<uint32_t>& outIndices,
-    int offsetX, int offsetY, int offsetZ,
-    const ChunkManager& manager)
-{
-    outVertices.clear();
-    outIndices.clear();
-
-    for (int x = 0; x < Chunk::SIZE_X; x++)
-    {
-        for (int y = 0; y < Chunk::SIZE_Y; y++)
-        {
-            for (int z = 0; z < Chunk::SIZE_Z; z++)
-            {
-                int voxelID = chunk.getBlock(x, y, z);
-                if (voxelID <= 0) continue; // skip air
-
-                const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
-                float r = vt.color.r;
-                float g = vt.color.g;
-                float b = vt.color.b;
-
-                float baseX = float(x + offsetX);
-                float baseY = float(y + offsetY);
-                float baseZ = float(z + offsetZ);
-
-                // +X face => if neighbor ID != voxelID
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x + 1, y, z, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-                // -X face
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x - 1, y, z, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-                // +Y face
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y + 1, z, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-                // -Y face
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y - 1, z, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-                // +Z face
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z + 1, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-                // -Z face
-                {
-                    int neighborID = getBlockIDGlobal(chunk, cx, cy, cz, x, y, z - 1, manager);
-                    if (neighborID != voxelID) {
-                        int startIdx = (int)outVertices.size();
-                        outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                        outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
-
-                        outIndices.push_back(startIdx + 0);
-                        outIndices.push_back(startIdx + 1);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 2);
-                        outIndices.push_back(startIdx + 3);
-                        outIndices.push_back(startIdx + 0);
-                    }
-                }
-            }
-        }
-    }
-}
 
 /**
  * Checks if LOD0 is dirty and re-meshes if needed (naive or greedy).
@@ -243,139 +89,17 @@ bool ChunkMesher::generateChunkMeshIfDirty(
             offsetX, offsetY, offsetZ, manager
         );
     }
-    else {
+    /*else {
         generateMeshNaive(
             chunk, cx, cy, cz,
             outVertices, outIndices,
             offsetX, offsetY, offsetZ,
             manager
-        );
-    }
+        );}*/
+    
     return true;
 }
 
-/**
- * A simpler test method ignoring adjacency with neighbor chunks.
- * (No changes needed for boundary merging, but kept for reference.)
- */
-void ChunkMesher::generateMeshNaiveTest(
-    const Chunk& chunk,
-    std::vector<Vertex>& outVerts,
-    std::vector<uint32_t>& outInds,
-    int offsetX, int offsetY, int offsetZ)
-{
-    outVerts.clear();
-    outInds.clear();
-
-    // ... same as before (no neighbor logic here) ...
-    for (int x = 0; x < Chunk::SIZE_X; x++)
-    {
-        for (int y = 0; y < Chunk::SIZE_Y; y++)
-        {
-            for (int z = 0; z < Chunk::SIZE_Z; z++)
-            {
-                int blockID = chunk.getBlock(x, y, z);
-                if (blockID <= 0) continue;
-
-                float r = 0.5f, g = 0.5f, b = 0.5f; // Hard-coded color
-                float bx = float(x + offsetX);
-                float by = float(y + offsetY);
-                float bz = float(z + offsetZ);
-
-                // +X face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-                // -X face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx, by, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by + 1, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by + 1, bz + 1, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-                // +Y face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx, by + 1, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx, by + 1, bz + 1, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-                // -Y face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by, bz + 1, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-                // +Z face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx, by, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz + 1, r, g, b));
-                    outVerts.push_back(Vertex(bx, by + 1, bz + 1, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-                // -Z face
-                {
-                    int startIdx = (int)outVerts.size();
-                    outVerts.push_back(Vertex(bx + 1, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx, by + 1, bz, r, g, b));
-                    outVerts.push_back(Vertex(bx + 1, by + 1, bz, r, g, b));
-
-                    outInds.push_back(startIdx + 0);
-                    outInds.push_back(startIdx + 1);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 2);
-                    outInds.push_back(startIdx + 3);
-                    outInds.push_back(startIdx + 0);
-                }
-            }
-        }
-    }
-}
 
 /**
  * The "greedy" meshing approach for LOD0, merging faces internally. We now also do
