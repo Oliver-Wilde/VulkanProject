@@ -38,7 +38,7 @@ private:
     TerrainGenerator m_terrainGenerator;
     ChunkMesher     m_mesher;
 
-    static constexpr int VIEW_DISTANCE = 16;
+    static constexpr int VIEW_DISTANCE = 32;
 
     // Multi-threaded approach
     // 1) Schedule meshing tasks for dirty chunks

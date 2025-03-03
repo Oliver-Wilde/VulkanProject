@@ -377,7 +377,7 @@ void Renderer::updateMVP()
     glm::mat4 proj = glm::perspective(glm::radians(45.f),
         float(m_swapChain->getExtent().width) /
         float(m_swapChain->getExtent().height),
-        0.1f, 100.f);
+        0.1f, 1000000.f);
     proj[1][1] *= -1.f; // Flip Y for Vulkan
 
     MVPBlock block{};
