@@ -5,12 +5,12 @@
 #include "ChunkManager.h"
 
 /**
- * Represents a single mesh vertex with position and color (or any other attribute).
+ * Represents a single mesh vertex with position + color (or other).
  */
 struct Vertex
 {
-    float px, py, pz; ///< Position (x, y, z)
-    float cx, cy, cz; ///< Color (r, g, b)
+    float px, py, pz; ///< position
+    float cx, cy, cz; ///< color
 
     Vertex(float px_, float py_, float pz_,
         float cx_, float cy_, float cz_)
@@ -20,32 +20,16 @@ struct Vertex
 };
 
 /**
- * The ChunkMesher class can build a mesh (vertices + indices) from a chunk’s voxel data.
- * It supports naive or "greedy" meshing, plus a method to mesh from a custom array.
- *
- * Features:
- *  - Boundary merging: if a neighbor chunk has the same voxel ID, skip that face.
- *  - LOD meshing with local adjacency checks if desired.
+ * The ChunkMesher class can build:
+ *  - Normal LOD geometry for each chunk
+ *  - Optional seam geometry bridging chunk boundaries
  */
 class ChunkMesher
 {
 public:
     /**
-     * Generates a naive mesh of the given chunk by checking each visible face
-     * in chunk space, comparing block IDs across chunk boundaries.
-     */
-    /*void generateMeshNaive(
-        const Chunk& chunk,
-        int cx, int cy, int cz,
-        std::vector<Vertex>& outVertices,
-        std::vector<uint32_t>& outIndices,
-        int offsetX, int offsetY, int offsetZ,
-        const ChunkManager& manager
-    );*/
-
-    /**
-     * Greedy meshing approach that merges faces where possible (fewer triangles),
-     * also skipping boundaries shared with neighbor chunks if they have the same voxel ID.
+     * Generates a "greedy" mesh for LOD0 (or the chunk’s data).
+     * Checks neighbor blocks to skip hidden faces.
      */
     void generateMeshGreedy(
         const Chunk& chunk,
@@ -57,19 +41,22 @@ public:
     );
 
     /**
-     * A simple naive approach used for testing. Ignores adjacency with neighbor chunks.
-     * (Doesn't do cross-chunk boundary merges.)
+     * Builds a mesh from a downsampled array (for LOD1, LOD2, etc.).
+     * Optionally merges internal faces if useGreedy==true.
+     * Does NOT do cross-chunk boundaries for LODs.
      */
-    /*void generateMeshNaiveTest(
-        const Chunk& chunk,
-        std::vector<Vertex>& outVerts,
-        std::vector<uint32_t>& outInds,
-        int offsetX, int offsetY, int offsetZ
-    );*/
+    void generateMeshFromArray(
+        const std::vector<int>& voxelArray,
+        int dsX, int dsY, int dsZ,
+        int worldOffsetX, int worldOffsetY, int worldOffsetZ,
+        std::vector<Vertex>& outVertices,
+        std::vector<uint32_t>& outIndices,
+        bool useGreedy = false
+    );
 
     /**
-     * Checks if LOD0 is dirty and, if so, generates a mesh (either naive or greedy).
-     * This is your existing function, focusing on LOD0 usage.
+     * (Legacy) If LOD0 is dirty, build the chunk. This remains basically
+     * the same but references the new generateMeshGreedy method.
      */
     bool generateChunkMeshIfDirty(
         Chunk& chunk,
@@ -81,51 +68,32 @@ public:
         bool useGreedy = true
     );
 
-
     // -------------------------------------------------------------------------
-    // For building an LOD mesh from a downsampled voxel array.
+    // SEAM / STITCH Methods (placeholders)
     // -------------------------------------------------------------------------
     /**
-     * Builds a mesh (naive or greedy) from an in-memory voxel array that
-     * doesn't necessarily match the chunk's full resolution (dsX * dsY * dsZ).
+     * Build a "stitch" mesh bridging chunk A’s face with chunk B’s face,
+     * if they differ by exactly 1 in LOD.
      *
-     * @param voxelArray   Downsampled array (dsX * dsY * dsZ) of block IDs.
-     * @param dsX, dsY, dsZ  Dimensions of that downsampled array.
-     * @param worldOffsetX,Y,Z  World-space offset for these voxels.
-     * @param outVertices / outIndices  Output mesh data.
-     * @param useGreedy    Whether to merge faces. Typically no neighbor adjacency at LOD.
+     * This is a placeholder demonstration. The full logic depends on how
+     * you want to morph or subdivide the boundary.
      */
-    void generateMeshFromArray(
-        const std::vector<int>& voxelArray,
-        int dsX, int dsY, int dsZ,
-        int worldOffsetX, int worldOffsetY, int worldOffsetZ,
+    void buildLODBoundaryStitch(
+        const Chunk& chunkA,
+        int lodA,
+        const Chunk& chunkB,
+        int lodB,
+        // Possibly info about the shared boundary or direction
+        // ...
         std::vector<Vertex>& outVertices,
-        std::vector<uint32_t>& outIndices,
-        bool useGreedy = false
+        std::vector<uint32_t>& outIndices
     );
 
 private:
-    /**
-     * Checks if a voxelID is "solid" by looking up its VoxelType in VoxelTypeRegistry.
-     * Still used in some older code or for quick checks (LOD, etc.).
-     */
-    static bool isSolidID(int voxelID);
 
     /**
-     * OLD method that returns 'true' if (x,y,z) is solid in current or neighbor chunk.
-     * This is kept for backward compatibility, but boundary merges now rely on
-     * exact block ID comparison (see getBlockIDGlobal below).
-     */
-    /*static bool isSolidGlobal(
-        const Chunk& currentChunk,
-        int cx, int cy, int cz,
-        int x, int y, int z,
-        const ChunkManager& manager
-    );*/
-
-    /**
-     * NEW helper: returns the actual block ID from current chunk or neighbor chunk,
-     * or -1 if the neighbor chunk is missing or out-of-bounds. Used to unify boundaries.
+     * Helper that returns block ID from current or neighbor chunk,
+     * or 0 if neighbor is missing.  (Used in LOD0 to skip faces.)
      */
     static int getBlockIDGlobal(
         const Chunk& currentChunk,
@@ -135,8 +103,7 @@ private:
     );
 
     // -------------------------------------------------------------------------
-    // Internal buildQuad... methods for the greedy approach.
-    // These remain the same, no direct boundary logic here.
+    // Internal buildQuad... methods
     // -------------------------------------------------------------------------
     void buildQuadPosZ(
         int startX, int startY, int width, int height, int z,

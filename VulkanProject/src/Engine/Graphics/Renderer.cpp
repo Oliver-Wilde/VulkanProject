@@ -28,13 +28,12 @@
 // If you want to query CPU usage
 static CpuProfiler g_cpuProfiler;
 
-// For frustum build
+// Build frustum for culling
 static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
     float aspect = float(extent.width) / float(extent.height);
     glm::mat4 proj = glm::perspective(glm::radians(45.f), aspect, 0.1f, 1000.f);
-    // Flip Y for Vulkan
-    proj[1][1] *= -1.f;
+    proj[1][1] *= -1.f; // flip Y for Vulkan
 
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 vp = proj * view;
@@ -53,7 +52,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_swapChain = new SwapChain();
     m_swapChain->init(m_context, m_window);
 
-    // 2) Create resource & pipeline managers
+    // 2) Create managers
     m_resourceMgr = new ResourceManager(m_context);
     m_pipelineMgr = new PipelineManager(m_context, m_resourceMgr);
     m_rpManager = new RenderPassManager(m_context, m_swapChain);
@@ -62,7 +61,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
-    // 4) Create an ImGui descriptor pool
+    // 4) ImGui descriptor pool
     {
         VkDescriptorPoolSize poolSizes[] = {
             { VK_DESCRIPTOR_TYPE_SAMPLER,                1000 },
@@ -103,7 +102,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     // 6) MVP Uniform Buffer
     createMVPUniformBuffer();
 
-    // 7) Create 2 frames in flight
+    // 7) Create frames in flight
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         VkCommandBufferAllocateInfo cmdAlloc{};
@@ -118,7 +117,6 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
             throw std::runtime_error("Failed to allocate command buffer for frame " + std::to_string(i));
         }
 
-        // Semaphores
         VkSemaphoreCreateInfo semInfo{};
         semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
@@ -129,7 +127,6 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
             throw std::runtime_error("Failed to create semaphores for frame " + std::to_string(i));
         }
 
-        // Fence
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -152,7 +149,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         GLFWwindow* glfwWindow = m_window->getGLFWwindow();
         ImGui_ImplGlfw_InitForVulkan(glfwWindow, true);
 
-        // Setup ImGui Vulkan init
+        // Setup ImGui Vulkan
         ImGui_ImplVulkan_InitInfo init_info{};
         init_info.Instance = m_context->getInstance();
         init_info.PhysicalDevice = m_context->getPhysicalDevice();
@@ -370,27 +367,23 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
-/**
- * A simple function to decide LOD level based on distance to chunk center.
- * You can tweak thresholds or do a more advanced approach.
- */
 static int computeLODLevel(float dist)
 {
-    if (dist < 40.f) return 0;  // close => LOD0
+    if (dist < 40.f)  return 0;
     else if (dist < 80.f) return 1;
-    else return 2;             // far => LOD2
+    else return 2;
 }
 
 void Renderer::renderFrame()
 {
-    // Wait on the fence for this frame
+    // Wait on fence
     vkWaitForFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence,
         VK_TRUE,
         UINT64_MAX);
 
-    // Reset it
+    // Reset fence
     vkResetFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence);
@@ -398,9 +391,10 @@ void Renderer::renderFrame()
     // Update MVP
     updateMVP();
 
-    // Possibly build frustum if culling
+    // Possibly build frustum for culling
     Frustum frustum;
-    if (m_enableFrustumCulling) {
+    if (m_enableFrustumCulling)
+    {
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
@@ -461,7 +455,6 @@ void Renderer::renderFrame()
         0, 1, &m_mvpDescriptorSet,
         0, nullptr);
 
-    // Stats counters
     uint32_t totalVertices = 0;
     uint32_t drawCallCount = 0;
     float dt = (m_time ? m_time->getDeltaTime() : 0.f);
@@ -483,8 +476,7 @@ void Renderer::renderFrame()
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            // Compute distance from camera to chunk center
-            // e.g. chunk center = (chunk->worldX() + 0.5)*Chunk::SIZE_X, etc.
+            // compute distance from camera
             float chunkCenterX = (chunk->worldX() + 0.5f) * float(Chunk::SIZE_X);
             float chunkCenterY = (chunk->worldY() + 0.5f) * float(Chunk::SIZE_Y);
             float chunkCenterZ = (chunk->worldZ() + 0.5f) * float(Chunk::SIZE_Z);
@@ -493,68 +485,86 @@ void Renderer::renderFrame()
                 - glm::vec3(chunkCenterX, chunkCenterY, chunkCenterZ));
             float dist = glm::length(diff);
 
-            // Decide which LOD to use
             int lodLevel = computeLODLevel(dist);
 
-            // Access chunk’s LOD data
+            // Access LOD data
             const auto& lodData = chunk->getLODData(lodLevel);
-
-            // If LOD not valid, skip or fallback
-            if (!lodData.valid)
-            {
-                // Fallback to LOD0 if available
-                const auto& fallbackLOD = chunk->getLODData(0);
-                if (!fallbackLOD.valid) {
-                    // skip entirely
-                    continue;
-                }
-                else {
-                    // use LOD0
-                    // But LOD0 is basically chunk->getVertexBuffer()...
-                    // We'll do:
-                    if (fallbackLOD.vertexBuffer == VK_NULL_HANDLE
-                        || fallbackLOD.indexBuffer == VK_NULL_HANDLE
-                        || fallbackLOD.indexCount == 0)
-                    {
-                        continue;
-                    }
-                    VkDeviceSize offsets[] = { 0 };
-                    vkCmdBindVertexBuffers(cmdBuf, 0, 1, &fallbackLOD.vertexBuffer, offsets);
-                    vkCmdBindIndexBuffer(cmdBuf, fallbackLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    vkCmdDrawIndexed(cmdBuf, fallbackLOD.indexCount, 1, 0, 0, 0);
-                    totalVertices += fallbackLOD.vertexCount;
-                    drawCallCount++;
-                }
-                continue;
-            }
-
-            // If LOD data is valid
-            if (lodData.vertexBuffer == VK_NULL_HANDLE
+            if (!lodData.valid
+                || lodData.vertexBuffer == VK_NULL_HANDLE
                 || lodData.indexBuffer == VK_NULL_HANDLE
                 || lodData.indexCount == 0)
             {
-                continue;
-            }
-
-            // Optional frustum cull
-            if (m_enableFrustumCulling)
-            {
-                glm::vec3 minB, maxB;
-                chunk->getBoundingBox(minB, maxB);
-                if (!frustum.intersectsAABB(minB, maxB)) {
+                // fallback to LOD0 if possible
+                const auto& fallbackLOD = chunk->getLODData(0);
+                if (!fallbackLOD.valid
+                    || fallbackLOD.vertexBuffer == VK_NULL_HANDLE
+                    || fallbackLOD.indexBuffer == VK_NULL_HANDLE
+                    || fallbackLOD.indexCount == 0)
+                {
+                    // skip
                     continue;
                 }
+                else
+                {
+                    // use fallback
+                    VkDeviceSize offsets[] = { 0 };
+                    vkCmdBindVertexBuffers(cmdBuf, 0, 1, &fallbackLOD.vertexBuffer, offsets);
+                    vkCmdBindIndexBuffer(cmdBuf, fallbackLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                    vkCmdDrawIndexed(cmdBuf, fallbackLOD.indexCount, 1, 0, 0, 0);
+
+                    totalVertices += fallbackLOD.vertexCount;
+                    drawCallCount++;
+                }
+            }
+            else
+            {
+                // LOD data is valid
+                // Optional frustum cull
+                if (m_enableFrustumCulling)
+                {
+                    glm::vec3 minB, maxB;
+                    chunk->getBoundingBox(minB, maxB);
+                    if (!frustum.intersectsAABB(minB, maxB))
+                    {
+                        continue;
+                    }
+                }
+
+                // Bind & draw
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &lodData.vertexBuffer, offsets);
+                vkCmdBindIndexBuffer(cmdBuf, lodData.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmdBuf, lodData.indexCount, 1, 0, 0, 0);
+
+                totalVertices += lodData.vertexCount;
+                drawCallCount++;
             }
 
-            // Bind and draw
-            VkDeviceSize offsets[] = { 0 };
-            vkCmdBindVertexBuffers(cmdBuf, 0, 1, &lodData.vertexBuffer, offsets);
-            vkCmdBindIndexBuffer(cmdBuf, lodData.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // Now draw seam geometry for each face (if valid).
+            // We'll do it unconditionally or you might check "if neighbor LOD != lodLevel".
+            for (int faceDir = 0; faceDir < 6; faceDir++)
+            {
+                const auto& seamData = chunk->getSeamData(static_cast<Chunk::SeamDirection>(faceDir));
+                if (!seamData.valid
+                    || seamData.seamVertexBuffer == VK_NULL_HANDLE
+                    || seamData.seamIndexBuffer == VK_NULL_HANDLE
+                    || seamData.indexCount == 0)
+                {
+                    continue;
+                }
 
-            vkCmdDrawIndexed(cmdBuf, lodData.indexCount, 1, 0, 0, 0);
-            totalVertices += lodData.vertexCount;
-            drawCallCount++;
+                // Optionally also frustum-cull the seam 
+                // (though you’d need a bounding shape for it).
+                // For now, we’ll just draw it.
+
+                VkDeviceSize offsets2[] = { 0 };
+                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &seamData.seamVertexBuffer, offsets2);
+                vkCmdBindIndexBuffer(cmdBuf, seamData.seamIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmdBuf, seamData.indexCount, 1, 0, 0, 0);
+
+                totalVertices += seamData.vertexCount;
+                drawCallCount++;
+            }
         }
     }
 
@@ -640,14 +650,12 @@ void Renderer::renderFrame()
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-/**
- * Recreate swapchain on resize or invalidation.
- */
 void Renderer::recreateSwapChain()
 {
     int width, height;
     glfwGetFramebufferSize(m_window->getGLFWwindow(), &width, &height);
-    if (width == 0 || height == 0) {
+    if (width == 0 || height == 0)
+    {
         return; // window minimized
     }
 
@@ -689,7 +697,6 @@ void Renderer::recreateSwapChain()
 
     // If ImGui needs updating:
     ImGui_ImplVulkan_SetMinImageCount(2);
-    
 }
 
 void Renderer::createBuffer(
@@ -742,7 +749,8 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
-    if (buffer.size() >= ROLLING_AVG_SAMPLES) {
+    if (buffer.size() >= ROLLING_AVG_SAMPLES)
+    {
         buffer.pop_front();
     }
     buffer.push_back(value);
@@ -752,7 +760,8 @@ float Renderer::computeAverage(const std::deque<float>& buffer)
 {
     if (buffer.empty()) return 0.f;
     float sum = 0.f;
-    for (float val : buffer) {
+    for (float val : buffer)
+    {
         sum += val;
     }
     return sum / float(buffer.size());

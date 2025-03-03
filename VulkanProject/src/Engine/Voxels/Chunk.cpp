@@ -1,7 +1,7 @@
 #include "Chunk.h"
 #include <stdexcept>
 #include <cstddef>       // for size_t
-#include <glm/vec3.hpp>  // for glm::vec3
+#include <glm/vec3.hpp>
 #include <utility>       // for std::pair
 
 Chunk::Chunk(int worldX, int worldY, int worldZ)
@@ -9,36 +9,34 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     , m_worldY(worldY)
     , m_worldZ(worldZ)
 {
-    // Allocate block data: 16x16x16 by default => 4096 ints
+    // Allocate block data: 16x16x16 => 4096 ints, default to 0 (air)
     size_t total = static_cast<size_t>(SIZE_X)
         * static_cast<size_t>(SIZE_Y)
         * static_cast<size_t>(SIZE_Z);
     m_blocks.resize(total, 0); // 0 => "Air"
 
-    // Initially, mark all LODs dirty (true). 
-    // Already done in the member initializer list: {true,true,true}
-    // so there's no extra code needed here for LOD dirty flags.
+    // By default, LOD dirty flags are set to true in the initializer list.
+    // Seam data is also defaulted to invalid. No special code needed here.
 }
 
 Chunk::~Chunk()
 {
-    // Typically, GPU buffer destruction is done elsewhere (e.g. VoxelWorld)
-    // so no special cleanup here. 
-    // (But if desired, you could do it here.)
+    // Typically, GPU buffer destruction is done externally (e.g. VoxelWorld).
+    // If you wanted to unify that destruction here, you could do it, but 
+    // it’s more common to let the manager or VoxelWorld handle it.
 }
 
 int Chunk::getBlock(int x, int y, int z) const
 {
-    // Bounds check
+    // Out-of-bounds => treat as air
     if (x < 0 || x >= SIZE_X ||
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        // Return -1 if out-of-bounds => treat as air
         return -1;
     }
 
-    // Flatten (x,y,z) => index
+    // Flatten index (x + SIZE_X*(y + SIZE_Y*z))
     size_t idx = static_cast<size_t>(x)
         + static_cast<size_t>(SIZE_X) * (
             static_cast<size_t>(y)
@@ -49,12 +47,12 @@ int Chunk::getBlock(int x, int y, int z) const
 
 void Chunk::setBlock(int x, int y, int z, int voxelID)
 {
-    // Bounds check
+    // Out-of-bounds => do nothing
     if (x < 0 || x >= SIZE_X ||
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        return; // out of range => do nothing
+        return;
     }
 
     // Flatten index
@@ -65,18 +63,19 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
             );
 
     int oldVal = m_blocks[idx];
-    if (oldVal != voxelID) {
-        // Update the block
+    if (oldVal != voxelID)
+    {
         m_blocks[idx] = voxelID;
-
-        // Mark *all* LODs dirty, because the chunk changed
+        // Mark all LOD levels dirty
         markAllLODsDirty();
+        // Potentially mark all seams dirty as well, since block changes
+        // might affect boundary transitions. That’s optional:
+        // markAllSeamsDirty();
     }
 }
 
 void Chunk::markAllLODsDirty()
 {
-    // Mark every LOD level as dirty
     for (int level = 0; level < MAX_LOD_LEVELS; level++) {
         m_lodDirty[level] = true;
     }
@@ -84,9 +83,9 @@ void Chunk::markAllLODsDirty()
 
 void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 {
-    float chunkOriginX = static_cast<float>(m_worldX * SIZE_X);
-    float chunkOriginY = static_cast<float>(m_worldY * SIZE_Y);
-    float chunkOriginZ = static_cast<float>(m_worldZ * SIZE_Z);
+    float chunkOriginX = float(m_worldX * SIZE_X);
+    float chunkOriginY = float(m_worldY * SIZE_Y);
+    float chunkOriginZ = float(m_worldZ * SIZE_Z);
 
     outMin = glm::vec3(chunkOriginX, chunkOriginY, chunkOriginZ);
     outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
@@ -99,7 +98,7 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
 
     for (int voxel : m_blocks)
     {
-        if (voxel == 0)  // air
+        if (voxel == 0)  // 0 => air
             emptyCount++;
         else
             activeCount++;

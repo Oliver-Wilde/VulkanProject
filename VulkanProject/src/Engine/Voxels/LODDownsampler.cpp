@@ -1,29 +1,34 @@
 #include "LODDownsampler.h"
-#include "LODDownsampler.h"
 #include <stdexcept>
+#include <algorithm>
+#include <vector>
 
 /**
- * Example downsampler:
- *   - Factor = (1 << lodLevel)
- *   - For each cell in the downsampled array, we look at the sub-block
- *     [factor x factor x factor] in the original data, and pick the first
- *     non-air block we find. (Air is assumed ID=0.)
- *   - This is just a naive approach; you can do a majority-vote or
- *     average-height rule if you prefer.
+ * Advanced downsampleVoxelData:
+ *  - Factor = (1 << lodLevel).
+ *  - For each (x,z) in the downsampled space, we scan the corresponding
+ *    sub-block in the original data to find the highest solid block (if any),
+ *    and detect if water or lava is present.
+ *  - Then we fill that column in the LOD array with a simple layering rule:
+ *      grass on top (ID=2),
+ *      a couple layers of dirt (ID=3),
+ *      then stone (ID=1) below.
+ *    If water (ID=9) or lava (ID=10) appears in the sub-block,
+ *    we fill up to the top with that fluid instead.
  */
+
 std::vector<int> downsampleVoxelData(
     const std::vector<int>& fullData,
     int sx, int sy, int sz,
     int lodLevel
 )
 {
+    // If LOD=0 => just return original
     if (lodLevel <= 0) {
-        // LOD=0 => no downsampling => just return the original array
-        // or throw, depending on how you want to handle LOD=0.
         return fullData;
     }
 
-    // Compute the factor (2^lodLevel)
+    // Calculate factor (2^lodLevel)
     const int factor = 1 << lodLevel;
 
     // Dimensions of the downsampled array
@@ -31,56 +36,172 @@ std::vector<int> downsampleVoxelData(
     const int dsy = sy / factor;
     const int dsz = sz / factor;
 
-    // If dsx, dsy, or dsz is zero, the chunk might be too small or lodLevel is too high
     if (dsx <= 0 || dsy <= 0 || dsz <= 0) {
         throw std::runtime_error(
             "downsampleVoxelData: LOD level is too high for the given chunk size."
         );
     }
 
-    // Allocate downsampled array
-    std::vector<int> result(dsx * dsy * dsz, 0); // default to 0 = air
+    // Prepare the result array (dsx * dsy * dsz)
+    std::vector<int> result(dsx * dsy * dsz, 0);
 
-    // For each cell in the smaller array, gather the sub-region in the full array
-    for (int z = 0; z < dsz; z++) {
-        for (int y = 0; y < dsy; y++) {
-            for (int x = 0; x < dsx; x++) {
+    // Constants for block IDs (change as needed)
+    const int AIR = 0;
+    const int GRASS = 2;
+    const int DIRT = 3;
+    const int STONE = 1;
+    const int WATER = 9;
+    const int LAVA = 10;
 
-                // The top-left-front corner of this sub-block in fullData
-                const int startX = x * factor;
-                const int startY = y * factor;
-                const int startZ = z * factor;
+    // Temporary arrays for each (x,z) column to store:
+    //   - the highest Y (within the sub-block)
+    //   - whether we found water or lava
+    std::vector<int>  columnMaxY(dsx * dsz, -1);
+    std::vector<bool> columnHasWater(dsx * dsz, false);
+    std::vector<bool> columnHasLava(dsx * dsz, false);
 
-                // Example "first-non-air" rule:
-                int chosen = 0; // 0 => air
-                bool foundSolid = false;
+    // ---------------------------
+    // PASS 1: Scan sub-blocks to find max Y and fluid flags
+    // ---------------------------
+    for (int z = 0; z < dsz; z++)
+    {
+        for (int x = 0; x < dsx; x++)
+        {
+            // The sub-block region in the original data:
+            int startX = x * factor;
+            int startZ = z * factor;
 
-                // Loop over the sub-block
-                for (int zz = 0; zz < factor && !foundSolid; zz++) {
-                    for (int yy = 0; yy < factor && !foundSolid; yy++) {
-                        for (int xx = 0; xx < factor; xx++) {
-                            // Compute the index in fullData
-                            const int fx = startX + xx;
-                            const int fy = startY + yy;
-                            const int fz = startZ + zz;
+            int maxYFound = -1;
+            bool hasWater = false;
+            bool hasLava = false;
 
-                            // 1D index into fullData
-                            const int fullIdx = fx + sx * (fy + sy * fz);
-                            int voxelID = fullData[fullIdx];
+            // For simplicity, we scan all Y in [0..factor) within that sub-block,
+            // though you could scan [0..factor*someLODHeight], etc.
+            for (int localZ = 0; localZ < factor; localZ++)
+            {
+                for (int localY = 0; localY < factor; localY++)
+                {
+                    for (int localX = 0; localX < factor; localX++)
+                    {
+                        int fx = startX + localX;
+                        int fy = localY;          // We'll iterate within [0..factor)
+                        int fz = startZ + localZ;
 
-                            // If we see a non-air block, pick it and break
-                            if (voxelID != 0) {
-                                chosen = voxelID;
-                                foundSolid = true;
-                                break;
+                        // Safety check in case factor * dsy > sy
+                        if (fx < 0 || fx >= sx ||
+                            fy < 0 || fy >= sy ||
+                            fz < 0 || fz >= sz)
+                        {
+                            continue;
+                        }
+
+                        // Index in fullData
+                        int fullIdx = fx + sx * (fy + sy * fz);
+                        int voxelID = fullData[fullIdx];
+
+                        if (voxelID != AIR)
+                        {
+                            // Track the top Y
+                            if (localY > maxYFound) {
+                                maxYFound = localY;
+                            }
+                            // If it's water or lava, note that
+                            if (voxelID == WATER) {
+                                hasWater = true;
+                            }
+                            else if (voxelID == LAVA) {
+                                hasLava = true;
                             }
                         }
                     }
                 }
+            }
 
-                // Store the chosen voxel in the downsampled array
-                const int dsIdx = x + dsx * (y + dsy * z);
-                result[dsIdx] = chosen;
+            // Save results for this column
+            columnMaxY[x + z * dsx] = maxYFound;
+            columnHasWater[x + z * dsx] = hasWater;
+            columnHasLava[x + z * dsx] = hasLava;
+        }
+    }
+
+    // ---------------------------
+    // PASS 2: Fill the downsampled 3D array
+    // ---------------------------
+    // We treat each (x,z) as a "column" in the downsampled data,
+    // then fill from bottom to top with stone/dirt/grass,
+    // or water/lava if found in the sub-block.
+
+    for (int z = 0; z < dsz; z++)
+    {
+        for (int y = 0; y < dsy; y++)
+        {
+            for (int x = 0; x < dsx; x++)
+            {
+                // The final index in the LOD array
+                int dsIdx = x + dsx * (y + dsy * z);
+
+                int topY = columnMaxY[x + z * dsx];
+                if (topY < 0)
+                {
+                    // No solid blocks => air
+                    result[dsIdx] = AIR;
+                    continue;
+                }
+
+                bool hasWater = columnHasWater[x + z * dsx];
+                bool hasLava = columnHasLava[x + z * dsx];
+
+                // If water or lava is present in that sub-block, we simply fill
+                // up to topY with that fluid (in the downsampled scale).
+                // Because factor in Y => topY is in [0..factor). We must
+                // compare y to topY/factor in downsampled coordinates. But
+                // a simpler approach is to assume topY maps to topY in LOD space
+                // for direct layering.
+
+                // For each LOD cell y in [0..dsy), if y <= topY => fill,
+                // else => air. (We could scale it more precisely if topY> dsy.)
+                // This is a simplified approach.
+
+                if (hasWater)
+                {
+                    // Water wins out if both water & lava present
+                    if (y <= topY)
+                        result[dsIdx] = WATER;
+                    else
+                        result[dsIdx] = AIR;
+                }
+                else if (hasLava)
+                {
+                    if (y <= topY)
+                        result[dsIdx] = LAVA;
+                    else
+                        result[dsIdx] = AIR;
+                }
+                else
+                {
+                    // No water/lava => do layering
+                    // We'll keep it simple: bottom is stone, the top 2 layers are dirt, topmost is grass.
+                    // If (y == topY) => grass
+                    // else if (y >= topY-2 && y < topY) => dirt
+                    // else => stone
+
+                    if (y > topY)
+                    {
+                        result[dsIdx] = AIR; // above top
+                    }
+                    else if (y == topY)
+                    {
+                        result[dsIdx] = GRASS;
+                    }
+                    else if (y >= topY - 2)
+                    {
+                        result[dsIdx] = DIRT;
+                    }
+                    else
+                    {
+                        result[dsIdx] = STONE;
+                    }
+                }
             }
         }
     }

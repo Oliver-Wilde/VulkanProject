@@ -1,25 +1,15 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "ChunkManager.h"
-#include <stdexcept>
-#include <Engine/Utils/Logger.h>
+#include <Engine/Utils/Logger.h> // or your logger path
 
-// -----------------------------------------------------------------------------
-// Constructor / Destructor
-// -----------------------------------------------------------------------------
 ChunkManager::ChunkManager()
 {
 }
 
 ChunkManager::~ChunkManager()
 {
-    // unique_ptr automatically cleans up all Chunks in m_chunks
+    // unique_ptr auto-cleans all Chunks
 }
 
-// -----------------------------------------------------------------------------
-// Public Methods
-// -----------------------------------------------------------------------------
 bool ChunkManager::hasChunk(int cx, int cy, int cz) const
 {
     ChunkCoord coord{ cx, cy, cz };
@@ -53,7 +43,6 @@ Chunk* ChunkManager::createChunk(int cx, int cy, int cz)
         + std::to_string(cx) + ", "
         + std::to_string(cy) + ", "
         + std::to_string(cz) + ")");
-
     return chunkPtr;
 }
 
@@ -64,7 +53,6 @@ void ChunkManager::removeChunk(int cx, int cy, int cz)
     if (it != m_chunks.end())
     {
         m_chunks.erase(it);
-
         Logger::Info("Removing chunk at ("
             + std::to_string(cx) + ", "
             + std::to_string(cy) + ", "
@@ -75,12 +63,10 @@ void ChunkManager::removeChunk(int cx, int cy, int cz)
 std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const {
     size_t totalActive = 0;
     size_t totalEmpty = 0;
-
     for (const auto& kv : m_chunks) {
-        std::pair<size_t, size_t> usage = kv.second->getVoxelUsage();
+        auto usage = kv.second->getVoxelUsage();
         totalActive += usage.first;
         totalEmpty += usage.second;
     }
-    
     return { totalActive, totalEmpty };
 }
