@@ -36,24 +36,7 @@ public:
     // Public Methods
     // -----------------------------------------------------------------------------
 
-    /**
-     * Generates a naive mesh of the given chunk by checking each visible face.
-     *
-     * @param chunk         Reference to the chunk from which to generate mesh data.
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space).
-     * @param outVertices   Output vector of vertices.
-     * @param outIndices    Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offset to apply to all positions (usually world position).
-     * @param manager       Reference to the ChunkManager for neighbor checks.
-     */
-    void generateMeshNaive(
-        const Chunk& chunk,
-        int cx, int cy, int cz,
-        std::vector<Vertex>& outVertices,
-        std::vector<uint32_t>& outIndices,
-        int offsetX, int offsetY, int offsetZ,
-        const ChunkManager& manager
-    );
+    
 
     /**
      * Generates a "greedy" mesh of the given chunk by merging faces where possible.
@@ -74,20 +57,7 @@ public:
         const ChunkManager& manager
     );
 
-    /**
-     * A simple test function demonstrating naive mesh creation without neighbor checks.
-     *
-     * @param chunk         Reference to the chunk.
-     * @param outVerts      Output vector of vertices.
-     * @param outInds       Output vector of indices.
-     * @param offsetX, offsetY, offsetZ  Offsets for positioning in world space.
-     */
-    void generateMeshNaiveTest(
-        const Chunk& chunk,
-        std::vector<Vertex>& outVerts,
-        std::vector<uint32_t>& outInds,
-        int offsetX, int offsetY, int offsetZ
-    );
+    
 
     /**
      * Checks if the chunk is dirty and, if so, generates a mesh using either naive or greedy meshing.
@@ -116,30 +86,9 @@ private:
     // Private Helper Methods
     // -----------------------------------------------------------------------------
 
-    /**
-     * Checks if a given voxelID represents a solid block.
-     *
-     * @param voxelID The ID of the voxel to check.
-     * @return true if solid, false if not.
-     */
-    static bool isSolidID(int voxelID);
+    
 
-    /**
-     * Checks if a voxel is solid in the global sense, taking into account neighboring chunks.
-     *
-     * @param currentChunk  Reference to the current chunk.
-     * @param cx, cy, cz    The chunk coordinates (in chunk-space) of the current chunk.
-     * @param x, y, z       Local coordinates within the chunk.
-     * @param manager       Reference to the ChunkManager for neighbor checks.
-     * @return true if solid, false otherwise.
-     */
-    static bool isSolidGlobal(
-        const Chunk& currentChunk,
-        int cx, int cy, int cz,
-        int x, int y, int z,
-        const ChunkManager& manager
-    );
-
+    
     // -----------------------------------------------------------------------------
     // Build Quad Methods (used in greedy meshing)
     // -----------------------------------------------------------------------------
