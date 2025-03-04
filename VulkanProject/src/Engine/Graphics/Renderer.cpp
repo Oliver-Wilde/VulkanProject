@@ -39,7 +39,7 @@ extern ThreadPool g_threadPool;
 static Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
     float aspect = float(extent.width) / float(extent.height);
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 1000.0f);
     // Flip Y for Vulkan
     proj[1][1] *= -1.f;
 

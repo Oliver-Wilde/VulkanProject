@@ -1,76 +1,73 @@
 #include "TerrainGenerator.h"
-#include <cmath>
+#include <chrono>
 
-// ---------- ADDED FOR TIMING ----------
-#include <chrono>        // for timing
 static double s_totalGenTime = 0.0;
 static int    s_genCount = 0;
-// --------------------------------------
 
-// -----------------------------------------------------------------------------
-// Constructor
-// -----------------------------------------------------------------------------
 TerrainGenerator::TerrainGenerator()
 {
+    m_seed = 1337;
     m_noise.SetSeed(m_seed);
-    m_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    m_noise.SetFrequency(m_frequency);
-    // Additional fractal parameters can be set here if desired.
+
+    // Keep ridged for interesting spiky terrain,
+    // but smaller amplitude => ground won't go super high
+    m_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2S);
+    m_noise.SetFrequency(0.005f);
+    m_noise.SetFractalType(FastNoiseLite::FractalType_Ridged);
+    m_noise.SetFractalOctaves(4);
+    m_noise.SetFractalLacunarity(2.0f);
+    m_noise.SetFractalGain(0.5f);
 }
 
-// -----------------------------------------------------------------------------
-// Public Methods
-// -----------------------------------------------------------------------------
 void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 {
     using namespace std::chrono;
     auto startTime = high_resolution_clock::now();
 
-    // World offsets based on chunk coordinates
     int worldXOffset = cx * Chunk::SIZE_X;
+    int worldYOffset = cy * Chunk::SIZE_Y;
     int worldZOffset = cz * Chunk::SIZE_Z;
 
-    // Iterate over the local x,z coordinates in the chunk
+    // Lower base + amplitude for smaller worlds
+    int baseLevel = 2;
+    int mountainAmp = 64;
+
     for (int localX = 0; localX < Chunk::SIZE_X; localX++)
     {
         for (int localZ = 0; localZ < Chunk::SIZE_Z; localZ++)
         {
-            int worldX = worldXOffset + localX;
-            int worldZ = worldZOffset + localZ;
-
-            // Sample noise (range ~[-1..1])
-            float nVal = m_noise.GetNoise(static_cast<float>(worldX),
-                static_cast<float>(worldZ));
-            // Convert to [0..1]
+            float nVal = m_noise.GetNoise(
+                float(worldXOffset + localX),
+                float(worldZOffset + localZ)
+            );
             float normalized = (nVal + 1.0f) * 0.5f;
 
-            // Scale to a height value within [0..Chunk::SIZE_Y)
-            int heightVal = static_cast<int>(normalized * (Chunk::SIZE_Y * 0.5f));
-            if (heightVal < 0) heightVal = 0;
-            if (heightVal >= Chunk::SIZE_Y) heightVal = Chunk::SIZE_Y - 1;
+            // terrain up to ~ Y=(baseLevel+mountainAmp)=8+24=32 at most
+            int terrainHeight = baseLevel + int(normalized * mountainAmp);
 
-            // Fill from y=0 up to y=heightVal
-            for (int y = 0; y <= heightVal; y++)
+            for (int localY = 0; localY < Chunk::SIZE_Y; localY++)
             {
-                if (y == heightVal) {
-                    // Top layer => Grass (ID=2)
-                    chunk.setBlock(localX, y, localZ, 2);
+                int globalY = worldYOffset + localY;
+
+                if (globalY <= terrainHeight)
+                {
+                    if (globalY == terrainHeight)
+                        chunk.setBlock(localX, localY, localZ, 2); // Grass
+                    else if (globalY >= terrainHeight - 2)
+                        chunk.setBlock(localX, localY, localZ, 3); // Dirt
+                    else
+                        chunk.setBlock(localX, localY, localZ, 1); // Stone
                 }
-                else if (y >= heightVal - 2) {
-                    // Next two layers => Dirt (ID=3)
-                    chunk.setBlock(localX, y, localZ, 3);
-                }
-                else {
-                    // Below => Stone (ID=1)
-                    chunk.setBlock(localX, y, localZ, 1);
+                else
+                {
+                    chunk.setBlock(localX, localY, localZ, 0); // Air
                 }
             }
         }
     }
 
     auto endTime = high_resolution_clock::now();
-    double elapsedSec = duration<double>(endTime - startTime).count();
-    s_totalGenTime += elapsedSec;
+    s_totalGenTime += duration<double>(endTime - startTime).count();
     s_genCount++;
 }
 

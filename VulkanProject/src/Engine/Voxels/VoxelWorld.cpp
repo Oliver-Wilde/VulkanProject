@@ -56,34 +56,34 @@ VoxelWorld::~VoxelWorld()
 //
 void VoxelWorld::initWorld()
 {
-    Logger::Info("initWorld() => Generating a region of procedural chunks around (0,0).");
+    Logger::Info("initWorld() => Generating multiple vertical layers of chunks.");
 
-    // Instead of generating synchronously, enqueue generation tasks in the thread pool.
+    // Example vertical range: from -2 to +2
+    int minCy = -2;
+    int maxCy = 5;
+
+    // Create chunks for all (cx,cy,cz) in these ranges
     for (int cx = -VIEW_DISTANCE; cx <= VIEW_DISTANCE; ++cx)
     {
         for (int cz = -VIEW_DISTANCE; cz <= VIEW_DISTANCE; ++cz)
         {
-            int cy = 0;
-            Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
+            for (int cy = minCy; cy <= maxCy; ++cy)
+            {
+                Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
 
-            // Enqueue background generation:
-            g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
-                // 1) Generate chunk data
-                m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
-
-                // 2) Mark chunk as dirty
-                newChunk->markDirty();
-                });
+                // Enqueue background generation task
+                g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]()
+                    {
+                        m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+                        newChunk->markDirty();
+                    });
+            }
         }
     }
 
-    // We won't call updateChunkMeshes() here yet, because generation is still happening in the background.
-    // Instead, we rely on updateChunksAroundPlayer(...) to poll for completed tasks.
-    Logger::Info(
-        "initWorld() => Queued generation tasks for +/- "
-        + std::to_string(VIEW_DISTANCE) + " around (0,0)."
-    );
+    Logger::Info("initWorld() => Queued vertical chunk tasks around (0, 0).");
 }
+
 
 void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
 {
@@ -110,54 +110,69 @@ void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
     chunk.setIndexCount(0);
     chunk.setVertexCount(0);
 }
-
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
-    int centerChunkX = (int)std::floor(playerPosX / (float)Chunk::SIZE_X);
-    int centerChunkZ = (int)std::floor(playerPosZ / (float)Chunk::SIZE_Z);
+    // Compute the center chunk coords for X and Z
+    int centerChunkX = static_cast<int>(std::floor(playerPosX / float(Chunk::SIZE_X)));
+    int centerChunkZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-    // 1) Create or queue generation for any needed chunks
-    for (int cx = centerChunkX - VIEW_DISTANCE; cx <= centerChunkX + VIEW_DISTANCE; cx++) {
-        for (int cz = centerChunkZ - VIEW_DISTANCE; cz <= centerChunkZ + VIEW_DISTANCE; cz++) {
-            int cy = 0;
-            if (!m_chunkManager.hasChunk(cx, cy, cz)) {
-                Logger::Info(
-                    "Needs chunk at ("
-                    + std::to_string(cx) + ","
-                    + std::to_string(cy) + ","
-                    + std::to_string(cz) + ")"
-                );
+    // Example vertical range: from -2 to +2
+    // (Alternatively, compute centerChunkY from the player's Y if you want fully 3D coverage.)
+    int minCy = -2;
+    int maxCy = 2;
 
-                Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
+    // 1) Create or queue generation for any needed chunks in X, Z, and now Y
+    for (int cx = centerChunkX - VIEW_DISTANCE; cx <= centerChunkX + VIEW_DISTANCE; ++cx)
+    {
+        for (int cz = centerChunkZ - VIEW_DISTANCE; cz <= centerChunkZ + VIEW_DISTANCE; ++cz)
+        {
+            for (int cy = minCy; cy <= maxCy; ++cy)
+            {
+                if (!m_chunkManager.hasChunk(cx, cy, cz))
+                {
+                    Logger::Info("Needs chunk at ("
+                        + std::to_string(cx) + ","
+                        + std::to_string(cy) + ","
+                        + std::to_string(cz) + ")");
 
-                // Enqueue background generation:
-                g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]() {
-                    m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
-                    newChunk->markDirty();
-                    });
+                    Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
+
+                    // Enqueue background generation
+                    g_threadPool.enqueueTask([this, newChunk, cx, cy, cz]()
+                        {
+                            m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
+                            newChunk->markDirty();
+                        });
+                }
             }
         }
     }
 
     // 2) Unload chunks out of range
-    //    (We do a device wait to ensure the GPU isn't using them
-    //     before we destroy their buffers. This is a brute force but safe approach.)
     std::vector<ChunkCoord> toRemove;
     const auto& allChunks = m_chunkManager.getAllChunks();
-    for (auto& kv : allChunks) {
+    for (auto& kv : allChunks)
+    {
         const ChunkCoord& cc = kv.first;
-        if (cc.y != 0) continue; // ignoring multi-layer for now
 
+        // Check horizontal distance
         int distX = std::abs(cc.x - centerChunkX);
         int distZ = std::abs(cc.z - centerChunkZ);
-        if (distX > VIEW_DISTANCE || distZ > VIEW_DISTANCE) {
+
+        // If it's too far horizontally, mark for removal (you could also check vertical distance if needed)
+        if (distX > VIEW_DISTANCE || distZ > VIEW_DISTANCE)
+        {
             toRemove.push_back(cc);
         }
     }
-    for (auto& rc : toRemove) {
+
+    // Actually remove (and free GPU buffers)
+    for (auto& rc : toRemove)
+    {
         Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
-        if (oldC) {
-            // Wait until the GPU is idle (brute force solution)
+        if (oldC)
+        {
+            // Wait for GPU idle to safely destroy buffers (brute-force approach)
             vkDeviceWaitIdle(m_context->getDevice());
 
             destroyChunkBuffers(*oldC);
@@ -165,11 +180,11 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         }
     }
 
-    // 3) SCHEDULE meshing for changed/new chunks (OFF-MAIN-THREAD),
-    //    then poll for completed mesh results and finalize them (ON MAIN THREAD).
+    // 3) Schedule meshing for any dirty chunks & poll results
     scheduleMeshingForDirtyChunks();
     pollMeshBuildResults();
 }
+
 
 /**
  * Instead of synchronously meshing in updateChunkMeshes(),
