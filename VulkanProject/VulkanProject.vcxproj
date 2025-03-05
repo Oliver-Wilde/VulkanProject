@@ -143,6 +143,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\Engine\Voxels\Meshing\GreedyMesher.cpp" />
+    <ClCompile Include="src\Engine\Voxels\Meshing\NaiveMesher.cpp" />
+    <ClCompile Include="src\Engine\Voxels\Meshing\IMesher.cpp" />
     <ClCompile Include="src\Engine\Utils\CpuProfiler.cpp" />
     <ClCompile Include="External Libraries\glm\detail\glm.cpp" />
     <ClCompile Include="External Libraries\imgui\backends\imgui_impl_glfw.cpp" />
@@ -177,6 +180,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
+    <ClInclude Include="src\Engine\Voxels\Meshing\GreedyMesher.h" />
+    <ClInclude Include="src\Engine\Voxels\Meshing\NaiveMesher.h" />
+    <ClInclude Include="src\Engine\Voxels\Meshing\IMesher.h" />
     <ClInclude Include="src\Engine\Utils\CpuProfiler.h" />
     <ClInclude Include="External Libraries\glm\common.hpp" />
     <ClInclude Include="External Libraries\glm\detail\compute_common.hpp" />

@@ -8,6 +8,7 @@
 
 // ADD: Include your ThreadPool
 #include "Engine/Utils/ThreadPool.h"
+#include "Meshing/GreedyMesher.h"
 
 // We'll assume you have a global or external reference to a thread pool.
 // For example, declared somewhere in Application.cpp or a global header:
@@ -193,14 +194,14 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
     const auto& allChunks = m_chunkManager.getAllChunks();
+    GreedyMesher mesher; // Instantiate your greedy mesher
+
     for (auto& kv : allChunks) {
         ChunkCoord coord = kv.first;
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
 
-        // If chunk is dirty, schedule a background meshing job.
         if (chunk->isDirty()) {
-            // Mark chunk as "uploading" so the renderer can skip it if needed
             chunk->clearDirty();
             chunk->setIsUploading(true);
 
@@ -208,30 +209,26 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             int offsetY = coord.y * Chunk::SIZE_Y;
             int offsetZ = coord.z * Chunk::SIZE_Z;
 
-            g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ]() {
+            g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ, mesher]() {
                 auto chunkStart = std::chrono::high_resolution_clock::now();
 
                 std::vector<Vertex> verts;
                 std::vector<uint32_t> inds;
-                // Build geometry
-                m_mesher.generateMeshGreedy(
-                    *chunk,
-                    coord.x, coord.y, coord.z,
+
+                // Generate mesh using the greedy mesher.
+                mesher.generateMesh(*chunk, coord.x, coord.y, coord.z,
                     verts, inds,
                     offsetX, offsetY, offsetZ,
-                    m_chunkManager
-                );
+                    m_chunkManager);
 
                 auto chunkEnd = std::chrono::high_resolution_clock::now();
-                std::chrono::duration<double> chunkDurationSec = (chunkEnd - chunkStart);
+                std::chrono::duration<double> chunkDurationSec = chunkEnd - chunkStart;
 
-                // Accumulate global meshing stats
-                {
-                    s_totalMeshTime += chunkDurationSec.count();
-                    s_meshCount++;
-                }
+                // Accumulate global meshing stats.
+                s_totalMeshTime += chunkDurationSec.count();
+                s_meshCount++;
 
-                // Store the results for the main thread to finalize (upload to GPU).
+                // Store the results for finalization (upload to GPU).
                 MeshBuildResult result;
                 result.chunkPtr = chunk;
                 result.cx = coord.x;
@@ -240,14 +237,12 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                 result.verts = std::move(verts);
                 result.inds = std::move(inds);
 
-                Logger::Info(
-                    "Meshing done for chunk("
-                    + std::to_string(result.cx) + ","
-                    + std::to_string(result.cy) + ","
-                    + std::to_string(result.cz) + ") => "
-                    + std::to_string(result.verts.size()) + " verts, "
-                    + std::to_string(result.inds.size()) + " inds"
-                );
+                Logger::Info("Meshing done for chunk(" +
+                    std::to_string(result.cx) + "," +
+                    std::to_string(result.cy) + "," +
+                    std::to_string(result.cz) + ") => " +
+                    std::to_string(result.verts.size()) + " verts, " +
+                    std::to_string(result.inds.size()) + " inds");
 
                 {
                     std::lock_guard<std::mutex> lk(s_resultMutex);
