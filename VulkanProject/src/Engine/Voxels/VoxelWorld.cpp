@@ -194,41 +194,37 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
     const auto& allChunks = m_chunkManager.getAllChunks();
-    GreedyMesher mesher; // Instantiate your greedy mesher
+
+    // Choose mesher based on active type.
+    const IMesher* activeMesher = nullptr;
+    if (m_currentMesherType == MesherType::GREEDY)
+        activeMesher = &m_greedyMesher;
+    else
+        activeMesher = &m_naiveMesher;
 
     for (auto& kv : allChunks) {
         ChunkCoord coord = kv.first;
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
-
         if (chunk->isDirty()) {
             chunk->clearDirty();
             chunk->setIsUploading(true);
-
             int offsetX = coord.x * Chunk::SIZE_X;
             int offsetY = coord.y * Chunk::SIZE_Y;
             int offsetZ = coord.z * Chunk::SIZE_Z;
-
-            g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ, mesher]() {
+            g_threadPool.enqueueTask([this, chunk, coord, offsetX, offsetY, offsetZ, activeMesher]() {
                 auto chunkStart = std::chrono::high_resolution_clock::now();
-
                 std::vector<Vertex> verts;
                 std::vector<uint32_t> inds;
 
-                // Generate mesh using the greedy mesher.
-                mesher.generateMesh(*chunk, coord.x, coord.y, coord.z,
-                    verts, inds,
-                    offsetX, offsetY, offsetZ,
-                    m_chunkManager);
+                activeMesher->generateMesh(*chunk, coord.x, coord.y, coord.z,
+                    verts, inds, offsetX, offsetY, offsetZ, m_chunkManager);
 
                 auto chunkEnd = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double> chunkDurationSec = chunkEnd - chunkStart;
-
-                // Accumulate global meshing stats.
                 s_totalMeshTime += chunkDurationSec.count();
                 s_meshCount++;
 
-                // Store the results for finalization (upload to GPU).
                 MeshBuildResult result;
                 result.chunkPtr = chunk;
                 result.cx = coord.x;

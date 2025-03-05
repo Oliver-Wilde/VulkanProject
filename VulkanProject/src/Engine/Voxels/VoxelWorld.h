@@ -6,6 +6,8 @@
 #include "Generation/TerrainGenerator.h"
 #include <vector>   // for std::vector
 #include <cstdint>  // for uint32_t
+#include "Meshing/NaiveMesher.h"
+#include "Meshing/GreedyMesher.h"
 
 class VulkanContext;
 
@@ -16,6 +18,12 @@ class VulkanContext;
 class VoxelWorld
 {
 public:
+
+    enum class MesherType { GREEDY, NAIVE };
+
+    void setMesherType(MesherType type) { m_currentMesherType = type; }
+    MesherType getMesherType() const { return m_currentMesherType; }
+
     // Returns the global average meshing time (seconds per chunk)
     static double getAvgMeshTime();
 
@@ -72,4 +80,7 @@ private:
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
+    GreedyMesher m_greedyMesher;
+    NaiveMesher  m_naiveMesher;
+    MesherType m_currentMesherType = MesherType::GREEDY;
 };

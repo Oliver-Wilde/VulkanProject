@@ -16,6 +16,10 @@
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
 #include "../External Libraries/imgui/backends/imgui_impl_vulkan.h"
 
+#include "Engine/Voxels/Meshing/GreedyMesher.h"
+#include "Engine/Voxels/Meshing/NaiveMesher.h"
+
+
 // Include your Frustum utility
 #include "Frustum.h"
 
@@ -561,6 +565,18 @@ void Renderer::renderFrame()
     ImGui::Begin("Debug");
     ImGui::Text("Wireframe: %s", m_wireframeOn ? "ON" : "OFF");
     ImGui::Checkbox("Frustum Culling", &m_enableFrustumCulling);
+    ImGui::Separator();
+
+    // --- Mesher Toggle UI ---
+    static int mesherTypeIndex = 0; // 0 = Greedy, 1 = Naive
+    const char* mesherTypes[] = { "Greedy", "Naive" };
+    if (ImGui::Combo("Mesher Type", &mesherTypeIndex, mesherTypes, IM_ARRAYSIZE(mesherTypes)))
+    {
+        if (mesherTypeIndex == 0)
+            m_voxelWorld->setMesherType(VoxelWorld::MesherType::GREEDY);
+        else
+            m_voxelWorld->setMesherType(VoxelWorld::MesherType::NAIVE);
+    }
     ImGui::Separator();
     ImGui::Text("Delta Time:  %.3f s", dt);
     ImGui::Text("FPS (Instant):  %.2f", fps);
