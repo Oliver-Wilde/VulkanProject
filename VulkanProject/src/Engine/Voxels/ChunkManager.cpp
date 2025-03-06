@@ -1,6 +1,3 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include "ChunkManager.h"
 #include <stdexcept>
 #include <Engine/Utils/Logger.h>
@@ -72,7 +69,8 @@ void ChunkManager::removeChunk(int cx, int cy, int cz)
     }
 }
 
-std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const {
+std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const
+{
     size_t totalActive = 0;
     size_t totalEmpty = 0;
 
@@ -81,6 +79,7 @@ std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const {
         totalActive += usage.first;
         totalEmpty += usage.second;
     }
-    
     return { totalActive, totalEmpty };
 }
+
+

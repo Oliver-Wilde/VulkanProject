@@ -110,3 +110,4 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
 
     return { activeCount, emptyCount };
 }
+

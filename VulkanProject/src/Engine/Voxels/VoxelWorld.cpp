@@ -54,7 +54,7 @@ VoxelWorld::~VoxelWorld()
         }
     }
 }
-//
+
 void VoxelWorld::initWorld()
 {
     Logger::Info("initWorld() => Generating multiple vertical layers of chunks.");
@@ -85,7 +85,6 @@ void VoxelWorld::initWorld()
     Logger::Info("initWorld() => Queued vertical chunk tasks around (0, 0).");
 }
 
-
 void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
 {
     VkDevice device = m_context->getDevice();
@@ -111,6 +110,7 @@ void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
     chunk.setIndexCount(0);
     chunk.setVertexCount(0);
 }
+
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
     // Compute the center chunk coords for X and Z
@@ -118,7 +118,6 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     int centerChunkZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
     // Example vertical range: from -2 to +2
-    // (Alternatively, compute centerChunkY from the player's Y if you want fully 3D coverage.)
     int minCy = -2;
     int maxCy = 2;
 
@@ -160,7 +159,6 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         int distX = std::abs(cc.x - centerChunkX);
         int distZ = std::abs(cc.z - centerChunkZ);
 
-        // If it's too far horizontally, mark for removal (you could also check vertical distance if needed)
         if (distX > VIEW_DISTANCE || distZ > VIEW_DISTANCE)
         {
             toRemove.push_back(cc);
@@ -173,11 +171,14 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
         if (oldC)
         {
-            // Wait for GPU idle to safely destroy buffers (brute-force approach)
-            vkDeviceWaitIdle(m_context->getDevice());
-
-            destroyChunkBuffers(*oldC);
-            m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+            // Only remove the chunk if it's not uploading/meshing:
+            if (!oldC->isUploading())
+            {
+                vkDeviceWaitIdle(m_context->getDevice());
+                destroyChunkBuffers(*oldC);
+                m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+            }
+            // else we skip removal this frame and can retry later
         }
     }
 
@@ -185,7 +186,6 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     scheduleMeshingForDirtyChunks();
     pollMeshBuildResults();
 }
-
 
 /**
  * Instead of synchronously meshing in updateChunkMeshes(),
@@ -233,12 +233,12 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                 result.verts = std::move(verts);
                 result.inds = std::move(inds);
 
-                Logger::Info("Meshing done for chunk(" +
-                    std::to_string(result.cx) + "," +
-                    std::to_string(result.cy) + "," +
-                    std::to_string(result.cz) + ") => " +
-                    std::to_string(result.verts.size()) + " verts, " +
-                    std::to_string(result.inds.size()) + " inds");
+                Logger::Info("Meshing done for chunk("
+                    + std::to_string(result.cx) + ","
+                    + std::to_string(result.cy) + ","
+                    + std::to_string(result.cz) + ") => "
+                    + std::to_string(result.verts.size()) + " verts, "
+                    + std::to_string(result.inds.size()) + " inds");
 
                 {
                     std::lock_guard<std::mutex> lk(s_resultMutex);

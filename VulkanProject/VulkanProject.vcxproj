@@ -170,8 +170,6 @@
     <ClCompile Include="src\Engine\Utils\MathUtils.cpp" />
     <ClCompile Include="src\Engine\Voxels\Chunk.cpp" />
     <ClCompile Include="src\Engine\Voxels\ChunkManager.cpp" />
-    <ClCompile Include="src\Engine\Voxels\ChunkMesher.cpp" />
-    <ClCompile Include="src\Engine\Voxels\ChunkMesherNaive.cpp" />
     <ClCompile Include="src\Engine\Voxels\Generation\TerrainGenerator.cpp" />
     <ClCompile Include="src\Engine\Voxels\VoxelTypeRegistry.cpp" />
     <ClCompile Include="src\Engine\Voxels\VoxelWorld.cpp" />
@@ -495,8 +493,6 @@
     <ClInclude Include="src\Engine\Utils\MathUtils.h" />
     <ClInclude Include="src\Engine\Voxels\Chunk.h" />
     <ClInclude Include="src\Engine\Voxels\ChunkManager.h" />
-    <ClInclude Include="src\Engine\Voxels\ChunkMesher.h" />
-    <ClInclude Include="src\Engine\Voxels\ChunkMesherNaive.h" />
     <ClInclude Include="src\Engine\Voxels\Generation\FastNoiseLite.h" />
     <ClInclude Include="src\Engine\Voxels\Generation\TerrainGenerator.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelSetup.h" />
