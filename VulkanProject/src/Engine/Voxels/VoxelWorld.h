@@ -2,13 +2,16 @@
 
 #include <vulkan/vulkan.h>
 #include "ChunkManager.h"
-#include "ChunkMesher.h"
+// include the meshers
+#include "Meshing/NaiveMesher.h"
+#include "Meshing/GreedyMesher.h"
+#include "Meshing/IMesher.h"
 #include "Generation/TerrainGenerator.h"
 #include <vector>   // for std::vector
 #include <cstdint>  // for uint32_t
-#include "Meshing/NaiveMesher.h"
-#include "Meshing/GreedyMesher.h"
 
+// Forward declare ResourceManager if you want to store a pointer only
+class ResourceManager;
 class VulkanContext;
 
 /**
@@ -27,7 +30,13 @@ public:
     // Returns the global average meshing time (seconds per chunk)
     static double getAvgMeshTime();
 
-    VoxelWorld(VulkanContext* context);
+    // -------------------------------------------------------
+    // MATCHING SIGNATURE: We accept both VulkanContext* and
+    //                     ResourceManager*, because in your .cpp
+    //                     you used VoxelWorld(VulkanContext*, ResourceManager*).
+    // -------------------------------------------------------
+    VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr);
+
     ~VoxelWorld();
 
     // Creates an initial region of chunks (enqueued for generation)
@@ -37,14 +46,15 @@ public:
     // then finalizes completed mesh uploads
     void updateChunksAroundPlayer(float playerPosX, float playerPosZ);
 
-    // Access to chunk manager if needed by renderer, etc.
+    // Access to chunk manager if needed by the renderer, etc.
     ChunkManager& getChunkManager() { return m_chunkManager; }
 
 private:
     VulkanContext* m_context = nullptr;
-    ChunkManager    m_chunkManager;
+    ResourceManager* m_resourceManager = nullptr;  // we store this pointer
+
+    ChunkManager     m_chunkManager;
     TerrainGenerator m_terrainGenerator;
-    ChunkMesher     m_mesher;
 
     static constexpr int VIEW_DISTANCE = 12;
 
@@ -54,9 +64,6 @@ private:
 
     // 2) Poll worker-thread results (mesh data) and finalize on main thread
     void pollMeshBuildResults();
-
-    // (Deprecated in the multi-thread approach)
-    // void updateChunkMeshes(); // <-- No longer needed; remove if desired
 
     // Upload mesh to per-chunk GPU buffers
     void uploadMeshToChunk(
@@ -68,7 +75,7 @@ private:
     // Destroy chunk buffers before re-upload or unload
     void destroyChunkBuffers(Chunk& chunk);
 
-    // Buffer creation/copy
+    // We only keep chunk buffers, not staging, so these are simple wrappers:
     void createBuffer(
         VkDeviceSize size,
         VkBufferUsageFlags usage,
@@ -76,11 +83,11 @@ private:
         VkBuffer& buffer,
         VkDeviceMemory& memory
     );
-
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
-
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
+
+    // Mesher objects
     GreedyMesher m_greedyMesher;
     NaiveMesher  m_naiveMesher;
-    MesherType m_currentMesherType = MesherType::GREEDY;
+    MesherType   m_currentMesherType = MesherType::GREEDY;
 };

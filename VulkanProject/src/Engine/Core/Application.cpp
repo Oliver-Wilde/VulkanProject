@@ -9,26 +9,19 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
 
-
+// If ResourceManager is in Engine/Resources:
+#include "Engine/Resources/ResourceManager.h"
+// or if it’s in Engine/Utils, adjust accordingly.
 
 #include <stdexcept>
 #include <iostream>
 
-// ----------------------------------------------
-// ADD: ThreadPool
+// Optional global thread pool
 #include "Engine/Utils/ThreadPool.h"
-
-// Define a global thread pool that VoxelWorld (and others) can use.
-// Using 0 means "auto-pick" thread count (hardware_concurrency - 1).
 ThreadPool g_threadPool(0);
-// ----------------------------------------------
 
-// -----------------------------------------------------------------------------
-// Constructor / Destructor
-// -----------------------------------------------------------------------------
 Application::Application()
 {
-    // optionally set pointers to nullptr here
 }
 
 Application::~Application()
@@ -36,33 +29,32 @@ Application::~Application()
     cleanup();
 }
 
-// -----------------------------------------------------------------------------
-// Public Methods
-// -----------------------------------------------------------------------------
 void Application::init()
 {
-    // 1) register all voxel types from VoxelTypeRegistry.
+    // 1) Register voxel types
     registerAllVoxels();
-    std::cout << "DEBUG: Registered all voxel types." << std::endl;
+    std::cout << "DEBUG: Registered all voxel types.\n";
 
-    // 2) Create GLFW window
+    // 2) Create Window
     m_window = new Window(800, 600, "My Voxel Engine");
-    std::cout << "DEBUG:  Created Window " << std::endl;
+    std::cout << "DEBUG: Created Window\n";
 
-    // 3) Time / DeltaTime -- this is for tracking the time between frames.
+    // 3) Create Time
     m_time = new Time();
 
-    // 4) Vulkan context + init
+    // 4) Vulkan context
     m_vulkanCtx = new VulkanContext();
     m_vulkanCtx->init(m_window);
 
-    // 5) Create VoxelWorld
-    m_voxelWorld = new VoxelWorld(m_vulkanCtx);
+    // 5) Create ResourceManager
+    m_resourceManager = new ResourceManager(m_vulkanCtx);
+
+    // 6) Create VoxelWorld, passing the same pointers
+    m_voxelWorld = new VoxelWorld(m_vulkanCtx, m_resourceManager);
     m_voxelWorld->initWorld();
 
-    // 6) Create Renderer
+    // 7) Create Renderer
     m_renderer = new Renderer(m_vulkanCtx, m_window, m_voxelWorld);
-
     m_renderer->setTime(m_time);
 
     m_isRunning = true;
@@ -72,7 +64,7 @@ void Application::handleInput(Camera& cam, float dt)
 {
     GLFWwindow* window = m_window->getGLFWwindow();
 
-    // Build forward vector
+    // Example movement
     glm::vec3 direction(
         cos(glm::radians(cam.yaw)) * cos(glm::radians(cam.pitch)),
         sin(glm::radians(cam.pitch)),
@@ -83,13 +75,11 @@ void Application::handleInput(Camera& cam, float dt)
 
     float speed = cam.moveSpeed * dt;
 
-    // Basic movement
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) cam.position += forward * speed;
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) cam.position -= forward * speed;
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cam.position += right * speed;
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cam.position -= right * speed;
 
-    // Up/down movement
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)        cam.position.y += speed;
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)   cam.position.y -= speed;
 
@@ -104,37 +94,34 @@ void Application::handleInput(Camera& cam, float dt)
 
     cam.yaw += dx * cam.turnSpeed;
     cam.pitch -= dy * cam.turnSpeed;
-
-    if (cam.pitch > 89.f)  cam.pitch = 89.f;
-    if (cam.pitch < -89.f) cam.pitch = -89.f;
+    if (cam.pitch > 89.f)   cam.pitch = 89.f;
+    if (cam.pitch < -89.f)  cam.pitch = -89.f;
 }
 
 void Application::runLoop()
 {
-    // create the camera and set its initial position
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
     bool wireframeWasPressed = false;
 
-    while (m_isRunning && !m_window->shouldClose()) {
-
+    while (m_isRunning && !m_window->shouldClose())
+    {
         m_window->pollEvents();
         m_time->update();
         float dt = m_time->getDeltaTime();
 
-        // 1) Handle camera input
+        // 1) camera input
         handleInput(camera, dt);
 
-        // 2) Update chunks near the player's position
+        // 2) update world around camera
         if (m_voxelWorld) {
             m_voxelWorld->updateChunksAroundPlayer(camera.position.x, camera.position.z);
         }
 
-        // 3) Press F => toggle wireframe
+        // 3) toggle wireframe with 'F'
         bool wireframeIsPressed =
             (glfwGetKey(m_window->getGLFWwindow(), GLFW_KEY_F) == GLFW_PRESS);
-
         if (wireframeIsPressed && !wireframeWasPressed) {
-            Logger::Info("Toggling wireframe mode...");
+            Logger::Info("Toggling wireframe...");
             m_renderer->toggleWireframe();
         }
         wireframeWasPressed = wireframeIsPressed;
@@ -147,38 +134,44 @@ void Application::runLoop()
 
 void Application::cleanup()
 {
-    // 1) Destroy VoxelWorld before Vulkan device
+    // 1) Destroy voxel world
     if (m_voxelWorld) {
         delete m_voxelWorld;
         m_voxelWorld = nullptr;
     }
 
-    // 2) Destroy the Renderer
+    // 2) Destroy renderer
     if (m_renderer) {
         delete m_renderer;
         m_renderer = nullptr;
     }
 
-    // 3) Vulkan context
+    // 3) Destroy resource manager
+    if (m_resourceManager) {
+        delete m_resourceManager;
+        m_resourceManager = nullptr;
+    }
+
+    // 4) Vulkan context
     if (m_vulkanCtx) {
         m_vulkanCtx->cleanup();
         delete m_vulkanCtx;
         m_vulkanCtx = nullptr;
     }
 
+    // 5) Window
     if (m_window) {
         delete m_window;
         m_window = nullptr;
     }
 
+    // 6) Time
     if (m_time) {
         delete m_time;
         m_time = nullptr;
     }
 
-    // (Optional) We can explicitly shut down the thread pool:
-    // g_threadPool.shutdown();
-    // But it's also called automatically in its destructor.
+    // optional: g_threadPool.shutdown();
 
     m_isRunning = false;
 }

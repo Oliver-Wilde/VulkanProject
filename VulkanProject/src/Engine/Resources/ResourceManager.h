@@ -1,63 +1,57 @@
 #pragma once
 
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include <vulkan/vulkan.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-// -----------------------------------------------------------------------------
-// Forward Declarations
-// -----------------------------------------------------------------------------
+// Forward declaration:
 class VulkanContext;
 
-// -----------------------------------------------------------------------------
-// Class Definition
-// -----------------------------------------------------------------------------
+// If your Vertex is declared in a header called "IMesher.h", include it or forward declare
+struct Vertex;
+
 class ResourceManager
 {
 public:
-    // -----------------------------------------------------------------------------
-    // Constructor / Destructor
-    // -----------------------------------------------------------------------------
     ResourceManager(VulkanContext* context);
     ~ResourceManager();
 
-    // -----------------------------------------------------------------------------
-    // Public Methods
-    // -----------------------------------------------------------------------------
-    /**
-     * Loads a SPIR-V shader file and returns a VkShaderModule.
-     * Caches modules so repeated calls with the same path return the same module.
-     *
-     * @param filePath The path to the SPIR-V shader file.
-     * @return A valid VkShaderModule.
-     */
+    // Existing
     VkShaderModule loadShaderModule(const std::string& filePath);
 
+    // New methods for chunk buffers
+    void createChunkBuffers(
+        const std::vector<Vertex>& verts,
+        const std::vector<uint32_t>& inds,
+        VkBuffer& outVertexBuffer,
+        VkDeviceMemory& outVertexMemory,
+        VkBuffer& outIndexBuffer,
+        VkDeviceMemory& outIndexMemory
+    );
+
+    void destroyChunkBuffers(
+        VkBuffer vb,
+        VkDeviceMemory vbMem,
+        VkBuffer ib,
+        VkDeviceMemory ibMem
+    );
+
 private:
-    // -----------------------------------------------------------------------------
-    // Private Methods
-    // -----------------------------------------------------------------------------
-    /**
-     * Reads a file from the given path into a byte buffer.
-     *
-     * @param filePath The path to the file.
-     * @return A vector containing the file data.
-     */
+    VulkanContext* m_context;
+    std::unordered_map<std::string, VkShaderModule> m_shaderModules;
+
     std::vector<char> readFile(const std::string& filePath);
 
-private:
-    // -----------------------------------------------------------------------------
-    // Member Variables
-    // -----------------------------------------------------------------------------
-    VulkanContext* m_context = nullptr;
+    // Private helpers for buffer creation
+    void createBuffer(
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VkMemoryPropertyFlags properties,
+        VkBuffer& buffer,
+        VkDeviceMemory& bufferMemory
+    );
 
-    /**
-     * Caches loaded shader modules to avoid re-loading the same file multiple times.
-     * Key: File path, Value: VkShaderModule
-     */
-    std::unordered_map<std::string, VkShaderModule> m_shaderModules;
+    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 };

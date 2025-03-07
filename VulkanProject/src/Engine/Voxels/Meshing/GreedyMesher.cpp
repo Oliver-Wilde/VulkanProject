@@ -1,7 +1,7 @@
 #include "GreedyMesher.h"
 #include "../Chunk.h"
 #include "../ChunkManager.h"
-#include "../ChunkMesher.h"   // Assumed to define Vertex
+#include "IMesher.h"  // Assumed to define Vertex
 #include "../VoxelTypeRegistry.h"
 #include "../VoxelType.h"
 #include <vector>

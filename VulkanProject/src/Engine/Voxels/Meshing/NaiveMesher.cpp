@@ -3,7 +3,7 @@
 #include "../ChunkManager.h"
 #include "../VoxelTypeRegistry.h"
 #include "../VoxelType.h"
-#include "../ChunkMesher.h"
+#include "IMesher.h"
 #include <vector>
 #include <cmath>
 

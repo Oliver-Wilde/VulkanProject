@@ -2,24 +2,34 @@
 #define IMESHER_H
 
 #include <vector>
+#include <cstdint>
 #include "../Chunk.h"
 #include "../ChunkManager.h"
 
-// Forward declaration for Vertex (or include the header where Vertex is defined)
-struct Vertex;
+// The actual struct definition here:
+struct Vertex
+{
+    float x, y, z;
+    float r, g, b;
 
-class IMesher {
+    Vertex(float X, float Y, float Z, float R, float G, float B)
+        : x(X), y(Y), z(Z), r(R), g(G), b(B)
+    {}
+};
+
+class IMesher
+{
 public:
     virtual ~IMesher() = default;
 
-    // Add const here so derived classes must also mark the method as const.
     virtual bool generateMesh(
         Chunk& chunk,
         int cx, int cy, int cz,
         std::vector<Vertex>& outVertices,
         std::vector<uint32_t>& outIndices,
         int offsetX, int offsetY, int offsetZ,
-        const ChunkManager& manager) const = 0;
+        const ChunkManager& manager
+    ) const = 0;
 };
 
 #endif // IMESHER_H
