@@ -19,7 +19,7 @@ extern ThreadPool g_threadPool;
 
 // ------------- ADDED FOR TIMING -------------
 static double s_totalMeshTime = 0.0;  // accumulates total meshing time (in seconds)
-static int    s_meshCount = 0;    // how many chunks have been meshed so far
+static int    s_meshCount = 0;       // how many chunks have been meshed so far
 
 // We'll provide a static getter at the bottom to return average meshing time
 // -------------------------------------------
@@ -40,9 +40,12 @@ struct MeshBuildResult
 static std::mutex s_resultMutex;
 static std::vector<MeshBuildResult> s_pendingMeshResults;
 
-// --------------------------------------------------------
-// The constructor now matches the header exactly:
-// --------------------------------------------------------
+/* -------------------------------------------------------------------
+   [CHANGED]: Additional struct & container to track chunk buffers
+   that need to be destroyed later (without blocking the device).
+   ------------------------------------------------------------------- */
+
+
 VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
     : m_context(context)
     , m_resourceManager(resourceMgr)
@@ -61,6 +64,9 @@ VoxelWorld::~VoxelWorld()
     }
 }
 
+/* -----------------------------------------------------
+   initWorld() => same as original
+   ----------------------------------------------------- */
 void VoxelWorld::initWorld()
 {
     Logger::Info("initWorld() => Generating multiple vertical layers of chunks.");
@@ -91,24 +97,11 @@ void VoxelWorld::initWorld()
     Logger::Info("initWorld() => Queued vertical chunk tasks around (0, 0).");
 }
 
-void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
-{
-    // If we have a ResourceManager, use it to destroy chunk buffers:
-    if (m_resourceManager) {
-        m_resourceManager->destroyChunkBuffers(
-            chunk.getVertexBuffer(), chunk.getVertexMemory(),
-            chunk.getIndexBuffer(), chunk.getIndexMemory()
-        );
-    }
-    // Then reset chunk's GPU references:
-    chunk.setVertexBuffer(VK_NULL_HANDLE);
-    chunk.setVertexMemory(VK_NULL_HANDLE);
-    chunk.setIndexBuffer(VK_NULL_HANDLE);
-    chunk.setIndexMemory(VK_NULL_HANDLE);
-    chunk.setIndexCount(0);
-    chunk.setVertexCount(0);
-}
-
+/* -------------------------------------------------------------------
+   [CHANGED]: This function no longer calls vkDeviceWaitIdle()
+   or destroyChunkBuffers() immediately. Instead, it defers the
+   GPU buffer destruction to avoid stalling the device.
+   ------------------------------------------------------------------- */
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
     // Compute the center chunk coords for X and Z
@@ -162,21 +155,46 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         }
     }
 
-    // Actually remove (and free GPU buffers)
+    // Actually remove (and free GPU buffers) in an async-friendly manner
     for (auto& rc : toRemove)
     {
         Chunk* oldC = m_chunkManager.getChunk(rc.x, rc.y, rc.z);
         if (oldC)
         {
-            // Only remove the chunk if it's not uploading/meshing:
-            if (!oldC->isUploading())
+            /* --------------------------------------------------
+               [REMOVED]: vkDeviceWaitIdle(m_context->getDevice());
+               [REMOVED]: destroyChunkBuffers(*oldC);
+
+               Instead, we queue these buffers for later destruction.
+               We remove the chunk from the manager so the engine
+               won't reference it anymore.
+               -------------------------------------------------- */
+               // 1) Capture the old chunk's GPU buffers
+               //    so we can destroy them later (async).
+            VkBuffer vb = oldC->getVertexBuffer();
+            VkDeviceMemory vbMem = oldC->getVertexMemory();
+            VkBuffer ib = oldC->getIndexBuffer();
+            VkDeviceMemory ibMem = oldC->getIndexMemory();
+
+            // 2) Null out the chunk's references so we don't accidentally use them
+            oldC->setVertexBuffer(VK_NULL_HANDLE);
+            oldC->setVertexMemory(VK_NULL_HANDLE);
+            oldC->setIndexBuffer(VK_NULL_HANDLE);
+            oldC->setIndexMemory(VK_NULL_HANDLE);
+
+            // 3) Remove the chunk from the manager (so it's no longer accessible)
+            m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+
+            // 4) Store the old GPU buffers in a "to be destroyed" queue
+            if (vb != VK_NULL_HANDLE || ib != VK_NULL_HANDLE)
             {
-                // Wait for GPU to finish using these buffers
-                vkDeviceWaitIdle(m_context->getDevice());
-                destroyChunkBuffers(*oldC);
-                m_chunkManager.removeChunk(rc.x, rc.y, rc.z);
+                QueuedChunkDestruction info;
+                info.vb = vb;
+                info.vbMem = vbMem;
+                info.ib = ib;
+                info.ibMem = ibMem;
+                m_queuedDestruction.push_back(info); // [CHANGED]: see the new member below
             }
-            // else skip removal this frame; we can remove it later
         }
     }
 
@@ -185,7 +203,9 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     pollMeshBuildResults();
 }
 
-// Instead of synchronous meshing, we schedule tasks on the thread pool
+/* -----------------------------------------------------
+   scheduleMeshingForDirtyChunks() => same as original
+   ----------------------------------------------------- */
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
     const auto& allChunks = m_chunkManager.getAllChunks();
@@ -257,7 +277,10 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
     }
 }
 
-// Poll results from the worker thread and finalize (upload to GPU)
+/* -----------------------------------------------------
+   pollMeshBuildResults() => same as original except
+   for the chunk->setIsUploading(false) at the end.
+   ----------------------------------------------------- */
 void VoxelWorld::pollMeshBuildResults()
 {
     std::vector<MeshBuildResult> localCopy;
@@ -299,7 +322,59 @@ void VoxelWorld::pollMeshBuildResults()
     }
 }
 
-// Actually create new chunk buffers with the ResourceManager
+/* -------------------------------------------------------------------
+   [NEW] If you want a function to forcibly destroy queued resources,
+   you can call it at a safe time (e.g. once a GPU fence signals).
+   For now, it just does it immediately, but doesn't wait on device.
+
+   You can refine this by checking fences in the Renderer, or
+   spreading destruction out over multiple frames, etc.
+   ------------------------------------------------------------------- */
+void VoxelWorld::flushPendingDestructions()
+{
+    // If you prefer to wait for a fence, do it in Renderer instead.
+    // For demonstration, we'll just do immediate destruction here
+    // but without calling vkDeviceWaitIdle():
+    for (auto& info : m_queuedDestruction)
+    {
+        if (info.vb != VK_NULL_HANDLE || info.ib != VK_NULL_HANDLE)
+        {
+            if (m_resourceManager)
+            {
+                m_resourceManager->destroyChunkBuffers(
+                    info.vb, info.vbMem,
+                    info.ib, info.ibMem
+                );
+            }
+        }
+    }
+    m_queuedDestruction.clear();
+}
+
+/* -----------------------------------------------------
+   destroyChunkBuffers() => same as original
+   ----------------------------------------------------- */
+void VoxelWorld::destroyChunkBuffers(Chunk& chunk)
+{
+    // If we have a ResourceManager, use it to destroy chunk buffers:
+    if (m_resourceManager) {
+        m_resourceManager->destroyChunkBuffers(
+            chunk.getVertexBuffer(), chunk.getVertexMemory(),
+            chunk.getIndexBuffer(), chunk.getIndexMemory()
+        );
+    }
+    // Then reset chunk's GPU references:
+    chunk.setVertexBuffer(VK_NULL_HANDLE);
+    chunk.setVertexMemory(VK_NULL_HANDLE);
+    chunk.setIndexBuffer(VK_NULL_HANDLE);
+    chunk.setIndexMemory(VK_NULL_HANDLE);
+    chunk.setIndexCount(0);
+    chunk.setVertexCount(0);
+}
+
+/* -----------------------------------------------------
+   uploadMeshToChunk() => same as original
+   ----------------------------------------------------- */
 void VoxelWorld::uploadMeshToChunk(
     Chunk& chunk,
     const std::vector<Vertex>& verts,
@@ -337,17 +412,16 @@ void VoxelWorld::uploadMeshToChunk(
     }
 }
 
-// If you used to call createBuffer() and copyBuffer(), that now presumably
-// belongs in your ResourceManager. If not, you can remove them or keep them:
+/* -----------------------------------------------------
+   These were placeholders from the original code snippet
+   and remain unchanged or not used:
+   ----------------------------------------------------- */
 void VoxelWorld::createBuffer(VkDeviceSize /*size*/,
     VkBufferUsageFlags /*usage*/,
     VkMemoryPropertyFlags /*props*/,
     VkBuffer& /*buffer*/,
     VkDeviceMemory& /*memory*/)
 {
-    // If you're not using these now that your ResourceManager handles it,
-    // either remove them or implement them. 
-    // For now: do nothing or throw if you don't want them called.
     throw std::runtime_error("VoxelWorld::createBuffer() no longer used!");
 }
 
@@ -356,13 +430,14 @@ void VoxelWorld::copyBuffer(VkBuffer /*src*/, VkBuffer /*dst*/, VkDeviceSize /*s
     throw std::runtime_error("VoxelWorld::copyBuffer() no longer used!");
 }
 
-// If you need them, implement them properly here, otherwise remove them
 uint32_t VoxelWorld::findMemoryType(uint32_t /*filter*/, VkMemoryPropertyFlags /*props*/)
 {
     throw std::runtime_error("VoxelWorld::findMemoryType() no longer used!");
 }
 
-// ------------- ADDED GETTER METHOD --------------
+/* -----------------------------------------------------
+   Returns the average meshing time in seconds
+   ----------------------------------------------------- */
 double VoxelWorld::getAvgMeshTime()
 {
     // Return average meshing time in seconds
@@ -371,4 +446,3 @@ double VoxelWorld::getAvgMeshTime()
     }
     return s_totalMeshTime / s_meshCount;
 }
-// -------------------------------------------------

@@ -61,9 +61,8 @@ VkShaderModule ResourceManager::loadShaderModule(const std::string& filePath)
 
 
 // -----------------------------------------------------------------------------
-// New Methods for Chunk Buffers
+// createChunkBuffers(...) and destroyChunkBuffers(...)
 // -----------------------------------------------------------------------------
-
 void ResourceManager::createChunkBuffers(
     const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
@@ -93,7 +92,6 @@ void ResourceManager::createChunkBuffers(
     );
 
     // 2) Create staging buffers
-    //    (host-visible so we can copy CPU data into them)
     VkBuffer stagingVB = VK_NULL_HANDLE;
     VkDeviceMemory stagingVBMem = VK_NULL_HANDLE;
     createBuffer(
@@ -115,7 +113,6 @@ void ResourceManager::createChunkBuffers(
     );
 
     // 3) Copy CPU data into staging
-    //    (If vbSize/ibSize are zero, these loops safely do nothing)
     if (vbSize > 0)
     {
         void* data;
@@ -198,6 +195,11 @@ void ResourceManager::createBuffer(
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }
 
+/* -----------------------------------------------------------------------------
+   copyBuffer(...)
+   [CHANGED] Removed the vkQueueWaitIdle(gfxQueue) call
+   and replaced it with a fence-based approach.
+   ----------------------------------------------------------------------------- */
 void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 {
     if (size == 0) {
@@ -216,7 +218,9 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer cmdBuf;
-    vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf);
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate staging command buffer!");
+    }
 
     // 2) Begin command buffer
     VkCommandBufferBeginInfo beginInfo{};
@@ -229,7 +233,7 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
     copyRegion.size = size;
     vkCmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion);
 
-    // 4) Submit
+    // 4) End command buffer + submit
     vkEndCommandBuffer(cmdBuf);
 
     VkSubmitInfo submitInfo{};
@@ -237,10 +241,28 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmdBuf;
 
-    vkQueueSubmit(gfxQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(gfxQueue);
+    // [CHANGED] Create a fence so we can wait specifically on this copy.
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 
-    // 5) Clean up
+    VkFence copyFence;
+    if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &copyFence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create fence for copyBuffer!");
+    }
+
+    // Submit the copy command buffer with the fence
+    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
+        vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+        throw std::runtime_error("Failed to submit copy command buffer!");
+    }
+
+    // [CHANGED] Wait for the fence instead of calling vkQueueWaitIdle
+    vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
+
+    // Destroy the fence
+    vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+
+    // 5) Clean up command buffer
     vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
 }
 

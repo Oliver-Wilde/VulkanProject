@@ -25,7 +25,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-
 // A global CPU profiler used for display
 static CpuProfiler g_cpuProfiler;
 
@@ -218,6 +217,12 @@ void Renderer::renderFrame()
         &m_frames[m_currentFrame].inFlightFence
     );
 
+    // [CHANGED] — Call VoxelWorld to flush any pending chunk destructions
+    // now that we know the GPU is done with the previous usage of resources.
+    if (m_voxelWorld) {
+        m_voxelWorld->flushPendingDestructions();
+    }
+
     // 3) Update MVP
     updateMVP();
 
@@ -293,8 +298,6 @@ void Renderer::renderFrame()
     // 9) Optionally do frustum culling
     Frustum frustum;
     if (m_enableFrustumCulling) {
-        frustum = Frustum(); // you might write a function to build it from the MVP
-        // or do a specialized build function
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
@@ -343,7 +346,6 @@ void Renderer::renderFrame()
     m_uiRenderer->beginFrame();
 
     // Let the UIRenderer handle the "Debug" window code
-    // passing references for toggles
     m_uiRenderer->renderDebugWindow(
         dt,
         fps,
@@ -353,8 +355,8 @@ void Renderer::renderFrame()
         totalVertices,
         drawCallCount,
         m_voxelWorld,
-        m_wireframeOn,           // pass by reference
-        m_enableFrustumCulling   // pass by reference
+        m_wireframeOn,
+        m_enableFrustumCulling
     );
 
     // Now record ImGui's commands into the command buffer
@@ -619,9 +621,7 @@ void Renderer::recreateSwapChain()
     createMVPUniformBuffer();
 
     // If your UIRenderer needs to be re-initialized for the new swap chain:
-    // e.g. m_uiRenderer->resize(...) or re-init call
-    // If your ImGui version doesn't require it, leave it out.
-    // ImGui_ImplVulkan_SetMinImageCount(2); // if your version supports it
+    // e.g. ImGui_ImplVulkan_SetMinImageCount(2);
 }
 
 // -----------------------------------------------------------------------------

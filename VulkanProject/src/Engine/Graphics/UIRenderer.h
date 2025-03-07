@@ -14,7 +14,10 @@ class VoxelWorld;
  *   - Beginning ImGui frames and rendering them into a command buffer
  *   - Optionally displaying a debug window with stats and toggles
  *
- * This keeps your main Renderer class free from directly using ImGui code.
+ * This keeps your main Renderer class free from directly 
+
+
+ ImGui code.
  */
 class UIRenderer
 {
