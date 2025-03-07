@@ -1,5 +1,7 @@
 #include "Frustum.h"
 #include <cmath>   // for std::sqrt
+#include <Engine/Scene/Camera.h>
+#include <vulkan/vulkan_core.h>
 
 void Frustum::extractPlanes(const glm::mat4& vp)
 {
@@ -85,4 +87,28 @@ bool Frustum::intersectsAABB(const glm::vec3& minB, const glm::vec3& maxB) const
 
     // If we never found it completely outside, it's at least partially inside.
     return true;
+}
+
+
+Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
+{
+    // 1) Calculate aspect ratio
+    float aspect = float(extent.width) / float(extent.height);
+
+    // 2) Create a standard perspective projection (45°, near=0.1f, far=1000.f)
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 1000.0f);
+
+    // 3) Flip Y for Vulkan
+    proj[1][1] *= -1.f;
+
+    // 4) Build the view matrix from the camera
+    glm::mat4 view = camera.getViewMatrix();
+
+    // 5) Multiply => VP
+    glm::mat4 vp = proj * view;
+
+    // 6) Fill out a Frustum struct
+    Frustum frustum;
+    frustum.extractPlanes(vp);
+    return frustum;
 }
