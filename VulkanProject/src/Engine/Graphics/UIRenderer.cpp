@@ -12,6 +12,7 @@
 
 #include <stdexcept>
 #include <vector>
+#include <Engine/Utils/CpuProfiler.h>
 
 UIRenderer::UIRenderer()
 {
@@ -234,6 +235,26 @@ void UIRenderer::renderDebugWindow(
         auto usage = chunkMgr.getTotalVoxelUsage();
         ImGui::Text("Active Voxels: %zu", usage.first);
         ImGui::Text("Empty Voxels:  %zu", usage.second);
+        ImGui::Separator();
+        ImGui::Text("CPU Timing (ms):");
+        const auto& profileMap = CpuProfiler::GetProfileRecords();
+        for (auto& kv : profileMap)
+        {
+            const std::string& label = kv.first;
+            const ProfileRecord& rec = kv.second;
+
+            // rec.lastTimeMs = the last scope’s time
+            // rec.accumTimeMs / rec.callCount = average time across calls
+            double average = (rec.callCount > 0)
+                ? (rec.accumTimeMs / double(rec.callCount))
+                : 0.0;
+
+            ImGui::Text("%s: Last=%.2fms, Avg=%.2fms (%d calls)",
+                label.c_str(),
+                rec.lastTimeMs,
+                average,
+                rec.callCount);
+        }
     }
 
     ImGui::End();

@@ -1,60 +1,85 @@
 #include "CpuProfiler.h"
 #include <stdexcept>
+#include <chrono>
+#include <iostream>
 
-// Link with pdh.lib (for Visual Studio)
 #pragma comment(lib, "pdh.lib")
 
+static long long nowMicros()
+{
+    auto now = std::chrono::high_resolution_clock::now();
+    auto dur = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(dur).count();
+}
+
+// -----------------------------------------------------------------------------
+// Define the static map
+// -----------------------------------------------------------------------------
+std::unordered_map<std::string, ProfileRecord> CpuProfiler::s_profileData;
+
+// -----------------------------------------------------------------------------
+long long CpuProfiler::getCurrentTimeMicroseconds()
+{
+    return nowMicros();
+}
+
+// -----------------------------------------------------------------------------
 CpuProfiler::CpuProfiler()
 {
-    // Open a PDH query
-    if (PdhOpenQuery(NULL, NULL, &m_cpuQuery) != ERROR_SUCCESS) {
+    // PDH Query Setup
+    if (PdhOpenQuery(NULL, NULL, &m_cpuQuery) != ERROR_SUCCESS)
+    {
         throw std::runtime_error("Failed to open PDH query for CPU usage.");
     }
 
-    // Add a counter for total CPU usage
     if (PdhAddCounter(m_cpuQuery, L"\\Processor(_Total)\\% Processor Time", NULL, &m_cpuTotal) != ERROR_SUCCESS)
     {
         throw std::runtime_error("Failed to add CPU usage counter.");
     }
 
-    // Do an initial collection
     PdhCollectQueryData(m_cpuQuery);
 }
 
 CpuProfiler::~CpuProfiler()
 {
-    PdhCloseQuery(m_cpuQuery);
+    if (m_cpuQuery)
+    {
+        PdhCloseQuery(m_cpuQuery);
+        m_cpuQuery = nullptr;
+    }
 }
 
+// -----------------------------------------------------------------------------
 float CpuProfiler::GetCpuUsage()
 {
-    // Collect data for the query
-    if (PdhCollectQueryData(m_cpuQuery) != ERROR_SUCCESS) {
+    if (PdhCollectQueryData(m_cpuQuery) != ERROR_SUCCESS)
+    {
         return 0.0f;
     }
 
     PDH_FMT_COUNTERVALUE counterVal;
-    if (PdhGetFormattedCounterValue(m_cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal) != ERROR_SUCCESS) {
+    if (PdhGetFormattedCounterValue(m_cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal) != ERROR_SUCCESS)
+    {
         return 0.0f;
     }
     return static_cast<float>(counterVal.doubleValue);
 }
 
-// --- New rolling average FPS implementation ---
-
+// -----------------------------------------------------------------------------
 void CpuProfiler::UpdateFPS(float fps)
 {
-    // If we haven't filled our sample buffer yet, add the new FPS sample.
-    if (m_fpsSamples.size() < kMaxFPSamples) {
+    if (m_fpsSamples.size() < kMaxFPSamples)
+    {
         m_fpsSamples.push_back(fps);
     }
-    else {
-        // Replace the oldest sample with the new one.
+    else
+    {
         m_fpsSamples[m_nextSampleIndex] = fps;
         m_nextSampleIndex = (m_nextSampleIndex + 1) % kMaxFPSamples;
     }
 }
 
+// -----------------------------------------------------------------------------
 float CpuProfiler::GetRollingAverageFPS() const
 {
     if (m_fpsSamples.empty())
@@ -66,4 +91,30 @@ float CpuProfiler::GetRollingAverageFPS() const
         sum += sample;
     }
     return sum / static_cast<float>(m_fpsSamples.size());
+}
+
+// -----------------------------------------------------------------------------
+CpuProfiler::ScopedTimer::ScopedTimer(const std::string& label)
+    : m_label(label)
+{
+    m_startTimeMicroseconds = getCurrentTimeMicroseconds();
+}
+
+CpuProfiler::ScopedTimer::~ScopedTimer()
+{
+    long long endTime = getCurrentTimeMicroseconds();
+    long long delta = endTime - m_startTimeMicroseconds;
+    double ms = static_cast<double>(delta) / 1000.0;
+
+    // Instead of printing, store the results in s_profileData
+    auto& record = s_profileData[m_label];
+    record.lastTimeMs = ms;
+    record.accumTimeMs += ms;
+    record.callCount++;
+}
+
+// -----------------------------------------------------------------------------
+const std::unordered_map<std::string, ProfileRecord>& CpuProfiler::GetProfileRecords()
+{
+    return s_profileData;
 }

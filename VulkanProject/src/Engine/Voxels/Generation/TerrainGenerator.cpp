@@ -1,5 +1,6 @@
 #include "TerrainGenerator.h"
 #include <chrono>
+#include "../../Utils/CpuProfiler.h"
 
 static double s_totalGenTime = 0.0;
 static int    s_genCount = 0;
@@ -21,6 +22,7 @@ TerrainGenerator::TerrainGenerator()
 
 void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 {
+    CpuProfiler::ScopedTimer timer("TerrainGenerator::generateChunk");
     using namespace std::chrono;
     auto startTime = high_resolution_clock::now();
 
