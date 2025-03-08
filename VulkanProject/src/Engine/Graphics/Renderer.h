@@ -1,14 +1,15 @@
 #pragma once
 
 #include <deque>
+#include <vector>            // [ADDED] for std::vector
 #include <vulkan/vulkan.h>
-#include <glm/mat4x4.hpp>  // For MVPBlock
+#include <glm/mat4x4.hpp>    // For MVPBlock
 #include "Engine/Scene/Camera.h"
+#include "Engine/Voxels/VoxelWorld.h"  // [ADDED] so we can use QueuedChunkDestruction
 
 // Forward declarations to avoid heavy includes
 class Window;
 class VulkanContext;
-class VoxelWorld;
 class ResourceManager;
 class PipelineManager;
 class RenderPassManager;
@@ -85,7 +86,13 @@ public:
      */
     void toggleWireframe();
 
-    void setTime(class Time* time);
+    /**
+     * Provide a pointer to your Time object, if you want to track dt/fps in the renderer.
+     */
+    void setTime(Time* time);
+
+    // [ADDED] For ring-buffer resource destruction
+    void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
 private:
     /**
@@ -131,6 +138,12 @@ private:
      */
     float computeAverage(const std::deque<float>& buffer);
 
+    /**
+     * [ADDED] Called at the start of each frame (after waiting on the fence)
+     * to free any chunk buffers queued in the previous use of this frame index.
+     */
+    void freeDeferredResources();
+
 private:
     // Core references
     VulkanContext* m_context = nullptr;
@@ -149,15 +162,18 @@ private:
 
     // Swap chain and MVP data
     class SwapChain* m_swapChain = nullptr;
-    VkBuffer         m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory   m_mvpMemory = VK_NULL_HANDLE;
-    VkDescriptorPool m_mvpDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet  m_mvpDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer            m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory      m_mvpMemory = VK_NULL_HANDLE;
+    VkDescriptorPool    m_mvpDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
+
+    // [ADDED] A ring buffer of chunk buffers to free for each frame
+    std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
     // Per-frame resources
     FrameResources   m_frames[MAX_FRAMES_IN_FLIGHT];
-    int              m_currentFrame = 0;
+    int              m_currentFrame = 0; // which frame index we're on
 
     // If you store a pointer to a global Time or create one in Application:
     Time* m_time = nullptr;
@@ -173,6 +189,4 @@ private:
 
     // Camera
     Camera m_camera;
-
-    
 };

@@ -9,16 +9,16 @@
 #include "Engine/Resources/ResourceManager.h"
 #include "Engine/Graphics/Frustum.h"
 
-#include "UIRenderer.h"   // <--- Our new UI management class
+#include "UIRenderer.h"
 
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Scene/Camera.h"
 
-#include "Frustum.h"      // frustum culling utility
+#include "Frustum.h"
 #include "../Utils/CpuProfiler.h"
 #include <Engine/Utils/Logger.h>
-#include <Engine/Utils/ThreadPool.h> // if you reference the thread pool
+#include <Engine/Utils/ThreadPool.h>
 
 #include <stdexcept>
 #include <deque>
@@ -191,9 +191,35 @@ Renderer::~Renderer()
     }
 }
 
-void Renderer::setTime(Time* time)
+// -----------------------------------------------------------------------------
+// ring-buffer approach for deferred frees
+// -----------------------------------------------------------------------------
+
+// [ADDED] We'll store chunk buffers in this array and free them
+// at the start of each frame, after waiting on the fence.
+void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& qcd)
 {
-    m_time = time; // store the pointer for usage in renderFrame, etc.
+    m_deferredFrees[m_currentFrame].push_back(qcd);
+}
+
+// [ADDED] Called after we wait on the fence for this frame
+void Renderer::freeDeferredResources()
+{
+    auto& list = m_deferredFrees[m_currentFrame];
+    if (!list.empty()) {
+        for (auto& info : list) {
+            if (info.vb != VK_NULL_HANDLE || info.ib != VK_NULL_HANDLE) {
+                if (m_resourceMgr) {
+                    // Freed once GPU is done with these buffers
+                    m_resourceMgr->destroyChunkBuffers(
+                        info.vb, info.vbMem,
+                        info.ib, info.ibMem
+                    );
+                }
+            }
+        }
+        list.clear();
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -201,6 +227,8 @@ void Renderer::setTime(Time* time)
 // -----------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
+    updateMVP();
+    
     // 1) Wait for the current frame’s fence (ensure GPU is done with it)
     vkWaitForFences(
         m_context->getDevice(),
@@ -210,21 +238,15 @@ void Renderer::renderFrame()
         UINT64_MAX
     );
 
-    // 2) Reset fence for usage this frame
+    // 2) [ADDED] Freed resources from last usage of this frame
+    freeDeferredResources();
+
+    // 3) Reset fence for usage this frame
     vkResetFences(
         m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence
     );
-
-    // [CHANGED] — Call VoxelWorld to flush any pending chunk destructions
-    // now that we know the GPU is done with the previous usage of resources.
-    if (m_voxelWorld) {
-        m_voxelWorld->flushPendingDestructions();
-    }
-
-    // 3) Update MVP
-    updateMVP();
 
     // 4) Acquire the next swap chain image
     uint32_t imageIndex;
@@ -311,14 +333,12 @@ void Renderer::renderFrame()
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            // Skip if buffers are uninitialized
             if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
                 chunk->getIndexBuffer() == VK_NULL_HANDLE)
             {
                 continue;
             }
 
-            // If culling is on, skip chunks outside the frustum
             if (m_enableFrustumCulling) {
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
@@ -344,8 +364,6 @@ void Renderer::renderFrame()
 
     // 11) UI: begin frame, show debug window, record to cmdBuf
     m_uiRenderer->beginFrame();
-
-    // Let the UIRenderer handle the "Debug" window code
     m_uiRenderer->renderDebugWindow(
         dt,
         fps,
@@ -358,8 +376,6 @@ void Renderer::renderFrame()
         m_wireframeOn,
         m_enableFrustumCulling
     );
-
-    // Now record ImGui's commands into the command buffer
     m_uiRenderer->renderImGui(cmdBuf);
 
     // 12) End render pass
@@ -495,7 +511,6 @@ void Renderer::createMVPUniformBuffer()
 // -----------------------------------------------------------------------------
 void Renderer::updateMVP()
 {
-    // Build your model/view/projection
     glm::mat4 model = glm::mat4(1.f);
     glm::mat4 view = m_camera.getViewMatrix();
     glm::mat4 proj = glm::perspective(
@@ -503,12 +518,11 @@ void Renderer::updateMVP()
         float(m_swapChain->getExtent().width) / float(m_swapChain->getExtent().height),
         0.1f, 1000000.f
     );
-    proj[1][1] *= -1.f; // Flip Y for Vulkan
+    proj[1][1] *= -1.f; // Flip Y
 
     MVPBlock block{};
     block.mvp = proj * view * model;
 
-    // Map + copy to GPU
     void* data;
     vkMapMemory(m_context->getDevice(), m_mvpMemory, 0, sizeof(MVPBlock), 0, &data);
     memcpy(data, &block, sizeof(MVPBlock));
@@ -587,7 +601,7 @@ void Renderer::recreateSwapChain()
     m_rpManager->cleanup();
     m_swapChain->cleanup();
 
-    // 2) Re-init with updated size
+    // 2) Re-init
     m_swapChain->init(m_context, m_window);
 
     // 3) Recreate pass + framebuffers
@@ -619,13 +633,10 @@ void Renderer::recreateSwapChain()
         m_mvpDescriptorPool = VK_NULL_HANDLE;
     }
     createMVPUniformBuffer();
-
-    // If your UIRenderer needs to be re-initialized for the new swap chain:
-    // e.g. ImGui_ImplVulkan_SetMinImageCount(2);
 }
 
 // -----------------------------------------------------------------------------
-// Rolling-average sample
+// Rolling-average sample (unchanged)
 // -----------------------------------------------------------------------------
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
@@ -643,4 +654,8 @@ float Renderer::computeAverage(const std::deque<float>& buffer)
         sum += val;
     }
     return sum / (float)buffer.size();
+}
+void Renderer::setTime(Time* time)
+{
+    m_time = time;
 }

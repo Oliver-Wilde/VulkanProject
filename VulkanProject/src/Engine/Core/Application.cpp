@@ -51,10 +51,13 @@ void Application::init()
 
     // 6) Create VoxelWorld, passing the same pointers
     m_voxelWorld = new VoxelWorld(m_vulkanCtx, m_resourceManager);
+    m_voxelWorld->setRenderer(m_renderer);
     m_voxelWorld->initWorld();
 
     // 7) Create Renderer
     m_renderer = new Renderer(m_vulkanCtx, m_window, m_voxelWorld);
+    
+
     m_renderer->setTime(m_time);
 
     m_isRunning = true;
