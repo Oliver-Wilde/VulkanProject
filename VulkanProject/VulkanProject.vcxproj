@@ -143,6 +143,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\Engine\Voxels\Meshing\LODMesher.cpp" />
     <ClCompile Include="src\Engine\Graphics\UIRenderer.cpp" />
     <ClCompile Include="src\Engine\Voxels\Meshing\GreedyMesher.cpp" />
     <ClCompile Include="src\Engine\Voxels\Meshing\NaiveMesher.cpp" />
@@ -179,6 +180,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
+    <ClInclude Include="src\Engine\Voxels\Meshing\LODMesher.h" />
     <ClInclude Include="src\Engine\Graphics\UIRenderer.h" />
     <ClInclude Include="src\Engine\Voxels\Meshing\GreedyMesher.h" />
     <ClInclude Include="src\Engine\Voxels\Meshing\NaiveMesher.h" />

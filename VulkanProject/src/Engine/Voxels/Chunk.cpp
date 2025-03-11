@@ -1,8 +1,8 @@
 #include "Chunk.h"
-#include <stdexcept>
-#include <cstddef>         // for size_t
-#include <glm/vec3.hpp>    // for glm::vec3
-#include <utility>         // for std::pair
+#include <stdexcept>       // For runtime_error if needed
+#include <cstddef>         // For size_t
+#include <glm/vec3.hpp>    // For glm::vec3
+#include <utility>         // For std::pair
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -11,65 +11,62 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     : m_worldX(worldX)
     , m_worldY(worldY)
     , m_worldZ(worldZ)
-    , m_dirty(true)        // By default, it's dirty => needs initial mesh
-    , m_isUploading(false) // Not uploading initially
+    , m_dirty(true)
+    , m_isUploading(false)
 {
-    // Allocate block data
-    size_t total = static_cast<size_t>(SIZE_X)
-        * static_cast<size_t>(SIZE_Y)
-        * static_cast<size_t>(SIZE_Z);
+    // Allocate the voxel array
+    size_t total = size_t(SIZE_X) * size_t(SIZE_Y) * size_t(SIZE_Z);
     m_blocks.resize(total, 0); // 0 => "Air"
 }
 
 Chunk::~Chunk()
 {
-    // Typically we don't destroy the chunk's GPU buffers here.
-    // The manager or VoxelWorld might handle that before device destruction.
+    // Typically we don't destroy GPU buffers here, 
+    // since VoxelWorld or ResourceManager handle it.
 }
 
 // -----------------------------------------------------------------------------
-// Block Access
+// getBlock
 // -----------------------------------------------------------------------------
 int Chunk::getBlock(int x, int y, int z) const
 {
-    // Bounds check
     if (x < 0 || x >= SIZE_X ||
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        // Return -1 or "Air" ID to indicate out-of-bounds
+        // Out-of-bounds => treat as “-1” or “air”
         return -1;
     }
 
-    // Calculate 1D index
-    size_t idx = static_cast<size_t>(x)
-        + static_cast<size_t>(SIZE_X) * (
-            static_cast<size_t>(y)
-            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
+    size_t idx = size_t(x)
+        + size_t(SIZE_X) * (size_t(y)
+            + size_t(SIZE_Y) * size_t(z));
     return m_blocks[idx];
 }
 
+// -----------------------------------------------------------------------------
+// setBlock
+// -----------------------------------------------------------------------------
 void Chunk::setBlock(int x, int y, int z, int voxelID)
 {
-    // Bounds check
     if (x < 0 || x >= SIZE_X ||
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        return; // out of bounds
+        // Out-of-range => ignore
+        return;
     }
 
-    // Calculate 1D index
-    size_t idx = static_cast<size_t>(x)
-        + static_cast<size_t>(SIZE_X) * (
-            static_cast<size_t>(y)
-            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
-
+    size_t idx = size_t(x)
+        + size_t(SIZE_X) * (size_t(y)
+            + size_t(SIZE_Y) * size_t(z));
     int oldVal = m_blocks[idx];
-    if (oldVal != voxelID) {
-        // Update the block ID
+
+    if (oldVal != voxelID)
+    {
+        // Update the voxel ID
         m_blocks[idx] = voxelID;
-        // Mark chunk as needing re-mesh
+        // Mark chunk dirty => re-mesh
         m_dirty = true;
     }
 }
@@ -79,15 +76,12 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
 // -----------------------------------------------------------------------------
 void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 {
-    // Calculate the world-space offset of this chunk
-    float chunkOriginX = static_cast<float>(m_worldX * SIZE_X);
-    float chunkOriginY = static_cast<float>(m_worldY * SIZE_Y);
-    float chunkOriginZ = static_cast<float>(m_worldZ * SIZE_Z);
+    // Convert chunk coords to world space
+    float baseX = float(m_worldX * SIZE_X);
+    float baseY = float(m_worldY * SIZE_Y);
+    float baseZ = float(m_worldZ * SIZE_Z);
 
-    // Minimum corner is the chunk origin
-    outMin = glm::vec3(chunkOriginX, chunkOriginY, chunkOriginZ);
-
-    // Maximum corner is origin + (SIZE_X, SIZE_Y, SIZE_Z)
+    outMin = glm::vec3(baseX, baseY, baseZ);
     outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
 }
 
@@ -99,15 +93,12 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
     size_t activeCount = 0;
     size_t emptyCount = 0;
 
-    // Iterate over each voxel in the block array.
-    for (int voxel : m_blocks)
+    for (int voxelID : m_blocks)
     {
-        if (voxel == 0)
-            emptyCount++;
+        if (voxelID == 0)
+            ++emptyCount;
         else
-            activeCount++;
+            ++activeCount;
     }
-
     return { activeCount, emptyCount };
 }
-

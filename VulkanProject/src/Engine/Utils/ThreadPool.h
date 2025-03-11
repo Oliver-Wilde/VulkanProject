@@ -1,70 +1,77 @@
 #pragma once
-
 #include <functional>
 #include <vector>
-#include <thread>
 #include <queue>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
+#include <condition_variable>
+#include <thread>
 
-/**
- * A simple thread pool that runs std::function<void()> tasks on worker threads.
- * Usage:
- * 1) Construct ThreadPool with desired # of threads.
- * 2) Call enqueueTask(...) with a lambda or function to run in background.
- * 3) When done, destruct the pool or explicitly shut it down.
- */
+// For example, define your task types:
+enum class TaskType
+{
+    Meshing,
+    Generation,
+    // ... Add more if needed
+};
+
+struct Task
+{
+    std::function<void()>  func;
+    TaskType               type;
+    int                    priority;
+
+    // Constructor helper
+    Task(const std::function<void()>& f, TaskType t, int p)
+        : func(f), type(t), priority(p) {}
+};
+
+// Comparator for priority_queue
+// Higher priority = tasks should come out first
+struct TaskCompare
+{
+    // Return true if lhs < rhs => means "rhs is higher priority"
+    bool operator()(const Task& lhs, const Task& rhs)
+    {
+        return lhs.priority < rhs.priority;
+    }
+};
+
 class ThreadPool
 {
 public:
-    /**
-     * Creates a pool with 'threadCount' worker threads.
-     * If threadCount == 0, it defaults to using hardware_concurrency - 1 (if >0).
-     */
-    explicit ThreadPool(size_t threadCount = 0);
-
-    /**
-     * Destructor. Waits for all tasks to finish, then joins all threads.
-     */
+    // You can pass concurrency limits into the constructor
+    ThreadPool(size_t totalThreads = 0,
+        size_t maxMeshTasks = 2,
+        size_t maxGenTasks = 2);
     ~ThreadPool();
 
-    /**
-     * Enqueues a new task to run asynchronously in one of the worker threads.
-     * @param task A callable taking no arguments and returning void.
-     */
-    void enqueueTask(const std::function<void()>& task);
+    // Instead of just enqueueTask(...), we have a version that includes priority & type
+    void enqueueTask(const std::function<void()>& taskFunc,
+        TaskType type,
+        int priority = 0);
 
-    /**
-     * Shuts down the pool. Waits for all currently enqueued tasks,
-     * then joins worker threads. Safe to call multiple times.
-     */
     void shutdown();
-
-    /**
-     * @return How many worker threads this pool has.
-     * (Safe to keep const; it doesn’t lock anything.)
-     */
     size_t getThreadCount() const;
-
-    /**
-     * @return The current number of tasks waiting in the queue.
-     * Not const, because we lock a mutex inside.
-     */
-    size_t getQueueSize();
+    size_t getQueueSize(); // For debugging
 
 private:
-    /**
-     * Worker thread loop that pops tasks from the queue.
-     */
+    // Worker thread function
     void workerThreadFunc();
 
-private:
-    std::vector<std::thread>            m_workers;
-    std::queue<std::function<void()>>   m_tasks;
+    // We use a priority queue that compares Task priorities
+    std::priority_queue<Task, std::vector<Task>, TaskCompare> m_tasks;
 
-    std::mutex                          m_taskMutex;
-    std::condition_variable             m_taskCondition;
-    std::atomic<bool>                   m_shutdownFlag{ false };  ///< signals workers to stop
-    bool                                m_isShuttingDown = false;
+    // Concurrency counters
+    size_t                 m_maxMeshing = 2;
+    size_t                 m_maxGeneration = 2;
+    std::atomic<size_t>    m_activeMeshing{ 0 };
+    std::atomic<size_t>    m_activeGeneration{ 0 };
+
+    // Other existing members
+    std::vector<std::thread> m_workers;
+    std::mutex               m_taskMutex;
+    std::condition_variable  m_taskCondition;
+    bool                     m_isShuttingDown = false;
+    std::atomic<bool>        m_shutdownFlag{ false };
 };

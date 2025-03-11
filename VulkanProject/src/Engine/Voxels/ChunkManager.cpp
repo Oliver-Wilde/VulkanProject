@@ -80,33 +80,11 @@ void ChunkManager::removeChunk(int cx, int cy, int cz)
    1) Push chunk coords to an internal queue or vector (m_pendingRemovals).
    2) Each frame, call removeChunksBatch(N) to remove up to N queued chunks.
    3) That way, you never remove too many in one frame.
-   -----------------------------------------------------------------------------
+   -----------------------------------------------------------------------------*/
 
-// Example: queue a chunk for removal later
-void ChunkManager::scheduleRemoveChunk(int cx, int cy, int cz)
-{
-    ChunkCoord coord{ cx, cy, cz };
-    m_pendingRemovals.push_back(coord);
-}
-
-// Example: remove up to 'maxCount' scheduled chunks in this frame
-void ChunkManager::removeChunksBatch(int maxCount)
-{
-    int removedThisFrame = 0;
-    while (!m_pendingRemovals.empty() && removedThisFrame < maxCount)
-    {
-        ChunkCoord coord = m_pendingRemovals.back();
-        m_pendingRemovals.pop_back();
-
-        removeChunk(coord.x, coord.y, coord.z);
-        removedThisFrame++;
-    }
-}
-*/
-
-// -----------------------------------------------------------------------------
-// getTotalVoxelUsage
-// -----------------------------------------------------------------------------
+   // -----------------------------------------------------------------------------
+   // getTotalVoxelUsage
+   // -----------------------------------------------------------------------------
 std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const
 {
     size_t totalActive = 0;

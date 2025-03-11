@@ -6,6 +6,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <cstring> // for memcpy
+#include <iostream>
 
 ResourceManager::ResourceManager(VulkanContext* context)
     : m_context(context)
@@ -250,9 +251,13 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
         throw std::runtime_error("Failed to create fence for copyBuffer!");
     }
 
-    // Submit the copy command buffer with the fence
-    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
+    VkResult result = vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence);
+    if (result != VK_SUCCESS) {
         vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+
+        // Log or switch on the result to see which Vulkan error you got
+        std::cerr << "vkQueueSubmit failed, error code: " << result << std::endl;
+
         throw std::runtime_error("Failed to submit copy command buffer!");
     }
 

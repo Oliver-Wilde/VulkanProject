@@ -1,122 +1,89 @@
 #pragma once
 
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
 #include <vector>
 #include <vulkan/vulkan.h>
-#include <glm/vec3.hpp>  // for glm::vec3 bounding box
-#include <utility>       // for std::pair
+#include <glm/vec3.hpp>
+#include <utility>
 
-// -----------------------------------------------------------------------------
-// Class Definition
-// -----------------------------------------------------------------------------
+// Single chunk with optional multi-LOD
 class Chunk
 {
 public:
-    // -------------------------------------------------------------------------
-    // Constants
-    // -------------------------------------------------------------------------
+    // Standard size
     static const int SIZE_X = 16;
     static const int SIZE_Y = 16;
     static const int SIZE_Z = 16;
 
-    // -------------------------------------------------------------------------
-    // Constructor / Destructor
-    // -------------------------------------------------------------------------
+    // We'll support up to 3 LOD levels
+    static const int MAX_LOD_LEVELS = 3;
+
+    // Each LOD has its own GPU data
+    struct ChunkLOD
+    {
+        VkBuffer       vertexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+        VkBuffer       indexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+        uint32_t       vertexCount = 0;
+        uint32_t       indexCount = 0;
+    };
+
     Chunk(int worldX, int worldY, int worldZ);
     ~Chunk();
 
-    // -------------------------------------------------------------------------
-    // Block Access Methods
-    // -------------------------------------------------------------------------
+    // 3D block access
     int  getBlock(int x, int y, int z) const;
     void setBlock(int x, int y, int z, int voxelID);
 
-    // -------------------------------------------------------------------------
-    // Dirty Flag
-    // -------------------------------------------------------------------------
-    bool isDirty()    const { return m_dirty; }
-    void clearDirty() { m_dirty = false; }
+    // Dirty & uploading flags
+    bool isDirty() const { return m_dirty; }
     void markDirty() { m_dirty = true; }
-
-    // -------------------------------------------------------------------------
-    // Uploading Flag
-    // -------------------------------------------------------------------------
-    /**
-     * Indicates whether this chunk is in the process of uploading or
-     * finalizing new GPU buffers.
-     */
+    void clearDirty() { m_dirty = false; }
     bool isUploading() const { return m_isUploading; }
-    void setIsUploading(bool b) { m_isUploading = b; }
+    void setIsUploading(bool value) { m_isUploading = value; }
 
-    // -------------------------------------------------------------------------
-    // World Coordinates
-    // -------------------------------------------------------------------------
+    // World coords
     int worldX() const { return m_worldX; }
     int worldY() const { return m_worldY; }
     int worldZ() const { return m_worldZ; }
 
-    // -------------------------------------------------------------------------
-    // GPU Buffers & Memory (Per-Chunk)
-    // -------------------------------------------------------------------------
-    VkBuffer       getVertexBuffer() const { return m_vertexBuffer; }
-    VkDeviceMemory getVertexMemory() const { return m_vertexMemory; }
-    VkBuffer       getIndexBuffer()  const { return m_indexBuffer; }
-    VkDeviceMemory getIndexMemory()  const { return m_indexMemory; }
+    // ----------- MULTI-LOD Access -----------
+    ChunkLOD& getLODData(int lod) { return m_lods[lod]; }
+    const ChunkLOD& getLODData(int lod) const { return m_lods[lod]; }
 
-    void setVertexBuffer(VkBuffer vb) { m_vertexBuffer = vb; }
-    void setIndexBuffer(VkBuffer ib) { m_indexBuffer = ib; }
-    void setVertexMemory(VkDeviceMemory m) { m_vertexMemory = m; }
-    void setIndexMemory(VkDeviceMemory m) { m_indexMemory = m; }
+    // ---------- SINGLE-LOD Compatibility -----------
+    // Old calls: chunk->getVertexBuffer(), etc. => they read/write LOD0
+    VkBuffer       getVertexBuffer()   const { return m_lods[0].vertexBuffer; }
+    VkDeviceMemory getVertexMemory()   const { return m_lods[0].vertexMemory; }
+    VkBuffer       getIndexBuffer()    const { return m_lods[0].indexBuffer; }
+    VkDeviceMemory getIndexMemory()    const { return m_lods[0].indexMemory; }
+    uint32_t       getVertexCount()    const { return m_lods[0].vertexCount; }
+    uint32_t       getIndexCount()     const { return m_lods[0].indexCount; }
 
-    // -------------------------------------------------------------------------
-    // Draw Information
-    // -------------------------------------------------------------------------
-    uint32_t getVertexCount() const { return m_vertexCount; }
-    void     setVertexCount(uint32_t c) { m_vertexCount = c; }
+    void setVertexBuffer(VkBuffer vb) { m_lods[0].vertexBuffer = vb; }
+    void setVertexMemory(VkDeviceMemory vm) { m_lods[0].vertexMemory = vm; }
+    void setIndexBuffer(VkBuffer ib) { m_lods[0].indexBuffer = ib; }
+    void setIndexMemory(VkDeviceMemory im) { m_lods[0].indexMemory = im; }
+    void setVertexCount(uint32_t vc) { m_lods[0].vertexCount = vc; }
+    void setIndexCount(uint32_t ic) { m_lods[0].indexCount = ic; }
 
-    uint32_t getIndexCount() const { return m_indexCount; }
-    void     setIndexCount(uint32_t c) { m_indexCount = c; }
-
-    // -------------------------------------------------------------------------
-    // Bounding Box (for Frustum Culling)
-    // -------------------------------------------------------------------------
-    /**
-     * Computes the axis-aligned bounding box of this chunk in world-space.
-     * @param outMin [out] The minimum corner (x_min, y_min, z_min).
-     * @param outMax [out] The maximum corner (x_max, y_max, z_max).
-     */
+    // AABB for culling
     void getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const;
 
-    // -------------------------------------------------------------------------
-    // Voxel Usage
-    // -------------------------------------------------------------------------
-    /**
-     * Computes how many voxels are "active" (non-air) vs "empty" (air).
-     * @return {activeCount, emptyCount}
-     */
+    // Count how many are air vs. solid
     std::pair<size_t, size_t> getVoxelUsage() const;
 
 private:
-    // -------------------------------------------------------------------------
-    // Member Variables
-    // -------------------------------------------------------------------------
-    int m_worldX, m_worldY, m_worldZ; ///< The chunk's position in chunk-space
+    int m_worldX;
+    int m_worldY;
+    int m_worldZ;
 
-    // A 1D array holding voxel IDs for each position (x, y, z).
+    bool m_dirty = true;
+    bool m_isUploading = false;
+
+    // All block data
     std::vector<int> m_blocks;
 
-    bool m_dirty;        ///< True if the chunk data changed and needs re-meshing
-    bool m_isUploading;  ///< True if the chunk is generating or uploading buffers
-
-    // Vulkan objects for the chunk's mesh
-    VkBuffer       m_vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_vertexMemory = VK_NULL_HANDLE;
-    VkBuffer       m_indexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_indexMemory = VK_NULL_HANDLE;
-
-    // Vertex/Index counts for rendering
-    uint32_t m_vertexCount = 0;
-    uint32_t m_indexCount = 0;
+    // MULTI-LOD: Up to 3 LODs
+    ChunkLOD m_lods[MAX_LOD_LEVELS];
 };
