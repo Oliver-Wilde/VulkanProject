@@ -80,7 +80,7 @@ private:
     TerrainGenerator m_terrainGenerator;
 
     // View distance for loads/unloads
-    static constexpr int VIEW_DISTANCE = 8;
+    static constexpr int VIEW_DISTANCE = 16;
 
     // We keep references to both meshers; choose at runtime
     GreedyMesher  m_greedyMesher;
@@ -89,7 +89,7 @@ private:
 
     // If false => single-lod approach (old code), 
     // if true => multi-lod approach
-    bool m_useMultiLOD = false;
+    bool m_useMultiLOD = true;
 
     // Queues for chunk loading/unloading
     std::deque<ChunkCoord> m_chunksToLoad;

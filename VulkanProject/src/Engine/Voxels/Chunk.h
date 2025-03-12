@@ -15,7 +15,7 @@ public:
     static const int SIZE_Z = 16;
 
     // We'll support up to 3 LOD levels
-    static const int MAX_LOD_LEVELS = 3;
+    static const int MAX_LOD_LEVELS = 8;
 
     // Each LOD has its own GPU data
     struct ChunkLOD

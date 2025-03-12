@@ -156,8 +156,10 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
 
     // 3) Throttle loading/unloading
-    constexpr int LOAD_BUDGET = 25;
-    constexpr int UNLOAD_BUDGET = 100;
+    constexpr int LOAD_BUDGET = 500;
+    constexpr int UNLOAD_BUDGET = 500;
+
+
     int loadCount = 0, unloadCount = 0;
 
     while (!m_chunksToLoad.empty() && loadCount < LOAD_BUDGET) {
@@ -363,7 +365,7 @@ void VoxelWorld::pollMeshBuildResults()
         }
 
         int processed = 0;
-        static const int MAX_UPLOADS_PER_FRAME = 5;
+        static const int MAX_UPLOADS_PER_FRAME = 250;
         while (!leftoverSingle.empty() && processed < MAX_UPLOADS_PER_FRAME) {
             auto res = std::move(leftoverSingle.front());
             leftoverSingle.pop_front();

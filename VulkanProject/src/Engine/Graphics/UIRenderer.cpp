@@ -1,5 +1,4 @@
 #include "UIRenderer.h"
-
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Core/Window.h"
 #include "Engine/Voxels/VoxelWorld.h"
@@ -186,7 +185,9 @@ void UIRenderer::renderDebugWindow(
     bool& enableFrustumCulling
 )
 {
-    if (!m_initialized) return;
+    if (!m_initialized) {
+        return;
+    }
 
     ImGui::Begin("Debug");
 
@@ -204,6 +205,7 @@ void UIRenderer::renderDebugWindow(
     static int mesherTypeIndex = 0; // 0 = GREEDY, 1 = NAIVE
     const char* mesherTypes[] = { "Greedy", "Naive" };
     if (ImGui::Combo("Mesher Type", &mesherTypeIndex, mesherTypes, IM_ARRAYSIZE(mesherTypes))) {
+        // Make sure voxelWorld is valid before calling setMesherType.
         if (voxelWorld) {
             if (mesherTypeIndex == 0) {
                 voxelWorld->setMesherType(VoxelWorld::MesherType::GREEDY);
@@ -227,34 +229,63 @@ void UIRenderer::renderDebugWindow(
     ImGui::Text("Vertex Count:  %u", totalVertices);
     ImGui::Text("Draw Calls:    %u", drawCallCount);
 
-    // If we have a voxel world, show chunk stats
-    if (voxelWorld) {
+    // 1) Check if voxelWorld is null
+    if (!voxelWorld) {
+        ImGui::Text("No VoxelWorld pointer (null).");
+        ImGui::End();
+        return;
+    }
+    else {
         auto& chunkMgr = voxelWorld->getChunkManager();
-        ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
+    }
 
-        auto usage = chunkMgr.getTotalVoxelUsage();
-        ImGui::Text("Active Voxels: %zu", usage.first);
-        ImGui::Text("Empty Voxels:  %zu", usage.second);
-        ImGui::Separator();
-        ImGui::Text("CPU Timing (ms):");
-        const auto& profileMap = CpuProfiler::GetProfileRecords();
-        for (auto& kv : profileMap)
-        {
-            const std::string& label = kv.first;
-            const ProfileRecord& rec = kv.second;
+    // 2) (Example) Check if chunk manager is valid.
+    //    Implementation depends on how your code works. If chunk manager is a pointer,
+    //    we can do something like:
+    //      ChunkManager* mgr = voxelWorld->getChunkManagerPtr();
+    //      if (!mgr) { ... skip ... }
+    //
+    //    Or if you only have "getChunkManager()" returning a reference, you might
+    //    add a bool voxelWorld->hasChunkManager() method to confirm it's not destroyed.
+    //
+    // For illustration, let's pretend we have:
+    //
+    //    bool voxelWorld->hasChunkManager() { return (m_chunkManager != nullptr); }
+    //
+    // Then:
+    // if (!voxelWorld->hasChunkManager()) {
+    //     ImGui::Text("No valid chunk manager in VoxelWorld (destroyed?).");
+    //     ImGui::End();
+    //     return;
+    // }
 
-            // rec.lastTimeMs = the last scope’s time
-            // rec.accumTimeMs / rec.callCount = average time across calls
-            double average = (rec.callCount > 0)
-                ? (rec.accumTimeMs / double(rec.callCount))
-                : 0.0;
+    // 3) If we passed the checks, it's safe to use the chunk manager
+    auto& chunkMgr = voxelWorld->getChunkManager(); // won't crash if we know it's valid
+    ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
 
-            ImGui::Text("%s: Last=%.2fms, Avg=%.2fms (%d calls)",
-                label.c_str(),
-                rec.lastTimeMs,
-                average,
-                rec.callCount);
-        }
+    auto usage = chunkMgr.getTotalVoxelUsage();
+    ImGui::Text("Active Voxels: %zu", usage.first);
+    ImGui::Text("Empty Voxels:  %zu", usage.second);
+
+    ImGui::Separator();
+    ImGui::Text("CPU Timing (ms):");
+    const auto& profileMap = CpuProfiler::GetProfileRecords();
+    for (auto& kv : profileMap)
+    {
+        const std::string& label = kv.first;
+        const ProfileRecord& rec = kv.second;
+
+        // rec.lastTimeMs = the last scope’s time
+        // rec.accumTimeMs / rec.callCount = average time across calls
+        double average = (rec.callCount > 0)
+            ? (rec.accumTimeMs / double(rec.callCount))
+            : 0.0;
+
+        ImGui::Text("%s: Last=%.2fms, Avg=%.2fms (%d calls)",
+            label.c_str(),
+            rec.lastTimeMs,
+            average,
+            rec.callCount);
     }
 
     ImGui::End();

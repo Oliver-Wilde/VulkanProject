@@ -195,14 +195,11 @@ Renderer::~Renderer()
 // ring-buffer approach for deferred frees
 // -----------------------------------------------------------------------------
 
-// [ADDED] We'll store chunk buffers in this array and free them
-// at the start of each frame, after waiting on the fence.
 void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& qcd)
 {
     m_deferredFrees[m_currentFrame].push_back(qcd);
 }
 
-// [ADDED] Called after we wait on the fence for this frame
 void Renderer::freeDeferredResources()
 {
     auto& list = m_deferredFrees[m_currentFrame];
@@ -210,7 +207,6 @@ void Renderer::freeDeferredResources()
         for (auto& info : list) {
             if (info.vb != VK_NULL_HANDLE || info.ib != VK_NULL_HANDLE) {
                 if (m_resourceMgr) {
-                    // Freed once GPU is done with these buffers
                     m_resourceMgr->destroyChunkBuffers(
                         info.vb, info.vbMem,
                         info.ib, info.ibMem
@@ -223,13 +219,13 @@ void Renderer::freeDeferredResources()
 }
 
 // -----------------------------------------------------------------------------
-// renderFrame
+// renderFrame (with multi-lod logic in the draw loop)
 // -----------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
     updateMVP();
-    
-    // 1) Wait for the current frame’s fence (ensure GPU is done with it)
+
+    // 1) Wait for the current frame’s fence
     vkWaitForFences(
         m_context->getDevice(),
         1,
@@ -238,17 +234,17 @@ void Renderer::renderFrame()
         UINT64_MAX
     );
 
-    // 2) [ADDED] Freed resources from last usage of this frame
+    // 2) Freed resources from last usage of this frame
     freeDeferredResources();
 
-    // 3) Reset fence for usage this frame
+    // 3) Reset fence
     vkResetFences(
         m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence
     );
 
-    // 4) Acquire the next swap chain image
+    // 4) Acquire next swap chain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
@@ -258,7 +254,6 @@ void Renderer::renderFrame()
         VK_NULL_HANDLE,
         &imageIndex
     );
-
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         recreateSwapChain();
         return;
@@ -267,7 +262,7 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to acquire swapchain image!");
     }
 
-    // 5) Reset + begin recording command buffer
+    // 5) Reset + begin cmd buffer
     VkCommandBuffer cmdBuf = m_frames[m_currentFrame].commandBuffer;
     vkResetCommandBuffer(cmdBuf, 0);
 
@@ -279,7 +274,7 @@ void Renderer::renderFrame()
 
     // 6) Begin render pass
     VkClearValue clearVals[2];
-    clearVals[0].color = { { 0.1f, 0.2f, 0.3f, 1.f } };
+    clearVals[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clearVals[1].depthStencil = { 1.f, 0 };
 
     VkRenderPassBeginInfo rpBegin{};
@@ -307,9 +302,9 @@ void Renderer::renderFrame()
         0, nullptr
     );
 
-    // 8) Gather stats (FPS, CPU usage)
+    // 8) Gather stats
     float dt = (m_time) ? m_time->getDeltaTime() : 0.f;
-    float fps = (dt > 0.f) ? 1.f / dt : 0.f;
+    float fps = (dt > 0.f) ? (1.f / dt) : 0.f;
     addSample(m_fpsSamples, fps);
     float avgFps = computeAverage(m_fpsSamples);
 
@@ -317,29 +312,29 @@ void Renderer::renderFrame()
     addSample(m_cpuSamples, cpuUsage);
     float avgCpu = computeAverage(m_cpuSamples);
 
-    // 9) Optionally do frustum culling
+    // 9) frustum culling if enabled
     Frustum frustum;
     if (m_enableFrustumCulling) {
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
-    // 10) Draw voxel chunks
+    // 10) Draw voxel chunks (multi-lod or single-lod)
     uint32_t totalVertices = 0;
     uint32_t drawCallCount = 0;
 
     if (m_voxelWorld) {
         const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
-        for (auto& kv : allChunks) {
+
+        // Are we using multi-lod?
+        bool useMultiLOD = m_voxelWorld->isUsingMultiLOD();
+
+        for (auto& kv : allChunks)
+        {
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
-                chunk->getIndexBuffer() == VK_NULL_HANDLE)
-            {
-                continue;
-            }
-
             if (m_enableFrustumCulling) {
+                // cull
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
                 if (!frustum.intersectsAABB(minB, maxB)) {
@@ -347,23 +342,83 @@ void Renderer::renderFrame()
                 }
             }
 
-            totalVertices += chunk->getVertexCount();
+            // If using multi-lod => pick LOD by distance
+            if (useMultiLOD)
+            {
+                // compute distance from camera
+                float chunkCenterX = (chunk->worldX() + 0.5f) * Chunk::SIZE_X;
+                float chunkCenterY = (chunk->worldY() + 0.5f) * Chunk::SIZE_Y;
+                float chunkCenterZ = (chunk->worldZ() + 0.5f) * Chunk::SIZE_Z;
+                float dist = glm::distance(
+                    m_camera.position,
+                    glm::vec3(chunkCenterX, chunkCenterY, chunkCenterZ)
+                );
 
-            VkDeviceSize offsets[] = { 0 };
-            VkBuffer vb = chunk->getVertexBuffer();
-            vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
-            vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+                // simple thresholds
+                int lodIndex = 0;
+                if (dist > 128.f)   lodIndex = 1;
+                if (dist > 256.f)   lodIndex = 2;
+                if (dist > 512.f)   lodIndex = 3;
+                if (dist > 1024.f)  lodIndex = 4;
+                if (dist > 2048.f)  lodIndex = 5;
+                if (dist > 4096.f)  lodIndex = 6;
+                if (dist > 8192.f)  lodIndex = 7;
+                // clamp if needed
+                if (lodIndex >= Chunk::MAX_LOD_LEVELS) {
+                    lodIndex = Chunk::MAX_LOD_LEVELS - 1;
+                }
 
-            uint32_t idxCount = chunk->getIndexCount();
-            if (idxCount > 0) {
-                vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
-                drawCallCount++;
+                // fetch that LOD data
+                const auto& cLOD = chunk->getLODData(lodIndex);
+                if (cLOD.vertexBuffer == VK_NULL_HANDLE || cLOD.indexCount == 0)
+                {
+                    // no geometry => skip
+                    continue;
+                }
+
+                totalVertices += cLOD.vertexCount;
+
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &cLOD.vertexBuffer, offsets);
+
+                // Must call with 4 arguments
+                vkCmdBindIndexBuffer(cmdBuf, cLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                uint32_t idxCount = cLOD.indexCount;
+                if (idxCount > 0) {
+                    vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
+                    drawCallCount++;
+                }
+            }
+            else
+            {
+                // single-lod approach => chunk->getVertexBuffer() etc.
+                if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
+                    chunk->getIndexBuffer() == VK_NULL_HANDLE)
+                {
+                    continue;
+                }
+                totalVertices += chunk->getVertexCount();
+
+                VkDeviceSize offsets[] = { 0 };
+                VkBuffer vb = chunk->getVertexBuffer();
+                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
+
+                // 4-arg version => offset=0, type=uint32
+                vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+
+                uint32_t idxCount = chunk->getIndexCount();
+                if (idxCount > 0) {
+                    vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
+                    drawCallCount++;
+                }
             }
         }
     }
 
     // 11) UI: begin frame, show debug window, record to cmdBuf
     m_uiRenderer->beginFrame();
+    
     m_uiRenderer->renderDebugWindow(
         dt,
         fps,
@@ -523,7 +578,7 @@ void Renderer::updateMVP()
     MVPBlock block{};
     block.mvp = proj * view * model;
 
-    void* data;
+    void* data = nullptr;
     vkMapMemory(m_context->getDevice(), m_mvpMemory, 0, sizeof(MVPBlock), 0, &data);
     memcpy(data, &block, sizeof(MVPBlock));
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
@@ -588,7 +643,6 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 // -----------------------------------------------------------------------------
 void Renderer::recreateSwapChain()
 {
-    // If minimized, skip
     int width = 0, height = 0;
     glfwGetFramebufferSize(m_window->getGLFWwindow(), &width, &height);
     if (width == 0 || height == 0) {
@@ -636,7 +690,7 @@ void Renderer::recreateSwapChain()
 }
 
 // -----------------------------------------------------------------------------
-// Rolling-average sample (unchanged)
+// Rolling-average sample
 // -----------------------------------------------------------------------------
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
@@ -655,6 +709,10 @@ float Renderer::computeAverage(const std::deque<float>& buffer)
     }
     return sum / (float)buffer.size();
 }
+
+// -----------------------------------------------------------------------------
+// setTime
+// -----------------------------------------------------------------------------
 void Renderer::setTime(Time* time)
 {
     m_time = time;

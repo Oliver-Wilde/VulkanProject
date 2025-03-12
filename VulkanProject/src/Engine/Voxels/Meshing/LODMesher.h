@@ -30,7 +30,7 @@ struct MultiLODResult
     int cy = 0;
     int cz = 0;
 
-    static constexpr int MAX_LODS = 3;  // Change as desired
+    static constexpr int MAX_LODS = 8;  // Change as desired
     LODMeshData lods[MAX_LODS];
 };
 

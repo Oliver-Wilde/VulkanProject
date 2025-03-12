@@ -3,7 +3,7 @@
 #include "LODMesher.h"
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Voxels/ChunkManager.h"
-#include "Engine/Voxels/Meshing/NaiveMesher.h"  // or GreedyMesher if you prefer
+#include "Engine/Voxels/Meshing/GreedyMesher.h"  // or GreedyMesher if you prefer
 #include <algorithm>  // For std::min, std::max, etc.
 
 // --------------------------------------------------------
