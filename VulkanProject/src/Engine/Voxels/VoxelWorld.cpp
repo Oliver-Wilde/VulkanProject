@@ -6,7 +6,7 @@
 #include "Engine/Utils/ThreadPool.h"
 #include "Meshing/GreedyMesher.h"
 #include "Meshing/NaiveMesher.h"
-#include "Meshing/LODMesher.h"  // For multi-LOD builds
+#include "Meshing/LODMesher.h"
 #include "Engine/Graphics/Renderer.h" // for ring-buffer calls
 
 #include <cmath>
@@ -24,10 +24,7 @@ extern ThreadPool g_threadPool;
 static double s_totalMeshTime = 0.0;
 static int    s_meshCount = 0;
 
-// ------------------------------------------------------------------------
-// SINGLE-LOD struct & container (old approach)
-// ------------------------------------------------------------------------
-
+// SINGLE-LOD leftover from your older code
 static std::mutex s_resultMutex;
 static std::vector<MeshBuildResult> s_pendingMeshResults;
 
@@ -69,8 +66,8 @@ void VoxelWorld::initWorld()
 {
     Logger::Info("initWorld() => generating initial region of chunks.");
 
-    int minCy = -2;
-    int maxCy = 5;
+    int minCy = 0;
+    int maxCy = 0;
 
     for (int cx = -VIEW_DISTANCE; cx <= VIEW_DISTANCE; ++cx)
     {
@@ -106,8 +103,8 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     int centerX = int(std::floor(playerPosX / float(Chunk::SIZE_X)));
     int centerZ = int(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-    int minCy = -2;
-    int maxCy = 2;
+    int minCy = 0;
+    int maxCy = 0;
 
     // 1) Gather new chunks
     std::vector<ChunkCoord> toLoad;
@@ -156,9 +153,8 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
 
     // 3) Throttle loading/unloading
-    constexpr int LOAD_BUDGET = 500;
-    constexpr int UNLOAD_BUDGET = 500;
-
+    constexpr int LOAD_BUDGET = 250;
+    constexpr int UNLOAD_BUDGET = 250;
 
     int loadCount = 0, unloadCount = 0;
 
@@ -236,7 +232,7 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
 }
 
 // ------------------------------------------------------------------------
-// scheduleMeshingForDirtyChunks => single-lod or multi-lod toggle
+// scheduleMeshingForDirtyChunks => single-lod or multi-lod
 // ------------------------------------------------------------------------
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
@@ -256,6 +252,14 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             auto coord = kv.first;
             Chunk* chunk = kv.second.get();
             if (!chunk || !chunk->isDirty()) continue;
+
+            // [NEW] If the chunk is fully EMPTY or fully SOLID, skip meshing
+            if (chunk->getState() != Chunk::ChunkState::NORMAL)
+            {
+                // No need to generate geometry
+                chunk->clearDirty();
+                continue;
+            }
 
             chunk->clearDirty();
             chunk->setIsUploading(true);
@@ -286,7 +290,9 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
 
                     MeshBuildResult res;
                     res.chunkPtr = chunk;
-                    res.cx = coord.x; res.cy = coord.y; res.cz = coord.z;
+                    res.cx = coord.x;
+                    res.cy = coord.y;
+                    res.cz = coord.z;
                     res.verts = std::move(verts);
                     res.inds = std::move(inds);
 
@@ -312,6 +318,13 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
             auto coord = kv.first;
             Chunk* chunk = kv.second.get();
             if (!chunk || !chunk->isDirty()) continue;
+
+            // [NEW] Skip if chunk is fully empty or fully solid
+            if (chunk->getState() != Chunk::ChunkState::NORMAL)
+            {
+                chunk->clearDirty();
+                continue;
+            }
 
             chunk->clearDirty();
             chunk->setIsUploading(true);
@@ -365,7 +378,7 @@ void VoxelWorld::pollMeshBuildResults()
         }
 
         int processed = 0;
-        static const int MAX_UPLOADS_PER_FRAME = 250;
+        static const int MAX_UPLOADS_PER_FRAME = 100;
         while (!leftoverSingle.empty() && processed < MAX_UPLOADS_PER_FRAME) {
             auto res = std::move(leftoverSingle.front());
             leftoverSingle.pop_front();
@@ -399,7 +412,7 @@ void VoxelWorld::pollMeshBuildResults()
         }
 
         int processed = 0;
-        static const int MAX_UPLOADS_PER_FRAME = 5;
+        static const int MAX_UPLOADS_PER_FRAME = 25;
         while (!leftoverMulti.empty() && processed < MAX_UPLOADS_PER_FRAME) {
             auto mlr = std::move(leftoverMulti.front());
             leftoverMulti.pop_front();
@@ -434,7 +447,6 @@ void VoxelWorld::uploadMeshToChunkSingleLOD(
             m_resourceManager->createChunkBuffers(verts, inds, vb, vbMem, ib, ibMem);
         }
 
-        // Forward calls => LOD0
         chunk.setVertexBuffer(vb);
         chunk.setVertexMemory(vbMem);
         chunk.setIndexBuffer(ib);

@@ -11,10 +11,10 @@ class Chunk
 public:
     // Standard size
     static const int SIZE_X = 16;
-    static const int SIZE_Y = 16;
+    static const int SIZE_Y = 128;
     static const int SIZE_Z = 16;
 
-    // We'll support up to 3 LOD levels
+    // We'll support up to 3 LOD levels (but you have it defined as 8 in code)
     static const int MAX_LOD_LEVELS = 8;
 
     // Each LOD has its own GPU data
@@ -28,11 +28,23 @@ public:
         uint32_t       indexCount = 0;
     };
 
+    /**
+     * Represents whether the chunk is fully EMPTY (all voxel=0),
+     * fully SOLID (all voxel same & !=0),
+     * or NORMAL (mixed).
+     */
+    enum class ChunkState
+    {
+        EMPTY,
+        SOLID,
+        NORMAL
+    };
+
     Chunk(int worldX, int worldY, int worldZ);
     ~Chunk();
 
     // 3D block access
-    int  getBlock(int x, int y, int z) const;
+    virtual int getBlock(int x, int y, int z) const;
     void setBlock(int x, int y, int z, int voxelID);
 
     // Dirty & uploading flags
@@ -47,12 +59,15 @@ public:
     int worldY() const { return m_worldY; }
     int worldZ() const { return m_worldZ; }
 
+    // Chunk state (EMPTY, SOLID, NORMAL)
+    void setState(ChunkState st) { m_state = st; }
+    ChunkState getState() const { return m_state; }
+
     // ----------- MULTI-LOD Access -----------
     ChunkLOD& getLODData(int lod) { return m_lods[lod]; }
     const ChunkLOD& getLODData(int lod) const { return m_lods[lod]; }
 
     // ---------- SINGLE-LOD Compatibility -----------
-    // Old calls: chunk->getVertexBuffer(), etc. => they read/write LOD0
     VkBuffer       getVertexBuffer()   const { return m_lods[0].vertexBuffer; }
     VkDeviceMemory getVertexMemory()   const { return m_lods[0].vertexMemory; }
     VkBuffer       getIndexBuffer()    const { return m_lods[0].indexBuffer; }
@@ -84,6 +99,9 @@ private:
     // All block data
     std::vector<int> m_blocks;
 
-    // MULTI-LOD: Up to 3 LODs
+    // MULTI-LOD: Up to 3 (or 8) LODs
     ChunkLOD m_lods[MAX_LOD_LEVELS];
+
+    // [ADDED] Tracks if the chunk is empty, solid, or normal
+    ChunkState m_state = ChunkState::NORMAL;
 };

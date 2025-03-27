@@ -80,14 +80,14 @@ private:
     TerrainGenerator m_terrainGenerator;
 
     // View distance for loads/unloads
-    static constexpr int VIEW_DISTANCE = 16;
+    static constexpr int VIEW_DISTANCE = 32;
 
     // We keep references to both meshers; choose at runtime
     GreedyMesher  m_greedyMesher;
     NaiveMesher   m_naiveMesher;
     MesherType    m_currentMesherType = MesherType::GREEDY;
 
-    // If false => single-lod approach (old code), 
+    // If false => single-lod approach (old code),
     // if true => multi-lod approach
     bool m_useMultiLOD = true;
 
@@ -96,17 +96,15 @@ private:
     std::deque<ChunkCoord> m_chunksToUnload;
 
     // --------------- Single-lod ---------------
-    // (Old approach) Completed mesh results
-    // (You likely had a global static in .cpp; 
-    //  we can store it as a member instead.)
-    std::mutex              m_singleLodMutex;
-    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD;
+    std::mutex m_singleLodMutex;
+    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD; // Unused in current code?
 
     // --------------- Multi-lod ---------------
-    // (New approach) LODMesher::buildAllLODs(...) => MultiLODResult
-    // We store those results here.
     std::mutex              m_multiLODMutex;
     std::vector<MultiLODResult> m_pendingMultiLODResults;
+
+    // Old static approach for single-lod
+    // we keep s_pendingMeshResults inside .cpp.
 
     // ----------------- Internal Helpers -----------------
     void loadOneChunk(const ChunkCoord& c);

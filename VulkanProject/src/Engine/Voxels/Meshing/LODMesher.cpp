@@ -5,6 +5,7 @@
 #include "Engine/Voxels/ChunkManager.h"
 #include "Engine/Voxels/Meshing/GreedyMesher.h"  // or GreedyMesher if you prefer
 #include <algorithm>  // For std::min, std::max, etc.
+#include <Engine/Voxels/VoxelTypeRegistry.h>
 
 // --------------------------------------------------------
 // buildAllLODs
@@ -149,106 +150,125 @@ void LODMesher::meshDownsampledData(
     std::vector<Vertex>& outVerts,
     std::vector<uint32_t>& outIndices)
 {
-    // Super-simple naive approach: 
-    // For each voxel !=0 => build a tiny 1x1x1 cube with the usual 6 faces (like a mini naive mesher).
     outVerts.clear();
     outIndices.clear();
 
-    auto getVoxel = [&](int x, int y, int z)->int
-        {
-            if (x < 0 || x >= coarseSizeX ||
-                y < 0 || y >= coarseSizeY ||
-                z < 0 || z >= coarseSizeZ) return 0;
-            return coarseVoxels[(z * coarseSizeY + y) * coarseSizeX + x];
-        };
-
-    // We'll assign a basic color or use the ID as color factor. 
-    // You might do a more advanced approach if you want the original VoxelType colors.
-    for (int z = 0; z < coarseSizeZ; z++)
+    // -------------------------------------------------------
+    // 1) Create a "MiniChunk" that holds the downsampled data
+    //    It overrides getBlock() so GreedyMesher can read voxel IDs.
+    // -------------------------------------------------------
+    class MiniChunk : public Chunk
     {
-        for (int y = 0; y < coarseSizeY; y++)
+    public:
+        MiniChunk(int sx, int sy, int sz,
+            int ox, int oy, int oz,
+            const std::vector<int>& dataRef)
+            : Chunk(0, 0, 0)  // We'll pass 0,0,0 for the chunk coords; it's not used here
+            , m_sizeX(sx), m_sizeY(sy), m_sizeZ(sz)
+            , m_offsetX(ox), m_offsetY(oy), m_offsetZ(oz)
+            , m_data(dataRef)
         {
-            for (int x = 0; x < coarseSizeX; x++)
-            {
-                int id = getVoxel(x, y, z);
-                if (id == 0) continue; // air => skip
-
-                // Simple color from ID (just an example)
-                float r = ((id * 53) % 255) / 255.f;
-                float g = ((id * 97) % 255) / 255.f;
-                float b = ((id * 199) % 255) / 255.f;
-
-                // "World space" = offset + (x,y,z)
-                float bx = float(offsetX + x);
-                float by = float(offsetY + y);
-                float bz = float(offsetZ + z);
-
-                // For each of the 6 faces, if neighbor is air => add face
-                // This is exactly like a small naive mesher approach.
-
-                auto addQuad = [&](float x0, float y0, float z0,
-                    float x1, float y1, float z1,
-                    float x2, float y2, float z2,
-                    float x3, float y3, float z3)
-                    {
-                        uint32_t startIndex = (uint32_t)outVerts.size();
-                        outVerts.push_back(Vertex(x0, y0, z0, r, g, b));
-                        outVerts.push_back(Vertex(x1, y1, z1, r, g, b));
-                        outVerts.push_back(Vertex(x2, y2, z2, r, g, b));
-                        outVerts.push_back(Vertex(x3, y3, z3, r, g, b));
-
-                        outIndices.push_back(startIndex + 0);
-                        outIndices.push_back(startIndex + 1);
-                        outIndices.push_back(startIndex + 2);
-                        outIndices.push_back(startIndex + 2);
-                        outIndices.push_back(startIndex + 3);
-                        outIndices.push_back(startIndex + 0);
-                    };
-
-                // +X neighbor check
-                if (getVoxel(x + 1, y, z) == 0) {
-                    addQuad(
-                        bx + 1, by, bz, bx + 1, by, bz + 1,
-                        bx + 1, by + 1, bz + 1, bx + 1, by + 1, bz
-                    );
-                }
-                // -X
-                if (getVoxel(x - 1, y, z) == 0) {
-                    // reversed winding
-                    addQuad(
-                        bx, by, bz + 1, bx, by, bz,
-                        bx, by + 1, bz, bx, by + 1, bz + 1
-                    );
-                }
-                // +Y
-                if (getVoxel(x, y + 1, z) == 0) {
-                    addQuad(
-                        bx, by + 1, bz, bx + 1, by + 1, bz,
-                        bx + 1, by + 1, bz + 1, bx, by + 1, bz + 1
-                    );
-                }
-                // -Y
-                if (getVoxel(x, y - 1, z) == 0) {
-                    addQuad(
-                        bx + 1, by, bz, bx, by, bz,
-                        bx, by, bz + 1, bx + 1, by, bz + 1
-                    );
-                }
-                // +Z
-                if (getVoxel(x, y, z + 1) == 0) {
-                    addQuad(
-                        bx, by, bz + 1, bx + 1, by, bz + 1,
-                        bx + 1, by + 1, bz + 1, bx, by + 1, bz + 1
-                    );
-                }
-                // -Z
-                if (getVoxel(x, y, z - 1) == 0) {
-                    addQuad(
-                        bx + 1, by, bz, bx, by, bz,
-                        bx, by + 1, bz, bx + 1, by + 1, bz
-                    );
-                }
-            }
+            // We do NOT allocate the usual chunk blocks.
+            // Our "m_data" is an external reference to coarseVoxels.
         }
-    }
+
+        // Override getBlock so GreedyMesher can fetch voxel IDs
+        virtual int getBlock(int x, int y, int z) const override
+        {
+            // Out-of-range => treat as air
+            if (x < 0 || x >= m_sizeX ||
+                y < 0 || y >= m_sizeY ||
+                z < 0 || z >= m_sizeZ)
+            {
+                return 0;
+            }
+            // Index into our coarse data
+            int idx = (z * m_sizeY + y) * m_sizeX + x;
+            return m_data[idx];
+        }
+
+        // We also override the chunk's bounding box or any other calls if needed,
+        // but typically just getBlock() is enough for the mesher.
+        // The rest can remain as is or do minimal stubs.
+
+        // We'll keep the chunk states or GPU buffers irrelevant for LOD usage.
+        // This chunk is purely for meshing data.
+
+        // Our real chunk dimension constants are not used by the mesher, but we
+        // store them for reference here:
+        int m_sizeX, m_sizeY, m_sizeZ;
+        int m_offsetX, m_offsetY, m_offsetZ;
+        const std::vector<int>& m_data;
+    };
+
+    // -------------------------------------------------------
+    // 2) Instantiate our mini chunk
+    // -------------------------------------------------------
+    MiniChunk miniChunk(
+        coarseSizeX, coarseSizeY, coarseSizeZ,
+        offsetX, offsetY, offsetZ,
+        coarseVoxels
+    );
+
+    // -------------------------------------------------------
+    // 3) We need a minimal "manager" for boundary checks.
+    //    Our GreedyMesher does "manager.getChunk(nx, ny, nz)" for neighbor lookups.
+    //    We'll return null for all neighbors, so outside is air.
+    // -------------------------------------------------------
+    class MiniManager : public ChunkManager
+    {
+    public:
+        // We'll hold a pointer to our mini chunk at (0,0,0).
+        Chunk* m_chunkPtr = nullptr;
+
+        // This is the only chunk that exists. If the caller
+        // asks for chunk(0,0,0) => return our mini chunk, else null => air
+        Chunk* getChunk(int cx, int cy, int cz) const override
+        {
+            if (cx == 0 && cy == 0 && cz == 0)
+            {
+                return m_chunkPtr;
+            }
+            return nullptr; // outside => air
+        }
+
+        // We won't implement createChunk/removeChunk etc.
+        // We'll just rely on getChunk for neighbor checks.
+    } miniManager;
+
+    miniManager.m_chunkPtr = &miniChunk;
+
+    // -------------------------------------------------------
+    // 4) Create or retrieve a GreedyMesher
+    //    If you have a global or shared instance, you can use that.
+    //    Here we just create a local one.
+    // -------------------------------------------------------
+    GreedyMesher lodGreedy;
+
+    // -------------------------------------------------------
+    // 5) Call the mesher, telling it "this chunk is at (0,0,0)" in chunk coords,
+    //    because we do the real world offset in the "offsetX, offsetY, offsetZ" param.
+    // -------------------------------------------------------
+    // The mesher's signature is:
+    // generateMesh(Chunk& chunk, int cx, int cy, int cz,
+    //     vector<Vertex>& outVertices, vector<uint32_t>& outIndices,
+    //     int offsetX, int offsetY, int offsetZ,
+    //     const ChunkManager& manager) const
+    //
+    // We'll pass 0,0,0 for cx,cy,cz. The offset is our real chunk offset.
+    //
+    // We'll accumulate into outVerts/outIndices.
+
+    lodGreedy.generateMesh(
+        miniChunk,
+        0, 0, 0,                // chunk coords
+        outVerts, outIndices,
+        offsetX, offsetY, offsetZ,
+        miniManager
+    );
+
+    // Now outVerts/outIndices hold a "greedy" LOD mesh that uses real voxel colors
+    // for the downsampled data, with minimal geometry.
+
+    // Done. The rest of your code can handle outVerts/outIndices as usual.
 }

@@ -13,6 +13,7 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     , m_worldZ(worldZ)
     , m_dirty(true)
     , m_isUploading(false)
+    , m_state(ChunkState::NORMAL) // Default
 {
     // Allocate the voxel array
     size_t total = size_t(SIZE_X) * size_t(SIZE_Y) * size_t(SIZE_Z);
@@ -21,7 +22,7 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
 
 Chunk::~Chunk()
 {
-    // Typically we don't destroy GPU buffers here, 
+    // Typically we don't destroy GPU buffers here,
     // since VoxelWorld or ResourceManager handle it.
 }
 
@@ -68,6 +69,11 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
         m_blocks[idx] = voxelID;
         // Mark chunk dirty => re-mesh
         m_dirty = true;
+
+        // We also reset the state to NORMAL here, but
+        // realistically we'll do a final pass in TerrainGenerator
+        // to set it to EMPTY or SOLID if needed.
+        m_state = ChunkState::NORMAL;
     }
 }
 

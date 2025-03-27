@@ -77,7 +77,7 @@ public:
      * @param cz Chunk Z coordinate.
      * @return Pointer to the Chunk if found, otherwise nullptr.
      */
-    Chunk* getChunk(int cx, int cy, int cz) const;
+    virtual Chunk* getChunk(int cx, int cy, int cz) const;
 
     /**
      * Creates and returns a new chunk at the specified chunk coordinates if it doesn't exist.

@@ -229,43 +229,74 @@ void UIRenderer::renderDebugWindow(
     ImGui::Text("Vertex Count:  %u", totalVertices);
     ImGui::Text("Draw Calls:    %u", drawCallCount);
 
-    // 1) Check if voxelWorld is null
+    // -------------------------------------------------------------------------
+    // Check if voxelWorld is null
+    // -------------------------------------------------------------------------
     if (!voxelWorld) {
         ImGui::Text("No VoxelWorld pointer (null).");
         ImGui::End();
         return;
     }
-    else {
-        auto& chunkMgr = voxelWorld->getChunkManager();
-    }
 
-    // 2) (Example) Check if chunk manager is valid.
-    //    Implementation depends on how your code works. If chunk manager is a pointer,
-    //    we can do something like:
-    //      ChunkManager* mgr = voxelWorld->getChunkManagerPtr();
-    //      if (!mgr) { ... skip ... }
-    //
-    //    Or if you only have "getChunkManager()" returning a reference, you might
-    //    add a bool voxelWorld->hasChunkManager() method to confirm it's not destroyed.
-    //
-    // For illustration, let's pretend we have:
-    //
-    //    bool voxelWorld->hasChunkManager() { return (m_chunkManager != nullptr); }
-    //
-    // Then:
-    // if (!voxelWorld->hasChunkManager()) {
-    //     ImGui::Text("No valid chunk manager in VoxelWorld (destroyed?).");
-    //     ImGui::End();
-    //     return;
-    // }
+    auto& chunkMgr = voxelWorld->getChunkManager();
 
-    // 3) If we passed the checks, it's safe to use the chunk manager
-    auto& chunkMgr = voxelWorld->getChunkManager(); // won't crash if we know it's valid
+    // -------------------------------------------------------------------------
+    // Display chunk count, total usage (active/empty)
+    // -------------------------------------------------------------------------
     ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
-
     auto usage = chunkMgr.getTotalVoxelUsage();
     ImGui::Text("Active Voxels: %zu", usage.first);
     ImGui::Text("Empty Voxels:  %zu", usage.second);
+
+    // -------------------------------------------------------------------------
+    // Additional Debug: Count how many chunks are EMPTY, SOLID, or NORMAL
+    // -------------------------------------------------------------------------
+    {
+        size_t emptyChunkCount = 0;
+        size_t solidChunkCount = 0;
+        size_t normalChunkCount = 0;
+
+        // Also track total active/empty across all chunks for cross-check
+        size_t totalActiveVoxels = 0;
+        size_t totalEmptyVoxels = 0;
+
+        const auto& allChunks = chunkMgr.getAllChunks();
+        for (auto& kv : allChunks)
+        {
+            Chunk* c = kv.second.get();
+            if (!c) continue;
+
+            // Check chunk state
+            switch (c->getState())
+            {
+            case Chunk::ChunkState::EMPTY:
+                emptyChunkCount++;
+                break;
+            case Chunk::ChunkState::SOLID:
+                solidChunkCount++;
+                break;
+            case Chunk::ChunkState::NORMAL:
+                normalChunkCount++;
+                break;
+            }
+
+            // For comparison, accumulate usage
+            auto cUsage = c->getVoxelUsage();
+            totalActiveVoxels += cUsage.first;
+            totalEmptyVoxels += cUsage.second;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Chunk States:");
+        ImGui::Text("  EMPTY:  %zu", emptyChunkCount);
+        ImGui::Text("  SOLID:  %zu", solidChunkCount);
+        ImGui::Text("  NORMAL: %zu", normalChunkCount);
+
+        // These might differ from chunkMgr.getTotalVoxelUsage() if you're storing
+        // partial data or if the code lumps them differently. But it's a good cross-check:
+        ImGui::Text("Recounted Active Voxels: %zu", totalActiveVoxels);
+        ImGui::Text("Recounted Empty Voxels:  %zu", totalEmptyVoxels);
+    }
 
     ImGui::Separator();
     ImGui::Text("CPU Timing (ms):");
@@ -275,8 +306,6 @@ void UIRenderer::renderDebugWindow(
         const std::string& label = kv.first;
         const ProfileRecord& rec = kv.second;
 
-        // rec.lastTimeMs = the last scope’s time
-        // rec.accumTimeMs / rec.callCount = average time across calls
         double average = (rec.callCount > 0)
             ? (rec.accumTimeMs / double(rec.callCount))
             : 0.0;
