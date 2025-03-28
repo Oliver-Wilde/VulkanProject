@@ -4,6 +4,9 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/ChunkManager.h"
 
+// We MUST include ResourceManager to call its methods
+#include "Engine/Resources/ResourceManager.h"
+
 // ImGui + Vulkan/GLFW backends
 #include "../External Libraries/imgui/imgui.h"
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
@@ -30,9 +33,7 @@ void UIRenderer::init(VulkanContext* context, Window* window, VkRenderPass rende
 
     m_context = context;
 
-    // -----------------------------------------------------------
     // 1) Create a descriptor pool for ImGui
-    // -----------------------------------------------------------
     VkDescriptorPoolSize poolSizes[] = {
         { VK_DESCRIPTOR_TYPE_SAMPLER,                1000 },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
@@ -59,15 +60,12 @@ void UIRenderer::init(VulkanContext* context, Window* window, VkRenderPass rende
         throw std::runtime_error("UIRenderer: Failed to create ImGui descriptor pool!");
     }
 
-    // -----------------------------------------------------------
-    // 2) Initialize ImGui context and bind to GLFW / Vulkan
-    // -----------------------------------------------------------
+    // 2) Initialize ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     (void)io; // If you want to silence the compiler about unused 'io'
 
-    // Initialize ImGui for GLFW
     GLFWwindow* glfwWindow = window->getGLFWwindow();
     if (!glfwWindow) {
         throw std::runtime_error("UIRenderer::init - No valid GLFW window!");
@@ -88,12 +86,9 @@ void UIRenderer::init(VulkanContext* context, Window* window, VkRenderPass rende
     initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     initInfo.CheckVkResultFn = nullptr;
 
-    // Initialize ImGui for Vulkan
     ImGui_ImplVulkan_Init(&initInfo, renderPass);
 
-    // -----------------------------------------------------------
-    // 3) Upload ImGui fonts
-    // -----------------------------------------------------------
+    // 3) Upload fonts
     VkCommandPool cmdPool = m_context->getCommandPool();
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -132,18 +127,17 @@ void UIRenderer::init(VulkanContext* context, Window* window, VkRenderPass rende
 
 void UIRenderer::cleanup()
 {
+    // Must be a member function => can safely check m_initialized
     if (!m_initialized) {
-        return; // already cleaned or never init
+        return;
     }
 
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // Shut down ImGui
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    // Destroy descriptor pool
     if (m_imguiPool) {
         vkDestroyDescriptorPool(m_context->getDevice(), m_imguiPool, nullptr);
         m_imguiPool = VK_NULL_HANDLE;
@@ -182,16 +176,17 @@ void UIRenderer::renderDebugWindow(
     uint32_t drawCallCount,
     VoxelWorld* voxelWorld,
     bool& wireframeOn,
-    bool& enableFrustumCulling
+    bool& enableFrustumCulling,
+    ResourceManager* resourceManager
 )
 {
     if (!m_initialized) {
-        return;
+        return; // If ImGui not inited, skip
     }
 
     ImGui::Begin("Debug");
 
-    // Show wireframe status and button to toggle
+    // Show wireframe status, toggle
     ImGui::Text("Wireframe: %s", wireframeOn ? "ON" : "OFF");
     if (ImGui::Button("Toggle Wireframe")) {
         wireframeOn = !wireframeOn;
@@ -205,7 +200,6 @@ void UIRenderer::renderDebugWindow(
     static int mesherTypeIndex = 0; // 0 = GREEDY, 1 = NAIVE
     const char* mesherTypes[] = { "Greedy", "Naive" };
     if (ImGui::Combo("Mesher Type", &mesherTypeIndex, mesherTypes, IM_ARRAYSIZE(mesherTypes))) {
-        // Make sure voxelWorld is valid before calling setMesherType.
         if (voxelWorld) {
             if (mesherTypeIndex == 0) {
                 voxelWorld->setMesherType(VoxelWorld::MesherType::GREEDY);
@@ -217,7 +211,7 @@ void UIRenderer::renderDebugWindow(
     }
     ImGui::Separator();
 
-    // Show frame time, FPS, CPU usage
+    // CPU usage, times
     ImGui::Text("Delta Time:  %.3f s", dt);
     ImGui::Text("FPS (Instant):  %.2f", fps);
     ImGui::Text("FPS (Average):  %.2f", avgFps);
@@ -225,13 +219,11 @@ void UIRenderer::renderDebugWindow(
     ImGui::Text("CPU Usage (Average):  %.1f%%", avgCpu);
     ImGui::Separator();
 
-    // Show total geometry
+    // Geometry stats
     ImGui::Text("Vertex Count:  %u", totalVertices);
     ImGui::Text("Draw Calls:    %u", drawCallCount);
 
-    // -------------------------------------------------------------------------
     // Check if voxelWorld is null
-    // -------------------------------------------------------------------------
     if (!voxelWorld) {
         ImGui::Text("No VoxelWorld pointer (null).");
         ImGui::End();
@@ -239,36 +231,27 @@ void UIRenderer::renderDebugWindow(
     }
 
     auto& chunkMgr = voxelWorld->getChunkManager();
-
-    // -------------------------------------------------------------------------
-    // Display chunk count, total usage (active/empty)
-    // -------------------------------------------------------------------------
     ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
     auto usage = chunkMgr.getTotalVoxelUsage();
     ImGui::Text("Active Voxels: %zu", usage.first);
     ImGui::Text("Empty Voxels:  %zu", usage.second);
 
-    // -------------------------------------------------------------------------
-    // Additional Debug: Count how many chunks are EMPTY, SOLID, or NORMAL
-    // -------------------------------------------------------------------------
+    // Additional debug: chunk states
     {
         size_t emptyChunkCount = 0;
         size_t solidChunkCount = 0;
         size_t normalChunkCount = 0;
 
-        // Also track total active/empty across all chunks for cross-check
         size_t totalActiveVoxels = 0;
         size_t totalEmptyVoxels = 0;
 
         const auto& allChunks = chunkMgr.getAllChunks();
-        for (auto& kv : allChunks)
-        {
+        for (auto& kv : allChunks) {
             Chunk* c = kv.second.get();
             if (!c) continue;
 
             // Check chunk state
-            switch (c->getState())
-            {
+            switch (c->getState()) {
             case Chunk::ChunkState::EMPTY:
                 emptyChunkCount++;
                 break;
@@ -292,11 +275,19 @@ void UIRenderer::renderDebugWindow(
         ImGui::Text("  SOLID:  %zu", solidChunkCount);
         ImGui::Text("  NORMAL: %zu", normalChunkCount);
 
-        // These might differ from chunkMgr.getTotalVoxelUsage() if you're storing
-        // partial data or if the code lumps them differently. But it's a good cross-check:
         ImGui::Text("Recounted Active Voxels: %zu", totalActiveVoxels);
         ImGui::Text("Recounted Empty Voxels:  %zu", totalEmptyVoxels);
     }
+
+    ImGui::Separator();
+
+    // GPU Memory usage
+    // [Initialize local variable before using it]
+    size_t gpuBytes = 0;
+    if (resourceManager) {
+        gpuBytes = resourceManager->GetTotalGPUBufferBytes();
+    }
+    ImGui::Text("GPU Buffer Memory: %.2f MB", float(gpuBytes) / (1024.0f * 1024.0f));
 
     ImGui::Separator();
     ImGui::Text("CPU Timing (ms):");

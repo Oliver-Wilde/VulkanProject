@@ -1,11 +1,13 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
+#include <cstdint> // for uint32_t
 
-// Forward declarations to avoid heavy includes
+// Forward declarations to avoid heavy includes.
 class VulkanContext;
 class Window;
 class VoxelWorld;
+class ResourceManager; // <-- IMPORTANT
 
 /**
  * UIRenderer is responsible for all ImGui-based UI:
@@ -14,10 +16,7 @@ class VoxelWorld;
  *   - Beginning ImGui frames and rendering them into a command buffer
  *   - Optionally displaying a debug window with stats and toggles
  *
- * This keeps your main Renderer class free from directly 
-
-
- ImGui code.
+ * This keeps your main Renderer class free from directly ImGui code.
  */
 class UIRenderer
 {
@@ -59,19 +58,17 @@ public:
      * Renders a "Debug" window that displays various stats (FPS, CPU usage, etc.)
      * and allows toggling wireframe, culling, and mesher type.
      *
-     * The data is passed from your main renderer or logic, so that the UI is
-     * effectively data-driven rather than pulling from global variables.
-     *
-     * @param dt                 Delta time this frame
-     * @param fps                Instant FPS
-     * @param avgFps             Rolling-average FPS
-     * @param cpuUsage           Instant CPU usage percentage
-     * @param avgCpu             Rolling-average CPU usage
-     * @param totalVertices      The total vertex count in the scene
-     * @param drawCallCount      The total draw calls for the frame
-     * @param voxelWorld         Pointer to the voxel world (used for mesher toggles, chunk stats)
-     * @param wireframeOn        Reference to a boolean controlling wireframe mode
+     * @param dt                  Delta time this frame
+     * @param fps                 Instant FPS
+     * @param avgFps              Rolling-average FPS
+     * @param cpuUsage            Instant CPU usage percentage
+     * @param avgCpu              Rolling-average CPU usage
+     * @param totalVertices       The total vertex count in the scene
+     * @param drawCallCount       The total draw calls for the frame
+     * @param voxelWorld          Pointer to the voxel world (used for mesher toggles, chunk stats)
+     * @param wireframeOn         Reference to a boolean controlling wireframe mode
      * @param enableFrustumCulling Reference to a boolean controlling frustum culling
+     * @param resourceManager     Pointer for reading GPU memory usage
      */
     void renderDebugWindow(
         float dt,
@@ -83,7 +80,8 @@ public:
         uint32_t drawCallCount,
         VoxelWorld* voxelWorld,
         bool& wireframeOn,
-        bool& enableFrustumCulling
+        bool& enableFrustumCulling,
+        ResourceManager* resourceManager  // <-- Make sure .cpp has the same signature
     );
 
 private:

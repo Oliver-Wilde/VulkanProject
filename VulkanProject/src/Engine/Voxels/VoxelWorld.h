@@ -89,7 +89,7 @@ private:
 
     // If false => single-lod approach (old code),
     // if true => multi-lod approach
-    bool m_useMultiLOD = true;
+    bool m_useMultiLOD = false;
 
     // Queues for chunk loading/unloading
     std::deque<ChunkCoord> m_chunksToLoad;

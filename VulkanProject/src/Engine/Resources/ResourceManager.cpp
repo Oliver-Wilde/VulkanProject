@@ -7,6 +7,12 @@
 #include <cstring> // for memcpy
 #include <iostream>
 
+// [ADDED] For atomic usage in global memory counter
+#include <atomic>
+
+// [ADDED] A global/static atomic to track total GPU buffer usage:
+static std::atomic<size_t> g_totalGPUBufferBytes(0);
+
 static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024; // 4MB default
 
 ResourceManager::ResourceManager(VulkanContext* context)
@@ -216,13 +222,20 @@ void ResourceManager::createChunkBuffers(
 }
 
 // -------------------------------------------
-// destroyChunkBuffers => same as original
+// destroyChunkBuffers => same as original, but track memory
 // -------------------------------------------
 void ResourceManager::destroyChunkBuffers(
     VkBuffer vb, VkDeviceMemory vbMem,
     VkBuffer ib, VkDeviceMemory ibMem)
 {
     if (vb != VK_NULL_HANDLE) {
+        // Optionally re-query memory size to subtract from global usage
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(m_context->getDevice(), vb, &memReq);
+
+        // [ADDED] decrement usage
+        g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
+
         vkDestroyBuffer(m_context->getDevice(), vb, nullptr);
     }
     if (vbMem != VK_NULL_HANDLE) {
@@ -230,6 +243,12 @@ void ResourceManager::destroyChunkBuffers(
     }
 
     if (ib != VK_NULL_HANDLE) {
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(m_context->getDevice(), ib, &memReq);
+
+        // [ADDED] decrement usage
+        g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
+
         vkDestroyBuffer(m_context->getDevice(), ib, nullptr);
     }
     if (ibMem != VK_NULL_HANDLE) {
@@ -238,7 +257,7 @@ void ResourceManager::destroyChunkBuffers(
 }
 
 // -------------------------------------------
-// createBuffer => same as original
+// createBuffer
 // -------------------------------------------
 void ResourceManager::createBuffer(
     VkDeviceSize size,
@@ -270,6 +289,9 @@ void ResourceManager::createBuffer(
     }
 
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
+
+    // [ADDED] Increase global GPU usage
+    g_totalGPUBufferBytes.fetch_add(memReq.size, std::memory_order_relaxed);
 }
 
 // -------------------------------------------
@@ -395,7 +417,7 @@ void ResourceManager::copyBufferRegions(
 }
 
 // -------------------------------------------
-// findMemoryType => unchanged
+// findMemoryType => unchanged from original
 // -------------------------------------------
 uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 {
@@ -409,5 +431,11 @@ uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags 
             return i;
         }
     }
-    throw std::runtime_error("Failed to find suitable memory type for buffer!");
+    throw std::runtime_error("Failed to find suitable memory type!");
+}
+
+// [ADDED] A simple getter so the UI or other code can read total GPU usage
+size_t ResourceManager::GetTotalGPUBufferBytes() const
+{
+    return g_totalGPUBufferBytes.load(std::memory_order_relaxed);
 }

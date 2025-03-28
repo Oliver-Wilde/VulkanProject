@@ -31,9 +31,6 @@ static CpuProfiler g_cpuProfiler;
 // If you want to reference a global thread pool:
 extern ThreadPool g_threadPool;
 
-// -----------------------------------------------------------------------------
-// Constructor
-// -----------------------------------------------------------------------------
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
     : m_context(context)
     , m_window(window)
@@ -109,9 +106,6 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     );
 }
 
-// -----------------------------------------------------------------------------
-// Destructor
-// -----------------------------------------------------------------------------
 Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
@@ -191,10 +185,14 @@ Renderer::~Renderer()
     }
 }
 
-// -----------------------------------------------------------------------------
-// ring-buffer approach for deferred frees
-// -----------------------------------------------------------------------------
+void Renderer::setTime(Time* time)
+{
+    m_time = time;
+}
 
+//------------------------------------------------------------------------------
+// ring-buffer approach for deferred frees
+//------------------------------------------------------------------------------
 void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& qcd)
 {
     m_deferredFrees[m_currentFrame].push_back(qcd);
@@ -218,11 +216,14 @@ void Renderer::freeDeferredResources()
     }
 }
 
-// -----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // renderFrame (with multi-lod logic in the draw loop)
-// -----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
+    // [ADDED] Scoped timer to measure total time spent in renderFrame
+    CpuProfiler::ScopedTimer frameTimer("Renderer::renderFrame"); // [ADDED]
+
     updateMVP();
 
     // 1) Wait for the current frame’s fence
@@ -324,8 +325,6 @@ void Renderer::renderFrame()
 
     if (m_voxelWorld) {
         const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
-
-        // Are we using multi-lod?
         bool useMultiLOD = m_voxelWorld->isUsingMultiLOD();
 
         for (auto& kv : allChunks)
@@ -334,7 +333,6 @@ void Renderer::renderFrame()
             if (!chunk) continue;
 
             if (m_enableFrustumCulling) {
-                // cull
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
                 if (!frustum.intersectsAABB(minB, maxB)) {
@@ -342,7 +340,6 @@ void Renderer::renderFrame()
                 }
             }
 
-            // If using multi-lod => pick LOD by distance
             if (useMultiLOD)
             {
                 // compute distance from camera
@@ -363,16 +360,14 @@ void Renderer::renderFrame()
                 if (dist > 2048.f)  lodIndex = 5;
                 if (dist > 4096.f)  lodIndex = 6;
                 if (dist > 8192.f)  lodIndex = 7;
-                // clamp if needed
+
                 if (lodIndex >= Chunk::MAX_LOD_LEVELS) {
                     lodIndex = Chunk::MAX_LOD_LEVELS - 1;
                 }
 
-                // fetch that LOD data
                 const auto& cLOD = chunk->getLODData(lodIndex);
                 if (cLOD.vertexBuffer == VK_NULL_HANDLE || cLOD.indexCount == 0)
                 {
-                    // no geometry => skip
                     continue;
                 }
 
@@ -381,7 +376,6 @@ void Renderer::renderFrame()
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmdBuf, 0, 1, &cLOD.vertexBuffer, offsets);
 
-                // Must call with 4 arguments
                 vkCmdBindIndexBuffer(cmdBuf, cLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
                 uint32_t idxCount = cLOD.indexCount;
@@ -392,7 +386,6 @@ void Renderer::renderFrame()
             }
             else
             {
-                // single-lod approach => chunk->getVertexBuffer() etc.
                 if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
                     chunk->getIndexBuffer() == VK_NULL_HANDLE)
                 {
@@ -404,7 +397,6 @@ void Renderer::renderFrame()
                 VkBuffer vb = chunk->getVertexBuffer();
                 vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
 
-                // 4-arg version => offset=0, type=uint32
                 vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
                 uint32_t idxCount = chunk->getIndexCount();
@@ -418,7 +410,7 @@ void Renderer::renderFrame()
 
     // 11) UI: begin frame, show debug window, record to cmdBuf
     m_uiRenderer->beginFrame();
-    
+
     m_uiRenderer->renderDebugWindow(
         dt,
         fps,
@@ -429,7 +421,8 @@ void Renderer::renderFrame()
         drawCallCount,
         m_voxelWorld,
         m_wireframeOn,
-        m_enableFrustumCulling
+        m_enableFrustumCulling,
+        m_resourceMgr
     );
     m_uiRenderer->renderImGui(cmdBuf);
 
@@ -484,25 +477,16 @@ void Renderer::renderFrame()
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-// -----------------------------------------------------------------------------
-// setCamera
-// -----------------------------------------------------------------------------
 void Renderer::setCamera(const Camera& cam)
 {
     m_camera = cam;
 }
 
-// -----------------------------------------------------------------------------
-// toggleWireframe
-// -----------------------------------------------------------------------------
 void Renderer::toggleWireframe()
 {
     m_wireframeOn = !m_wireframeOn;
 }
 
-// -----------------------------------------------------------------------------
-// createMVPUniformBuffer
-// -----------------------------------------------------------------------------
 void Renderer::createMVPUniformBuffer()
 {
     VkDeviceSize bufferSize = sizeof(MVPBlock);
@@ -561,9 +545,6 @@ void Renderer::createMVPUniformBuffer()
     vkUpdateDescriptorSets(m_context->getDevice(), 1, &descWrite, 0, nullptr);
 }
 
-// -----------------------------------------------------------------------------
-// updateMVP
-// -----------------------------------------------------------------------------
 void Renderer::updateMVP()
 {
     glm::mat4 model = glm::mat4(1.f);
@@ -584,9 +565,6 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
-// -----------------------------------------------------------------------------
-// createBuffer
-// -----------------------------------------------------------------------------
 void Renderer::createBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
@@ -620,9 +598,6 @@ void Renderer::createBuffer(
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }
 
-// -----------------------------------------------------------------------------
-// findMemoryType
-// -----------------------------------------------------------------------------
 uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties memProps;
@@ -638,9 +613,6 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-// -----------------------------------------------------------------------------
-// recreateSwapChain
-// -----------------------------------------------------------------------------
 void Renderer::recreateSwapChain()
 {
     int width = 0, height = 0;
@@ -689,9 +661,7 @@ void Renderer::recreateSwapChain()
     createMVPUniformBuffer();
 }
 
-// -----------------------------------------------------------------------------
 // Rolling-average sample
-// -----------------------------------------------------------------------------
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
     if (buffer.size() >= ROLLING_AVG_SAMPLES) {
@@ -708,12 +678,4 @@ float Renderer::computeAverage(const std::deque<float>& buffer)
         sum += val;
     }
     return sum / (float)buffer.size();
-}
-
-// -----------------------------------------------------------------------------
-// setTime
-// -----------------------------------------------------------------------------
-void Renderer::setTime(Time* time)
-{
-    m_time = time;
 }

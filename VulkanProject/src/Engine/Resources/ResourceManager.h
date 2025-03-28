@@ -58,6 +58,8 @@ public:
         VkDeviceMemory ibMem
     );
 
+    size_t GetTotalGPUBufferBytes() const;
+
 private:
     // --------------------------------------------------------------------------
     // Internal Helpers
