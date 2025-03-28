@@ -1,8 +1,8 @@
 #include "Chunk.h"
-#include <stdexcept>       // For runtime_error if needed
-#include <cstddef>         // For size_t
-#include <glm/vec3.hpp>    // For glm::vec3
-#include <utility>         // For std::pair
+#include <stdexcept>  // For runtime_error
+#include <cstddef>    // For size_t
+#include <glm/vec3.hpp>
+#include <utility>    // For std::pair
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -13,7 +13,7 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     , m_worldZ(worldZ)
     , m_dirty(true)
     , m_isUploading(false)
-    , m_state(ChunkState::NORMAL) // Default
+    , m_state(ChunkState::NORMAL)
 {
     // Allocate the voxel array
     size_t total = size_t(SIZE_X) * size_t(SIZE_Y) * size_t(SIZE_Z);
@@ -22,8 +22,8 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
 
 Chunk::~Chunk()
 {
-    // Typically we don't destroy GPU buffers here,
-    // since VoxelWorld or ResourceManager handle it.
+    // Typically we don't destroy GPU buffers here;
+    // that is handled by VoxelWorld or ResourceManager.
 }
 
 // -----------------------------------------------------------------------------
@@ -39,9 +39,11 @@ int Chunk::getBlock(int x, int y, int z) const
         return -1;
     }
 
-    size_t idx = size_t(x)
-        + size_t(SIZE_X) * (size_t(y)
-            + size_t(SIZE_Y) * size_t(z));
+    // 1D index into m_blocks
+    const size_t idx = static_cast<size_t>(x)
+        + static_cast<size_t>(SIZE_X) * (static_cast<size_t>(y)
+            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
+
     return m_blocks[idx];
 }
 
@@ -58,34 +60,32 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
         return;
     }
 
-    size_t idx = size_t(x)
-        + size_t(SIZE_X) * (size_t(y)
-            + size_t(SIZE_Y) * size_t(z));
-    int oldVal = m_blocks[idx];
+    const size_t idx = static_cast<size_t>(x)
+        + static_cast<size_t>(SIZE_X) * (static_cast<size_t>(y)
+            + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
 
+    int oldVal = m_blocks[idx];
     if (oldVal != voxelID)
     {
-        // Update the voxel ID
+        // Update the voxel data
         m_blocks[idx] = voxelID;
-        // Mark chunk dirty => re-mesh
-        m_dirty = true;
 
-        // We also reset the state to NORMAL here, but
-        // realistically we'll do a final pass in TerrainGenerator
-        // to set it to EMPTY or SOLID if needed.
+        // Mark chunk as dirty => needs re-meshing
+        m_dirty = true;
+        // Typically, once any block changes, we set the state to NORMAL
+        // If a terrain generator or post-process finds it is uniform, it will override.
         m_state = ChunkState::NORMAL;
     }
 }
 
 // -----------------------------------------------------------------------------
-// getBoundingBox
+// getBoundingBox (for frustum culling, etc.)
 // -----------------------------------------------------------------------------
 void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 {
-    // Convert chunk coords to world space
-    float baseX = float(m_worldX * SIZE_X);
-    float baseY = float(m_worldY * SIZE_Y);
-    float baseZ = float(m_worldZ * SIZE_Z);
+    float baseX = static_cast<float>(m_worldX * SIZE_X);
+    float baseY = static_cast<float>(m_worldY * SIZE_Y);
+    float baseZ = static_cast<float>(m_worldZ * SIZE_Z);
 
     outMin = glm::vec3(baseX, baseY, baseZ);
     outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
@@ -108,3 +108,4 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
     }
     return { activeCount, emptyCount };
 }
+

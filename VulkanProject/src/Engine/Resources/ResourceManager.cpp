@@ -1,12 +1,13 @@
 #include "ResourceManager.h"
 #include "Engine/Graphics/VulkanContext.h"
-// Include your Vertex struct header (e.g. "IMesher.h") if needed for the Vertex definition
 #include "Engine/Voxels/Meshing/IMesher.h"
 
 #include <fstream>
 #include <stdexcept>
 #include <cstring> // for memcpy
 #include <iostream>
+
+static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024; // 4MB default
 
 ResourceManager::ResourceManager(VulkanContext* context)
     : m_context(context)
@@ -20,8 +21,86 @@ ResourceManager::~ResourceManager()
         vkDestroyShaderModule(m_context->getDevice(), kv.second, nullptr);
     }
     m_shaderModules.clear();
+
+    // Destroy any leftover staging buffer
+    if (m_stagingBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
+        m_stagingBuffer = VK_NULL_HANDLE;
+    }
+    if (m_stagingMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
+        m_stagingMemory = VK_NULL_HANDLE;
+    }
 }
 
+// -------------------------------------------
+// createStagingBuffer
+// -------------------------------------------
+void ResourceManager::createStagingBuffer(VkDeviceSize size)
+{
+    if (m_stagingBuffer != VK_NULL_HANDLE) {
+        // If it's already big enough, do nothing
+        if (size <= m_stagingBufferSize) {
+            return;
+        }
+        // Otherwise, free and recreate a larger one
+        vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
+        vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
+        m_stagingBuffer = VK_NULL_HANDLE;
+        m_stagingMemory = VK_NULL_HANDLE;
+        m_stagingBufferSize = 0;
+    }
+
+    // Create new staging buffer
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = size;
+    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &m_stagingBuffer) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create staging buffer!");
+    }
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(m_context->getDevice(), m_stagingBuffer, &memReq);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(
+        memReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+
+    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &m_stagingMemory) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate staging buffer memory!");
+    }
+
+    vkBindBufferMemory(m_context->getDevice(), m_stagingBuffer, m_stagingMemory, 0);
+    m_stagingBufferSize = size;
+}
+
+// -------------------------------------------
+// getOrCreateStagingBuffer
+// -------------------------------------------
+std::pair<VkBuffer, VkDeviceMemory> ResourceManager::getOrCreateStagingBuffer(VkDeviceSize size)
+{
+    // Round up size to reduce frequent expansions
+    static const VkDeviceSize chunkSize = 512 * 1024; // 512KB increments
+    if (size > 0) {
+        VkDeviceSize newSize = ((size + chunkSize - 1) / chunkSize) * chunkSize;
+        createStagingBuffer(newSize);
+    }
+    else {
+        createStagingBuffer(chunkSize);
+    }
+    return { m_stagingBuffer, m_stagingMemory };
+}
+
+// -------------------------------------------
+// readFile => same as original
+// -------------------------------------------
 std::vector<char> ResourceManager::readFile(const std::string& filePath)
 {
     std::ifstream file(filePath, std::ios::ate | std::ios::binary);
@@ -36,9 +115,11 @@ std::vector<char> ResourceManager::readFile(const std::string& filePath)
     return buffer;
 }
 
+// -------------------------------------------
+// loadShaderModule => same as original
+// -------------------------------------------
 VkShaderModule ResourceManager::loadShaderModule(const std::string& filePath)
 {
-    // Check if this shader is already loaded
     auto it = m_shaderModules.find(filePath);
     if (it != m_shaderModules.end()) {
         return it->second;
@@ -60,10 +141,9 @@ VkShaderModule ResourceManager::loadShaderModule(const std::string& filePath)
     return shaderModule;
 }
 
-
-// -----------------------------------------------------------------------------
-// createChunkBuffers(...) and destroyChunkBuffers(...)
-// -----------------------------------------------------------------------------
+// -------------------------------------------
+// createChunkBuffers => uses single staging
+// -------------------------------------------
 void ResourceManager::createChunkBuffers(
     const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
@@ -72,10 +152,10 @@ void ResourceManager::createChunkBuffers(
     VkBuffer& outIndexBuffer,
     VkDeviceMemory& outIndexMemory)
 {
-    // 1) Create final device-local buffers
     VkDeviceSize vbSize = sizeof(Vertex) * verts.size();
     VkDeviceSize ibSize = sizeof(uint32_t) * inds.size();
 
+    // 1) Create device-local buffers
     createBuffer(
         vbSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -92,55 +172,52 @@ void ResourceManager::createChunkBuffers(
         outIndexMemory
     );
 
-    // 2) Create staging buffers
-    VkBuffer stagingVB = VK_NULL_HANDLE;
-    VkDeviceMemory stagingVBMem = VK_NULL_HANDLE;
-    createBuffer(
-        vbSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingVB,
-        stagingVBMem
-    );
-
-    VkBuffer stagingIB = VK_NULL_HANDLE;
-    VkDeviceMemory stagingIBMem = VK_NULL_HANDLE;
-    createBuffer(
-        ibSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingIB,
-        stagingIBMem
-    );
+    // 2) Get or create staging buffer large enough for both vertex + index data
+    VkDeviceSize totalSize = vbSize + ibSize;
+    auto stagingPair = getOrCreateStagingBuffer(totalSize);
+    VkBuffer stagingBuf = stagingPair.first;
+    VkDeviceMemory stagingMem = stagingPair.second;
 
     // 3) Copy CPU data into staging
-    if (vbSize > 0)
-    {
-        void* data;
-        vkMapMemory(m_context->getDevice(), stagingVBMem, 0, vbSize, 0, &data);
+    VkDeviceSize vbOffset = 0;
+    VkDeviceSize ibOffset = vbSize;
+
+    if (vbSize > 0) {
+        void* data = nullptr;
+        vkMapMemory(m_context->getDevice(), stagingMem, vbOffset, vbSize, 0, &data);
         std::memcpy(data, verts.data(), static_cast<size_t>(vbSize));
-        vkUnmapMemory(m_context->getDevice(), stagingVBMem);
+        vkUnmapMemory(m_context->getDevice(), stagingMem);
     }
 
-    if (ibSize > 0)
-    {
-        void* data;
-        vkMapMemory(m_context->getDevice(), stagingIBMem, 0, ibSize, 0, &data);
+    if (ibSize > 0) {
+        void* data = nullptr;
+        vkMapMemory(m_context->getDevice(), stagingMem, ibOffset, ibSize, 0, &data);
         std::memcpy(data, inds.data(), static_cast<size_t>(ibSize));
-        vkUnmapMemory(m_context->getDevice(), stagingIBMem);
+        vkUnmapMemory(m_context->getDevice(), stagingMem);
     }
 
-    // 4) Copy staging buffers into final device-local buffers
-    copyBuffer(stagingVB, outVertexBuffer, vbSize);
-    copyBuffer(stagingIB, outIndexBuffer, ibSize);
+    // 4) Copy from stagingBuf => device-local for vertex + index
+    // We'll do two distinct copy regions
+    if (vbSize > 0) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = vbOffset;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = vbSize;
+        copyBufferRegions(stagingBuf, outVertexBuffer, &copyRegion, 1);
+    }
 
-    // 5) Destroy staging resources
-    vkDestroyBuffer(m_context->getDevice(), stagingVB, nullptr);
-    vkFreeMemory(m_context->getDevice(), stagingVBMem, nullptr);
-    vkDestroyBuffer(m_context->getDevice(), stagingIB, nullptr);
-    vkFreeMemory(m_context->getDevice(), stagingIBMem, nullptr);
+    if (ibSize > 0) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = ibOffset;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = ibSize;
+        copyBufferRegions(stagingBuf, outIndexBuffer, &copyRegion, 1);
+    }
 }
 
+// -------------------------------------------
+// destroyChunkBuffers => same as original
+// -------------------------------------------
 void ResourceManager::destroyChunkBuffers(
     VkBuffer vb, VkDeviceMemory vbMem,
     VkBuffer ib, VkDeviceMemory ibMem)
@@ -151,6 +228,7 @@ void ResourceManager::destroyChunkBuffers(
     if (vbMem != VK_NULL_HANDLE) {
         vkFreeMemory(m_context->getDevice(), vbMem, nullptr);
     }
+
     if (ib != VK_NULL_HANDLE) {
         vkDestroyBuffer(m_context->getDevice(), ib, nullptr);
     }
@@ -159,11 +237,9 @@ void ResourceManager::destroyChunkBuffers(
     }
 }
 
-
-// -----------------------------------------------------------------------------
-// Private Helpers for Creating/Copying Buffers
-// -----------------------------------------------------------------------------
-
+// -------------------------------------------
+// createBuffer => same as original
+// -------------------------------------------
 void ResourceManager::createBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
@@ -171,13 +247,13 @@ void ResourceManager::createBuffer(
     VkBuffer& buffer,
     VkDeviceMemory& bufferMemory)
 {
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = size;
-    bufferInfo.usage = usage;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = size;
+    bufInfo.usage = usage;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(m_context->getDevice(), &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &buffer) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create buffer!");
     }
 
@@ -196,19 +272,15 @@ void ResourceManager::createBuffer(
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }
 
-/* -----------------------------------------------------------------------------
-   copyBuffer(...)
-   [CHANGED] Removed the vkQueueWaitIdle(gfxQueue) call
-   and replaced it with a fence-based approach.
-   ----------------------------------------------------------------------------- */
+// -------------------------------------------
+// copyBuffer
+// -------------------------------------------
 void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 {
     if (size == 0) {
-        // No data to copy => skip
         return;
     }
 
-    // 1) Allocate a temporary command buffer from our existing pool
     VkCommandPool   cmdPool = m_context->getCommandPool();
     VkQueue         gfxQueue = m_context->getGraphicsQueue();
 
@@ -223,26 +295,20 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
         throw std::runtime_error("Failed to allocate staging command buffer!");
     }
 
-    // 2) Begin command buffer
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmdBuf, &beginInfo);
 
-    // 3) Copy region
     VkBufferCopy copyRegion{};
     copyRegion.size = size;
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+
     vkCmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion);
 
-    // 4) End command buffer + submit
     vkEndCommandBuffer(cmdBuf);
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmdBuf;
-
-    // [CHANGED] Create a fence so we can wait specifically on this copy.
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 
@@ -251,26 +317,86 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
         throw std::runtime_error("Failed to create fence for copyBuffer!");
     }
 
-    VkResult result = vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence);
-    if (result != VK_SUCCESS) {
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
         vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
-
-        // Log or switch on the result to see which Vulkan error you got
-        std::cerr << "vkQueueSubmit failed, error code: " << result << std::endl;
-
         throw std::runtime_error("Failed to submit copy command buffer!");
     }
 
-    // [CHANGED] Wait for the fence instead of calling vkQueueWaitIdle
     vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
-
-    // Destroy the fence
     vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
 
-    // 5) Clean up command buffer
     vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
 }
 
+// -------------------------------------------
+// copyBufferRegions
+// -------------------------------------------
+void ResourceManager::copyBufferRegions(
+    VkBuffer src,
+    VkBuffer dst,
+    const VkBufferCopy* regions,
+    uint32_t regionCount)
+{
+    if (!regions || regionCount == 0) {
+        return;
+    }
+
+    VkCommandPool cmdPool = m_context->getCommandPool();
+    VkQueue       gfxQueue = m_context->getGraphicsQueue();
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = cmdPool;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuf;
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate command buffer!");
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    vkCmdCopyBuffer(cmdBuf, src, dst, regionCount, regions);
+
+    vkEndCommandBuffer(cmdBuf);
+
+    // Fence
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+    VkFence copyFence;
+    if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &copyFence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create fence for copyBuffer!");
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
+        vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+        throw std::runtime_error("Failed to submit copy command buffer!");
+    }
+
+    vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+
+    vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
+}
+
+// -------------------------------------------
+// findMemoryType => unchanged
+// -------------------------------------------
 uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties memProps;
@@ -278,11 +404,10 @@ uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags 
 
     for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
         bool isRequiredType = (filter & (1 << i)) != 0;
-        bool hasProperties = (memProps.memoryTypes[i].propertyFlags & props) == props;
+        bool hasProperties = ((memProps.memoryTypes[i].propertyFlags & props) == props);
         if (isRequiredType && hasProperties) {
             return i;
         }
     }
-
     throw std::runtime_error("Failed to find suitable memory type for buffer!");
 }

@@ -80,7 +80,7 @@ private:
     TerrainGenerator m_terrainGenerator;
 
     // View distance for loads/unloads
-    static constexpr int VIEW_DISTANCE = 32;
+    static constexpr int VIEW_DISTANCE = 12;
 
     // We keep references to both meshers; choose at runtime
     GreedyMesher  m_greedyMesher;

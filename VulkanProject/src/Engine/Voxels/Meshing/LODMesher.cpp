@@ -1,10 +1,8 @@
-// LODMesher.cpp
-
 #include "LODMesher.h"
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Voxels/ChunkManager.h"
-#include "Engine/Voxels/Meshing/GreedyMesher.h"  // or GreedyMesher if you prefer
-#include <algorithm>  // For std::min, std::max, etc.
+#include "Engine/Voxels/Meshing/GreedyMesher.h" 
+#include <algorithm>  // For std::min, etc.
 #include <Engine/Voxels/VoxelTypeRegistry.h>
 
 // --------------------------------------------------------
@@ -25,7 +23,9 @@ MultiLODResult LODMesher::buildAllLODs(
     // 1) LOD0 => the real mesher
     {
         std::vector<Vertex> verts;
+        verts.reserve(4096); // optional heuristic
         std::vector<uint32_t> inds;
+        inds.reserve(6144);
 
         int offX = cx * Chunk::SIZE_X;
         int offY = cy * Chunk::SIZE_Y;
@@ -44,19 +44,29 @@ MultiLODResult LODMesher::buildAllLODs(
     }
 
     // 2) For LOD1..N => downsample + mesh
-    //    In this example, we set up to result.MAX_LODS - 1
     for (int lodLevel = 1; lodLevel < MultiLODResult::MAX_LODS; lodLevel++)
     {
+        // Factor is 2^lodLevel
+        int factor = (1 << lodLevel);
+
+        // If factor is bigger than chunk dimension => everything collapses to 1 voxel, no need to continue
+        if (factor >= std::min({ Chunk::SIZE_X, Chunk::SIZE_Y, Chunk::SIZE_Z }))
+        {
+            break; // LOD beyond chunk size => no smaller detail needed
+        }
+
         std::vector<int> coarseVoxels;
-        downsampleChunkData(chunk, (1 << lodLevel), coarseVoxels);
+        downsampleChunkData(chunk, factor, coarseVoxels);
 
         // The coarser dimensions
-        int cSizeX = Chunk::SIZE_X / (1 << lodLevel);
-        int cSizeY = Chunk::SIZE_Y / (1 << lodLevel);
-        int cSizeZ = Chunk::SIZE_Z / (1 << lodLevel);
+        int cSizeX = Chunk::SIZE_X / factor;
+        int cSizeY = Chunk::SIZE_Y / factor;
+        int cSizeZ = Chunk::SIZE_Z / factor;
 
         std::vector<Vertex> verts;
+        verts.reserve(1024); // smaller heuristic for LOD
         std::vector<uint32_t> inds;
+        inds.reserve(1536);
 
         int offX = cx * Chunk::SIZE_X;
         int offY = cy * Chunk::SIZE_Y;
@@ -83,14 +93,15 @@ void LODMesher::downsampleChunkData(
     int factor,
     std::vector<int>& outVoxels)
 {
-    // factor=2 means each 2x2x2 block in the chunk becomes 1 voxel in the result
-    // chunk dimension => e.g. 16 x 128 x 16
-    // cSizeX => 16/2=8, cSizeY=>128/2=64, cSizeZ=>16/2=8
+    // factor=2 => each 2x2x2 block in the original chunk is 1 voxel in the result
     const int cSizeX = Chunk::SIZE_X / factor;
     const int cSizeY = Chunk::SIZE_Y / factor;
     const int cSizeZ = Chunk::SIZE_Z / factor;
 
     outVoxels.resize(cSizeX * cSizeY * cSizeZ, 0);
+
+    // For example, a factor=2 region in the original chunk is size(2󫎾)=8 blocks.
+    // We'll count frequency of each voxel ID, then pick the majority.
 
     for (int zz = 0; zz < cSizeZ; zz++)
     {
@@ -98,34 +109,44 @@ void LODMesher::downsampleChunkData(
         {
             for (int xx = 0; xx < cSizeX; xx++)
             {
-                // The NxNxN region in the original chunk
+                // NxNxN region
                 int startX = xx * factor;
                 int startY = yy * factor;
                 int startZ = zz * factor;
 
-                // For this example, we pick the first non-air block we find:
-                // (You could also do majority, or an average, or topmost.)
-                int chosenID = 0; // 0 => air
-                bool foundSolid = false;
+                // We'll store frequency in an std::unordered_map<voxelID, int>
+                // or a std::map<voxelID,int> if you prefer. 
+                // If factor=2, we have at most 8 blocks, so this is quite small overhead.
+                std::unordered_map<int, int> freq;
+                freq.reserve(factor * factor * factor);
 
-                for (int dz = 0; dz < factor && !foundSolid; dz++)
+                for (int dz = 0; dz < factor; dz++)
                 {
-                    for (int dy = 0; dy < factor && !foundSolid; dy++)
+                    for (int dy = 0; dy < factor; dy++)
                     {
                         for (int dx = 0; dx < factor; dx++)
                         {
                             int realX = startX + dx;
                             int realY = startY + dy;
                             int realZ = startZ + dz;
-
                             int id = src.getBlock(realX, realY, realZ);
-                            if (id != 0) // if not air
-                            {
-                                chosenID = id;
-                                foundSolid = true;
-                                break;
-                            }
+
+                            // Increment frequency
+                            freq[id]++;
                         }
+                    }
+                }
+
+                // Find the ID with the largest frequency
+                int chosenID = 0;
+                int maxCount = 0;
+
+                for (auto& kv : freq)
+                {
+                    if (kv.second > maxCount)
+                    {
+                        chosenID = kv.first;
+                        maxCount = kv.second;
                     }
                 }
 
@@ -153,122 +174,69 @@ void LODMesher::meshDownsampledData(
     outVerts.clear();
     outIndices.clear();
 
-    // -------------------------------------------------------
-    // 1) Create a "MiniChunk" that holds the downsampled data
-    //    It overrides getBlock() so GreedyMesher can read voxel IDs.
-    // -------------------------------------------------------
+    // 1) Make a "MiniChunk" that holds the downsampled data
     class MiniChunk : public Chunk
     {
     public:
         MiniChunk(int sx, int sy, int sz,
             int ox, int oy, int oz,
             const std::vector<int>& dataRef)
-            : Chunk(0, 0, 0)  // We'll pass 0,0,0 for the chunk coords; it's not used here
+            : Chunk(0, 0, 0)  // chunk coords not relevant here
             , m_sizeX(sx), m_sizeY(sy), m_sizeZ(sz)
             , m_offsetX(ox), m_offsetY(oy), m_offsetZ(oz)
             , m_data(dataRef)
         {
-            // We do NOT allocate the usual chunk blocks.
-            // Our "m_data" is an external reference to coarseVoxels.
+            // No real block array allocated. We'll just override getBlock().
         }
 
-        // Override getBlock so GreedyMesher can fetch voxel IDs
         virtual int getBlock(int x, int y, int z) const override
         {
-            // Out-of-range => treat as air
             if (x < 0 || x >= m_sizeX ||
                 y < 0 || y >= m_sizeY ||
                 z < 0 || z >= m_sizeZ)
             {
-                return 0;
+                return 0; // treat out-of-bounds as air
             }
-            // Index into our coarse data
+            // Index into the coarser array
             int idx = (z * m_sizeY + y) * m_sizeX + x;
             return m_data[idx];
         }
 
-        // We also override the chunk's bounding box or any other calls if needed,
-        // but typically just getBlock() is enough for the mesher.
-        // The rest can remain as is or do minimal stubs.
-
-        // We'll keep the chunk states or GPU buffers irrelevant for LOD usage.
-        // This chunk is purely for meshing data.
-
-        // Our real chunk dimension constants are not used by the mesher, but we
-        // store them for reference here:
         int m_sizeX, m_sizeY, m_sizeZ;
         int m_offsetX, m_offsetY, m_offsetZ;
         const std::vector<int>& m_data;
     };
 
-    // -------------------------------------------------------
-    // 2) Instantiate our mini chunk
-    // -------------------------------------------------------
     MiniChunk miniChunk(
         coarseSizeX, coarseSizeY, coarseSizeZ,
         offsetX, offsetY, offsetZ,
         coarseVoxels
     );
 
-    // -------------------------------------------------------
-    // 3) We need a minimal "manager" for boundary checks.
-    //    Our GreedyMesher does "manager.getChunk(nx, ny, nz)" for neighbor lookups.
-    //    We'll return null for all neighbors, so outside is air.
-    // -------------------------------------------------------
+    // 2) Minimal manager => returns only miniChunk for (0,0,0)
     class MiniManager : public ChunkManager
     {
     public:
-        // We'll hold a pointer to our mini chunk at (0,0,0).
         Chunk* m_chunkPtr = nullptr;
-
-        // This is the only chunk that exists. If the caller
-        // asks for chunk(0,0,0) => return our mini chunk, else null => air
         Chunk* getChunk(int cx, int cy, int cz) const override
         {
-            if (cx == 0 && cy == 0 && cz == 0)
-            {
+            if (cx == 0 && cy == 0 && cz == 0) {
                 return m_chunkPtr;
             }
-            return nullptr; // outside => air
+            return nullptr; // everything else => air
         }
-
-        // We won't implement createChunk/removeChunk etc.
-        // We'll just rely on getChunk for neighbor checks.
     } miniManager;
 
     miniManager.m_chunkPtr = &miniChunk;
 
-    // -------------------------------------------------------
-    // 4) Create or retrieve a GreedyMesher
-    //    If you have a global or shared instance, you can use that.
-    //    Here we just create a local one.
-    // -------------------------------------------------------
+    // 3) Use a local GreedyMesher for the coarser data
     GreedyMesher lodGreedy;
-
-    // -------------------------------------------------------
-    // 5) Call the mesher, telling it "this chunk is at (0,0,0)" in chunk coords,
-    //    because we do the real world offset in the "offsetX, offsetY, offsetZ" param.
-    // -------------------------------------------------------
-    // The mesher's signature is:
-    // generateMesh(Chunk& chunk, int cx, int cy, int cz,
-    //     vector<Vertex>& outVertices, vector<uint32_t>& outIndices,
-    //     int offsetX, int offsetY, int offsetZ,
-    //     const ChunkManager& manager) const
-    //
-    // We'll pass 0,0,0 for cx,cy,cz. The offset is our real chunk offset.
-    //
-    // We'll accumulate into outVerts/outIndices.
 
     lodGreedy.generateMesh(
         miniChunk,
-        0, 0, 0,                // chunk coords
+        0, 0, 0, // chunk coords
         outVerts, outIndices,
         offsetX, offsetY, offsetZ,
         miniManager
     );
-
-    // Now outVerts/outIndices hold a "greedy" LOD mesh that uses real voxel colors
-    // for the downsampled data, with minimal geometry.
-
-    // Done. The rest of your code can handle outVerts/outIndices as usual.
 }
