@@ -2,7 +2,10 @@
 #include <stdexcept>  // For runtime_error
 #include <cstddef>    // For size_t
 #include <glm/vec3.hpp>
-#include <utility>    // For std::pair
+#include <utility>    // For std::pair>
+
+// Define the static atomic
+std::atomic<size_t> Chunk::s_totalCPUBytes{ 0 };
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -16,12 +19,26 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     , m_state(ChunkState::NORMAL)
 {
     // Allocate the voxel array
-    size_t total = size_t(SIZE_X) * size_t(SIZE_Y) * size_t(SIZE_Z);
+    const size_t total = static_cast<size_t>(SIZE_X) * static_cast<size_t>(SIZE_Y) * static_cast<size_t>(SIZE_Z);
     m_blocks.resize(total, 0); // 0 => "Air"
+
+    // Track CPU usage
+    s_totalCPUBytes.fetch_add(total * sizeof(uint8_t), std::memory_order_relaxed);
+
+    // Default all LOD states to "not generated" and error metric to 0.0f
+    for (int i = 0; i < MAX_LOD_LEVELS; i++)
+    {
+        m_lodGenerated[i] = false;
+        m_lodGeomError[i] = 0.0f;
+    }
 }
 
 Chunk::~Chunk()
 {
+    // Reduce the CPU usage counter
+    const size_t total = static_cast<size_t>(SIZE_X) * static_cast<size_t>(SIZE_Y) * static_cast<size_t>(SIZE_Z);
+    s_totalCPUBytes.fetch_sub(total * sizeof(uint8_t), std::memory_order_relaxed);
+
     // Typically we don't destroy GPU buffers here;
     // that is handled by VoxelWorld or ResourceManager.
 }
@@ -44,7 +61,7 @@ int Chunk::getBlock(int x, int y, int z) const
         + static_cast<size_t>(SIZE_X) * (static_cast<size_t>(y)
             + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
 
-    return m_blocks[idx];
+    return static_cast<int>(m_blocks[idx]);
 }
 
 // -----------------------------------------------------------------------------
@@ -64,17 +81,23 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
         + static_cast<size_t>(SIZE_X) * (static_cast<size_t>(y)
             + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
 
-    int oldVal = m_blocks[idx];
+    const int oldVal = static_cast<int>(m_blocks[idx]);
     if (oldVal != voxelID)
     {
         // Update the voxel data
-        m_blocks[idx] = voxelID;
+        m_blocks[idx] = static_cast<uint8_t>(voxelID);
 
         // Mark chunk as dirty => needs re-meshing
         m_dirty = true;
-        // Typically, once any block changes, we set the state to NORMAL
-        // If a terrain generator or post-process finds it is uniform, it will override.
+        // If any block changes, assume chunk is no longer uniform => NORMAL
         m_state = ChunkState::NORMAL;
+
+        // Once we alter a block, the previously generated LODs are invalid
+        for (int lod = 0; lod < MAX_LOD_LEVELS; lod++)
+        {
+            m_lodGenerated[lod] = false;
+            m_lodGeomError[lod] = 0.0f;
+        }
     }
 }
 
@@ -99,7 +122,7 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
     size_t activeCount = 0;
     size_t emptyCount = 0;
 
-    for (int voxelID : m_blocks)
+    for (auto voxelID : m_blocks)
     {
         if (voxelID == 0)
             ++emptyCount;
@@ -108,4 +131,3 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
     }
     return { activeCount, emptyCount };
 }
-

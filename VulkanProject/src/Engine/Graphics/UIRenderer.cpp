@@ -7,6 +7,9 @@
 // We MUST include ResourceManager to call its methods
 #include "Engine/Resources/ResourceManager.h"
 
+// Needed so we can read s_totalCPUBytes
+#include "Engine/Voxels/Chunk.h"
+
 // ImGui + Vulkan/GLFW backends
 #include "../External Libraries/imgui/imgui.h"
 #include "../External Libraries/imgui/backends/imgui_impl_glfw.h"
@@ -281,13 +284,26 @@ void UIRenderer::renderDebugWindow(
 
     ImGui::Separator();
 
-    // GPU Memory usage
-    // [Initialize local variable before using it]
-    size_t gpuBytes = 0;
-    if (resourceManager) {
-        gpuBytes = resourceManager->GetTotalGPUBufferBytes();
+    // --------------------------------------------------------------------
+    // PHASE 2: Show total CPU memory used by chunk voxel arrays
+    // --------------------------------------------------------------------
+    {
+        // atomic<size_t> is in Engine/Voxels/Chunk.h
+        size_t cpuBytes = Chunk::s_totalCPUBytes.load(std::memory_order_relaxed);
+        double cpuMB = double(cpuBytes) / (1024.0 * 1024.0);
+        ImGui::Text("Chunk CPU Memory: %.2f MB", cpuMB);
     }
-    ImGui::Text("GPU Buffer Memory: %.2f MB", float(gpuBytes) / (1024.0f * 1024.0f));
+
+    // --------------------------------------------------------------------
+    // Show GPU memory usage
+    // --------------------------------------------------------------------
+    {
+        size_t gpuBytes = 0;
+        if (resourceManager) {
+            gpuBytes = resourceManager->GetTotalGPUBufferBytes();
+        }
+        ImGui::Text("GPU Buffer Memory: %.2f MB", float(gpuBytes) / (1024.0f * 1024.0f));
+    }
 
     ImGui::Separator();
     ImGui::Text("CPU Timing (ms):");

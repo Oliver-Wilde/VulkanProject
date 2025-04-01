@@ -4,6 +4,8 @@
 #include <vulkan/vulkan.h>
 #include <glm/vec3.hpp>
 #include <utility>
+#include <atomic> // <-- For std::atomic<size_t>
+#include <array>  // For additional LOD state tracking arrays
 
 // Single chunk with optional multi-LOD
 class Chunk
@@ -14,8 +16,14 @@ public:
     static const int SIZE_Y = 128;
     static const int SIZE_Z = 16;
 
-    // We'll support up to 3 LOD levels (but you have it defined as 8 in code)
+    // We'll support up to 3 LOD levels (but code currently uses up to 8)
     static const int MAX_LOD_LEVELS = 8;
+
+    /**
+     * Tracks the total CPU bytes used by all chunk voxel arrays across the entire game.
+     * Each chunk constructor increments this, destructor decrements.
+     */
+    static std::atomic<size_t> s_totalCPUBytes;
 
     // Each LOD has its own GPU data
     struct ChunkLOD
@@ -44,6 +52,8 @@ public:
     ~Chunk();
 
     // 3D block access
+    // [Note] We'll still return int from getBlock() / setBlock()
+    // even though we store in a uint8_t array internally.
     virtual int getBlock(int x, int y, int z) const;
     void setBlock(int x, int y, int z, int voxelID);
 
@@ -51,6 +61,7 @@ public:
     bool isDirty() const { return m_dirty; }
     void markDirty() { m_dirty = true; }
     void clearDirty() { m_dirty = false; }
+
     bool isUploading() const { return m_isUploading; }
     void setIsUploading(bool value) { m_isUploading = value; }
 
@@ -66,6 +77,14 @@ public:
     // ----------- MULTI-LOD Access -----------
     ChunkLOD& getLODData(int lod) { return m_lods[lod]; }
     const ChunkLOD& getLODData(int lod) const { return m_lods[lod]; }
+
+    // Provide additional control over LOD readiness/quality
+    // (added to support more sophisticated logic for transitions / error metrics)
+    bool isLODGenerated(int lod) const { return m_lodGenerated[lod]; }
+    void setLODGenerated(int lod, bool ready) { m_lodGenerated[lod] = ready; }
+
+    float getLODErrorValue(int lod) const { return m_lodGeomError[lod]; }
+    void  setLODErrorValue(int lod, float e) { m_lodGeomError[lod] = e; }
 
     // ---------- SINGLE-LOD Compatibility -----------
     VkBuffer       getVertexBuffer()   const { return m_lods[0].vertexBuffer; }
@@ -96,12 +115,19 @@ private:
     bool m_dirty = true;
     bool m_isUploading = false;
 
-    // All block data
-    std::vector<int> m_blocks;
+    // [CHANGED] Store each voxel in a uint8_t instead of int
+    // This reduces memory from 4 bytes/voxel to 1 byte/voxel
+    std::vector<uint8_t> m_blocks; // [CHANGED]
 
-    // MULTI-LOD: Up to 3 (or 8) LODs
+    // MULTI-LOD: Up to 8 LOD levels
     ChunkLOD m_lods[MAX_LOD_LEVELS];
 
-    // [ADDED] Tracks if the chunk is empty, solid, or normal
+    // Tracks if the chunk is empty, solid, or normal
     ChunkState m_state = ChunkState::NORMAL;
+
+    // Tracks whether each LOD has been generated yet
+    std::array<bool, MAX_LOD_LEVELS>  m_lodGenerated{ false };
+
+    // Optional: store some geometric error metric for each LOD
+    std::array<float, MAX_LOD_LEVELS> m_lodGeomError{ 0.0f };
 };

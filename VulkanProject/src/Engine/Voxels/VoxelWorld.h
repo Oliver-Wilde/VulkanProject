@@ -33,8 +33,8 @@ struct QueuedChunkDestruction
 struct MeshBuildResult
 {
     class Chunk* chunkPtr = nullptr;
-    std::vector<Vertex>    verts;
-    std::vector<uint32_t>  inds;
+    std::vector<Vertex>   verts;
+    std::vector<uint32_t> inds;
     int cx = 0, cy = 0, cz = 0;
 };
 
@@ -46,24 +46,25 @@ class VoxelWorld
 public:
     enum class MesherType { GREEDY, NAIVE };
 
-    // Two-arg constructor
     VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr);
     ~VoxelWorld();
 
-    // If you need a Renderer pointer for ring-buffer destruction:
+    // Optionally attach a Renderer for ring-buffer destruction or any GPU ops
     void setRenderer(Renderer* renderer);
 
-    // World init (generate some initial region)
+    // Basic world init
     void initWorld();
-    // Called each frame to load/unload and (re)mesh chunks
+
+    // Called each frame to load/unload and handle (re)meshing
     void updateChunksAroundPlayer(float playerPosX, float playerPosZ);
 
+    // Access the chunk manager
     ChunkManager& getChunkManager() { return m_chunkManager; }
 
-    // For debugging or stats
+    // For debugging or performance stats
     static double getAvgMeshTime();
 
-    // Choose mesher (greedy or naive)
+    // Choose which mesher to use
     void setMesherType(MesherType type) { m_currentMesherType = type; }
     MesherType getMesherType() const { return m_currentMesherType; }
 
@@ -72,59 +73,60 @@ public:
     bool isUsingMultiLOD() const { return m_useMultiLOD; }
 
 private:
-    VulkanContext* m_context = nullptr;
-    ResourceManager* m_resourceManager = nullptr;
-    Renderer* m_renderer = nullptr; // set later if needed
-
-    ChunkManager     m_chunkManager;
-    TerrainGenerator m_terrainGenerator;
-
-    // View distance for loads/unloads
-    static constexpr int VIEW_DISTANCE = 12;
-
-    // We keep references to both meshers; choose at runtime
-    GreedyMesher  m_greedyMesher;
-    NaiveMesher   m_naiveMesher;
-    MesherType    m_currentMesherType = MesherType::GREEDY;
-
-    // If false => single-lod approach (old code),
-    // if true => multi-lod approach
-    bool m_useMultiLOD = false;
-
-    // Queues for chunk loading/unloading
-    std::deque<ChunkCoord> m_chunksToLoad;
-    std::deque<ChunkCoord> m_chunksToUnload;
-
-    // --------------- Single-lod ---------------
-    std::mutex m_singleLodMutex;
-    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD; // Unused in current code?
-
-    // --------------- Multi-lod ---------------
-    std::mutex              m_multiLODMutex;
-    std::vector<MultiLODResult> m_pendingMultiLODResults;
-
-    // Old static approach for single-lod
-    // we keep s_pendingMeshResults inside .cpp.
-
-    // ----------------- Internal Helpers -----------------
+    // Helper methods
     void loadOneChunk(const ChunkCoord& c);
     void unloadOneChunk(const ChunkCoord& c);
 
     void scheduleMeshingForDirtyChunks();
-    void pollMeshBuildResults(); // dispatch single-lod vs multi-lod
+    void pollMeshBuildResults();
 
-    // Single-chunk GPU upload or destruction
+    // For single-lod uploads
     void uploadMeshToChunkSingleLOD(class Chunk& chunk,
         const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds);
     void destroyChunkBuffersSingleLOD(class Chunk& chunk);
 
-    // multi-lod finalization
+    // For multi-lod finalization
     void finalizeMultiLOD(MultiLODResult& lodResult);
 
-    // Not used in your new code (kept for reference)
+    // Unused stubs (kept for reference)
     void createBuffer(VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags,
         VkBuffer&, VkDeviceMemory&);
     void copyBuffer(VkBuffer, VkBuffer, VkDeviceSize);
     uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
+
+private:
+    // Basic references
+    VulkanContext* m_context = nullptr;
+    ResourceManager* m_resourceManager = nullptr;
+    Renderer* m_renderer = nullptr; // optional
+
+    // Manages all active chunks
+    ChunkManager     m_chunkManager;
+    // Generates chunk terrain data
+    TerrainGenerator m_terrainGenerator;
+
+    // Mesher selection
+    GreedyMesher     m_greedyMesher;
+    NaiveMesher      m_naiveMesher;
+    MesherType       m_currentMesherType = MesherType::GREEDY;
+
+    // If false => single-lod approach (old).
+    // If true => multi-lod approach.
+    bool m_useMultiLOD = true;
+
+    // Chunk streaming distance
+    static constexpr int VIEW_DISTANCE = 24;
+
+    // Queues to handle loading/unloading
+    std::deque<ChunkCoord> m_chunksToLoad;
+    std::deque<ChunkCoord> m_chunksToUnload;
+
+    // Single-lod pending build results (unused in new approach)
+    std::mutex                 m_singleLodMutex;
+    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD;
+
+    // For multi-lod approach
+    std::mutex                 m_multiLODMutex;
+    std::vector<MultiLODResult> m_pendingMultiLODResults;
 };

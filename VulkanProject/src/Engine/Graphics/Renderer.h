@@ -1,13 +1,13 @@
 #pragma once
 
 #include <deque>
-#include <vector>            // [ADDED] for std::vector
+#include <vector>            // for std::vector
 #include <vulkan/vulkan.h>
-#include <glm/mat4x4.hpp>    // For MVPBlock
+#include <glm/mat4x4.hpp>    // for MVPBlock
 #include "Engine/Scene/Camera.h"
-#include "Engine/Voxels/VoxelWorld.h"  // [ADDED] so we can use QueuedChunkDestruction
+#include "Engine/Voxels/VoxelWorld.h"  // for QueuedChunkDestruction
 
-// Forward declarations to avoid heavy includes
+// Forward declarations
 class Window;
 class VulkanContext;
 class ResourceManager;
@@ -38,7 +38,7 @@ struct FrameResources
     VkFence         inFlightFence = VK_NULL_HANDLE;
 };
 
-/// How many frames we keep in flight (e.g., double or triple buffering).
+/// How many frames we keep in flight (e.g. double or triple buffering).
 static const int MAX_FRAMES_IN_FLIGHT = 2;
 
 /**
@@ -46,74 +46,73 @@ static const int MAX_FRAMES_IN_FLIGHT = 2;
  *   - Creating swap chain & related Vulkan resources
  *   - Managing pipelines, uniform buffers (MVP), etc.
  *   - Providing a renderFrame() function that draws the voxel world and the ImGui UI
- *
- * A separate UIRenderer handles all ImGui logic, and is called here
- * to begin and end ImGui frames.
  */
 class Renderer
 {
 public:
     /**
      * Constructor
-     * @param context      Pointer to your VulkanContext (VkDevice, queues, etc.)
-     * @param window       Pointer to your Window class
-     * @param voxelWorld   Pointer to your VoxelWorld, so we can draw chunks
      */
     Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld);
 
     /**
      * Destructor
-     * Cleans up swap chain, frame resources, and calls UIRenderer::cleanup() if needed.
      */
     ~Renderer();
 
     /**
      * Render one frame:
      *   - Acquire swap chain image
-     *   - Record command buffer (drawing chunks)
+     *   - Record command buffer
      *   - Let UIRenderer handle ImGui UI
      *   - Present the result
      */
     void renderFrame();
 
     /**
-     * Update the camera used for MVP calculations.
+     * Set the camera used for MVP calculations.
      */
     void setCamera(const Camera& cam);
 
     /**
-     * Toggle wireframe pipeline usage (fill vs. polygonMode = line).
+     * Toggle wireframe pipeline usage.
      */
     void toggleWireframe();
 
     /**
-     * Provide a pointer to your Time object, if you want to track dt/fps in the renderer.
+     * Enable or disable frustum culling.
+     */
+    void enableFrustumCulling(bool enable); 
+
+    /**
+     * Provide a pointer to your Time object, if you want dt/fps in the renderer.
      */
     void setTime(Time* time);
 
-    // [ADDED] For ring-buffer resource destruction
+    /**
+     * Enqueue chunk buffers for deferred free on next use of this frame index.
+     */
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
 private:
     /**
      * Creates the uniform buffer for MVP (model-view-projection),
-     * plus its descriptor set and pool.
+     * plus its descriptor set/pool.
      */
     void createMVPUniformBuffer();
 
     /**
-     * Re-writes the MVP uniform buffer with the current camera and projection.
+     * Updates the MVP uniform buffer with the current camera view/projection.
      */
     void updateMVP();
 
     /**
-     * Recreates the swap chain (and related resources) if the window is resized,
-     * or if it becomes out-of-date.
+     * Recreates the swap chain (and relevant resources).
      */
     void recreateSwapChain();
 
     /**
-     * A helper to create a Vulkan buffer (for uniform, vertex, or index).
+     * Helper for creating any Vulkan buffer.
      */
     void createBuffer(
         VkDeviceSize size,
@@ -124,12 +123,12 @@ private:
     );
 
     /**
-     * Picks a memory type from the physical device that matches 'filter' and 'props'.
+     * Finds a memory type from the GPU that fits 'filter' and 'props'.
      */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
     /**
-     * Adds a new sample to our rolling-average buffer (e.g., for FPS or CPU usage).
+     * Adds a new sample to a rolling-average buffer (for e.g. FPS or CPU usage).
      */
     void addSample(std::deque<float>& buffer, float value);
 
@@ -139,8 +138,7 @@ private:
     float computeAverage(const std::deque<float>& buffer);
 
     /**
-     * [ADDED] Called at the start of each frame (after waiting on the fence)
-     * to free any chunk buffers queued in the previous use of this frame index.
+     * Called each frame at start to free chunk buffers queued from previous usage.
      */
     void freeDeferredResources();
 
@@ -154,13 +152,9 @@ private:
     ResourceManager* m_resourceMgr = nullptr;
     PipelineManager* m_pipelineMgr = nullptr;
     RenderPassManager* m_rpManager = nullptr;
-
-    /**
-     * UIRenderer handles all ImGui logic (init, frame begin, rendering, teardown).
-     */
     UIRenderer* m_uiRenderer = nullptr;
 
-    // Swap chain and MVP data
+    // Swap chain + MVP data
     class SwapChain* m_swapChain = nullptr;
     VkBuffer            m_mvpBuffer = VK_NULL_HANDLE;
     VkDeviceMemory      m_mvpMemory = VK_NULL_HANDLE;
@@ -168,25 +162,25 @@ private:
     VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
-    // [ADDED] A ring buffer of chunk buffers to free for each frame
+    // For ring-buffer chunk destruction
     std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
     // Per-frame resources
-    FrameResources   m_frames[MAX_FRAMES_IN_FLIGHT];
-    int              m_currentFrame = 0; // which frame index we're on
+    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
+    int            m_currentFrame = 0; // which frame in flight
 
-    // If you store a pointer to a global Time or create one in Application:
+    // If using Time for dt/fps
     Time* m_time = nullptr;
 
     // Toggles
     bool m_wireframeOn = false;
     bool m_enableFrustumCulling = false;
 
-    // Rolling-average data for FPS, CPU usage, etc.
+    // Rolling-average data
     static const int ROLLING_AVG_SAMPLES = 120;
     std::deque<float> m_fpsSamples;
     std::deque<float> m_cpuSamples;
 
-    // Camera
+    // Current camera
     Camera m_camera;
 };

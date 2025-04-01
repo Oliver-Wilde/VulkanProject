@@ -1,242 +1,241 @@
 #include "LODMesher.h"
-#include "Engine/Voxels/Chunk.h"
-#include "Engine/Voxels/ChunkManager.h"
-#include "Engine/Voxels/Meshing/GreedyMesher.h" 
-#include <algorithm>  // For std::min, etc.
-#include <Engine/Voxels/VoxelTypeRegistry.h>
+#include "../Chunk.h"
+#include "../ChunkManager.h"
+#include "../VoxelTypeRegistry.h"
+#include "../VoxelType.h"
+#include "IMesher.h"
+#include "NaiveMesher.h"
+#include "GreedyMesher.h"
 
-// --------------------------------------------------------
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <utility>
+
+// ---------------------------------------------------------------
 // buildAllLODs
-// --------------------------------------------------------
+// => We抣l build up to MAX_LODS, each at half resolution in XZ
+//    for LOD1 and beyond. LOD0 uses the real mesher (greedy).
+// ---------------------------------------------------------------
 MultiLODResult LODMesher::buildAllLODs(
     Chunk& chunk,
     int cx, int cy, int cz,
-    const IMesher* baseMesher,
+    const IMesher* mesher,
     const ChunkManager& manager)
 {
     MultiLODResult result;
     result.chunkPtr = &chunk;
-    result.cx = cx;
-    result.cy = cy;
-    result.cz = cz;
 
-    // 1) LOD0 => the real mesher
+    constexpr int maxLods = MultiLODResult::MAX_LODS;
+    for (int lodLevel = 0; lodLevel < maxLods; lodLevel++)
     {
-        std::vector<Vertex> verts;
-        verts.reserve(4096); // optional heuristic
-        std::vector<uint32_t> inds;
-        inds.reserve(6144);
+        // Build geometry for this LOD
+        LODMeshData data = buildLOD(chunk, cx, cy, cz, mesher, manager, lodLevel);
 
-        int offX = cx * Chunk::SIZE_X;
-        int offY = cy * Chunk::SIZE_Y;
-        int offZ = cz * Chunk::SIZE_Z;
-
-        baseMesher->generateMesh(
-            chunk,
-            cx, cy, cz,
-            verts, inds,
-            offX, offY, offZ,
-            manager
-        );
-
-        result.lods[0].verts = std::move(verts);
-        result.lods[0].inds = std::move(inds);
-    }
-
-    // 2) For LOD1..N => downsample + mesh
-    for (int lodLevel = 1; lodLevel < MultiLODResult::MAX_LODS; lodLevel++)
-    {
-        // Factor is 2^lodLevel
-        int factor = (1 << lodLevel);
-
-        // If factor is bigger than chunk dimension => everything collapses to 1 voxel, no need to continue
-        if (factor >= std::min({ Chunk::SIZE_X, Chunk::SIZE_Y, Chunk::SIZE_Z }))
-        {
-            break; // LOD beyond chunk size => no smaller detail needed
-        }
-
-        std::vector<int> coarseVoxels;
-        downsampleChunkData(chunk, factor, coarseVoxels);
-
-        // The coarser dimensions
-        int cSizeX = Chunk::SIZE_X / factor;
-        int cSizeY = Chunk::SIZE_Y / factor;
-        int cSizeZ = Chunk::SIZE_Z / factor;
-
-        std::vector<Vertex> verts;
-        verts.reserve(1024); // smaller heuristic for LOD
-        std::vector<uint32_t> inds;
-        inds.reserve(1536);
-
-        int offX = cx * Chunk::SIZE_X;
-        int offY = cy * Chunk::SIZE_Y;
-        int offZ = cz * Chunk::SIZE_Z;
-
-        meshDownsampledData(
-            coarseVoxels, cSizeX, cSizeY, cSizeZ,
-            offX, offY, offZ,
-            verts, inds
-        );
-
-        result.lods[lodLevel].verts = std::move(verts);
-        result.lods[lodLevel].inds = std::move(inds);
+        // Transfer geometry into result
+        result.lods[lodLevel].verts = std::move(data.verts);
+        result.lods[lodLevel].inds = std::move(data.inds);
+        result.lods[lodLevel].lodErrors.resize(maxLods); // track error in same container
+        result.lods[lodLevel].lodErrors[lodLevel] = data.geometricError;
     }
 
     return result;
 }
 
-// --------------------------------------------------------
-// downsampleChunkData
-// --------------------------------------------------------
-void LODMesher::downsampleChunkData(
-    const Chunk& src,
-    int factor,
-    std::vector<int>& outVoxels)
+// ---------------------------------------------------------------
+// buildLOD => LOD0 uses the real mesher (Greedy, etc.),
+//             LOD>0 does a naive downsample approach.
+//
+// Explanation:
+//   - If lodLevel == 0, call mesher->generateMesh(...) directly on the chunk
+//   - If lodLevel >= 1, we do the simplified approach with stride in XZ
+// ---------------------------------------------------------------
+LODMeshData LODMesher::buildLOD(
+    Chunk& chunk,
+    int cx, int cy, int cz,
+    const IMesher* mesher,
+    const ChunkManager& manager,
+    int lodLevel)
 {
-    // factor=2 => each 2x2x2 block in the original chunk is 1 voxel in the result
-    const int cSizeX = Chunk::SIZE_X / factor;
-    const int cSizeY = Chunk::SIZE_Y / factor;
-    const int cSizeZ = Chunk::SIZE_Z / factor;
+    LODMeshData out;
 
-    outVoxels.resize(cSizeX * cSizeY * cSizeZ, 0);
-
-    // For example, a factor=2 region in the original chunk is size(2󫎾)=8 blocks.
-    // We'll count frequency of each voxel ID, then pick the majority.
-
-    for (int zz = 0; zz < cSizeZ; zz++)
+    // If LOD=0 => call the real mesher (Greedy or Naive)
+    if (lodLevel == 0)
     {
-        for (int yy = 0; yy < cSizeY; yy++)
+        // We'll just do a full mesh using the provided "mesher"
+        // (GreedyMesher if you set it up that way).
+        std::vector<Vertex> fullVerts;
+        std::vector<uint32_t> fullInds;
+
+        // We'll compute offsets to place geometry in world space
+        int offX = cx * Chunk::SIZE_X;
+        int offY = cy * Chunk::SIZE_Y;
+        int offZ = cz * Chunk::SIZE_Z;
+
+        mesher->generateMesh(
+            chunk,
+            cx, cy, cz,
+            fullVerts, fullInds,
+            offX, offY, offZ,
+            manager
+        );
+
+        // Fill out the LODMeshData
+        out.verts = std::move(fullVerts);
+        out.inds = std::move(fullInds);
+        out.geometricError = 0.0f; // highest LOD => no error
+        return out;
+    }
+
+    // Otherwise, for LOD>=1, let's do the down-sample approach
+    const int stride = 1 << lodLevel;  // 2,4,8,...
+
+    // If stride >= chunk size, produce no geometry
+    if (stride >= Chunk::SIZE_X || stride >= Chunk::SIZE_Z)
+    {
+        out.geometricError = 0.0f;
+        return out;
+    }
+
+    // Build a "mini-chunk" by downsampling
+    int miniX = std::max(1, Chunk::SIZE_X / stride);
+    int miniZ = std::max(1, Chunk::SIZE_Z / stride);
+    int miniY = Chunk::SIZE_Y; // keep Y same for demonstration
+
+    std::vector<int> downsampled;
+    downsampled.resize(size_t(miniX * miniY * miniZ), 0);
+
+    for (int z = 0; z < miniZ; z++)
+    {
+        for (int y = 0; y < miniY; y++)
         {
-            for (int xx = 0; xx < cSizeX; xx++)
+            for (int x = 0; x < miniX; x++)
             {
-                // NxNxN region
-                int startX = xx * factor;
-                int startY = yy * factor;
-                int startZ = zz * factor;
+                int srcX = x * stride;
+                int srcZ = z * stride;
+                int id = chunk.getBlock(srcX, y, srcZ);
 
-                // We'll store frequency in an std::unordered_map<voxelID, int>
-                // or a std::map<voxelID,int> if you prefer. 
-                // If factor=2, we have at most 8 blocks, so this is quite small overhead.
-                std::unordered_map<int, int> freq;
-                freq.reserve(factor * factor * factor);
-
-                for (int dz = 0; dz < factor; dz++)
-                {
-                    for (int dy = 0; dy < factor; dy++)
-                    {
-                        for (int dx = 0; dx < factor; dx++)
-                        {
-                            int realX = startX + dx;
-                            int realY = startY + dy;
-                            int realZ = startZ + dz;
-                            int id = src.getBlock(realX, realY, realZ);
-
-                            // Increment frequency
-                            freq[id]++;
-                        }
-                    }
-                }
-
-                // Find the ID with the largest frequency
-                int chosenID = 0;
-                int maxCount = 0;
-
-                for (auto& kv : freq)
-                {
-                    if (kv.second > maxCount)
-                    {
-                        chosenID = kv.first;
-                        maxCount = kv.second;
-                    }
-                }
-
-                size_t outIndex = (zz * cSizeY + yy) * cSizeX + xx;
-                outVoxels[outIndex] = chosenID;
+                size_t idx = size_t(z) * miniY * miniX
+                    + size_t(y) * miniX
+                    + size_t(x);
+                downsampled[idx] = id;
             }
         }
     }
-}
 
-// --------------------------------------------------------
-// meshDownsampledData
-// --------------------------------------------------------
-void LODMesher::meshDownsampledData(
-    const std::vector<int>& coarseVoxels,
-    int coarseSizeX,
-    int coarseSizeY,
-    int coarseSizeZ,
-    int offsetX,
-    int offsetY,
-    int offsetZ,
-    std::vector<Vertex>& outVerts,
-    std::vector<uint32_t>& outIndices)
-{
-    outVerts.clear();
-    outIndices.clear();
+    // Create geometry from the downsample data
+    std::vector<Vertex> verts;
+    std::vector<uint32_t> inds;
 
-    // 1) Make a "MiniChunk" that holds the downsampled data
-    class MiniChunk : public Chunk
+    int baseOffX = cx * Chunk::SIZE_X;
+    int baseOffY = cy * Chunk::SIZE_Y;
+    int baseOffZ = cz * Chunk::SIZE_Z;
+
+    // Basic approach: For each voxel in mini-chunk, check neighbors => add faces
+    auto getDownsampledBlock = [&](int xx, int yy, int zz) -> int
+        {
+            if (xx < 0 || xx >= miniX || yy < 0 || yy >= miniY || zz < 0 || zz >= miniZ)
+                return -1;
+            size_t idx = size_t(zz) * miniY * miniX + size_t(yy) * miniX + size_t(xx);
+            return downsampled[idx];
+        };
+
+    // For each voxel in mini-chunk
+    for (int z = 0; z < miniZ; z++)
     {
-    public:
-        MiniChunk(int sx, int sy, int sz,
-            int ox, int oy, int oz,
-            const std::vector<int>& dataRef)
-            : Chunk(0, 0, 0)  // chunk coords not relevant here
-            , m_sizeX(sx), m_sizeY(sy), m_sizeZ(sz)
-            , m_offsetX(ox), m_offsetY(oy), m_offsetZ(oz)
-            , m_data(dataRef)
+        for (int y = 0; y < miniY; y++)
         {
-            // No real block array allocated. We'll just override getBlock().
-        }
-
-        virtual int getBlock(int x, int y, int z) const override
-        {
-            if (x < 0 || x >= m_sizeX ||
-                y < 0 || y >= m_sizeY ||
-                z < 0 || z >= m_sizeZ)
+            for (int x = 0; x < miniX; x++)
             {
-                return 0; // treat out-of-bounds as air
+                int voxelID = getDownsampledBlock(x, y, z);
+                if (voxelID <= 0) continue; // skip air
+
+                // Grab color from VoxelType
+                const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
+                float r = vt.color.r;
+                float g = vt.color.g;
+                float b = vt.color.b;
+
+                float wx = float(baseOffX + x * stride);
+                float wy = float(baseOffY + y);
+                float wz = float(baseOffZ + z * stride);
+
+                auto addQuad = [&](float x0, float y0, float z0,
+                    float x1, float y1, float z1,
+                    float x2, float y2, float z2,
+                    float x3, float y3, float z3)
+                    {
+                        uint32_t startIdx = (uint32_t)verts.size();
+                        verts.push_back(Vertex(x0, y0, z0, r, g, b));
+                        verts.push_back(Vertex(x1, y1, z1, r, g, b));
+                        verts.push_back(Vertex(x2, y2, z2, r, g, b));
+                        verts.push_back(Vertex(x3, y3, z3, r, g, b));
+
+                        inds.push_back(startIdx + 0);
+                        inds.push_back(startIdx + 1);
+                        inds.push_back(startIdx + 2);
+                        inds.push_back(startIdx + 2);
+                        inds.push_back(startIdx + 3);
+                        inds.push_back(startIdx + 0);
+                    };
+
+                // +X
+                if (x == miniX - 1 || getDownsampledBlock(x + 1, y, z) <= 0)
+                {
+                    addQuad(wx + stride, wy, wz,
+                        wx + stride, wy, wz + stride,
+                        wx + stride, wy + 1, wz + stride,
+                        wx + stride, wy + 1, wz);
+                }
+                // -X
+                if (x == 0 || getDownsampledBlock(x - 1, y, z) <= 0)
+                {
+                    addQuad(wx, wy, wz + stride,
+                        wx, wy, wz,
+                        wx, wy + 1, wz,
+                        wx, wy + 1, wz + stride);
+                }
+                // +Y
+                if (y == miniY - 1 || getDownsampledBlock(x, y + 1, z) <= 0)
+                {
+                    addQuad(wx, wy + 1, wz,
+                        wx + stride, wy + 1, wz,
+                        wx + stride, wy + 1, wz + stride,
+                        wx, wy + 1, wz + stride);
+                }
+                // -Y
+                if (y == 0 || getDownsampledBlock(x, y - 1, z) <= 0)
+                {
+                    addQuad(wx + stride, wy, wz,
+                        wx, wy, wz,
+                        wx, wy, wz + stride,
+                        wx + stride, wy, wz + stride);
+                }
+                // +Z
+                if (z == miniZ - 1 || getDownsampledBlock(x, y, z + 1) <= 0)
+                {
+                    addQuad(wx, wy, wz + stride,
+                        wx + stride, wy, wz + stride,
+                        wx + stride, wy + 1, wz + stride,
+                        wx, wy + 1, wz + stride);
+                }
+                // -Z
+                if (z == 0 || getDownsampledBlock(x, y, z - 1) <= 0)
+                {
+                    addQuad(wx + stride, wy, wz,
+                        wx, wy, wz,
+                        wx, wy + 1, wz,
+                        wx + stride, wy + 1, wz);
+                }
             }
-            // Index into the coarser array
-            int idx = (z * m_sizeY + y) * m_sizeX + x;
-            return m_data[idx];
         }
+    }
 
-        int m_sizeX, m_sizeY, m_sizeZ;
-        int m_offsetX, m_offsetY, m_offsetZ;
-        const std::vector<int>& m_data;
-    };
+    out.verts = std::move(verts);
+    out.inds = std::move(inds);
 
-    MiniChunk miniChunk(
-        coarseSizeX, coarseSizeY, coarseSizeZ,
-        offsetX, offsetY, offsetZ,
-        coarseVoxels
-    );
-
-    // 2) Minimal manager => returns only miniChunk for (0,0,0)
-    class MiniManager : public ChunkManager
-    {
-    public:
-        Chunk* m_chunkPtr = nullptr;
-        Chunk* getChunk(int cx, int cy, int cz) const override
-        {
-            if (cx == 0 && cy == 0 && cz == 0) {
-                return m_chunkPtr;
-            }
-            return nullptr; // everything else => air
-        }
-    } miniManager;
-
-    miniManager.m_chunkPtr = &miniChunk;
-
-    // 3) Use a local GreedyMesher for the coarser data
-    GreedyMesher lodGreedy;
-
-    lodGreedy.generateMesh(
-        miniChunk,
-        0, 0, 0, // chunk coords
-        outVerts, outIndices,
-        offsetX, offsetY, offsetZ,
-        miniManager
-    );
+    // Estimate geometric error for LOD>0
+    float triCount = float(out.inds.size()) / 3.0f;
+    out.geometricError = 1.0f / (1.0f + triCount);
+    return out;
 }

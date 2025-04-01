@@ -8,13 +8,20 @@
 
 /**
  * LODMeshData holds the geometry for a single LOD level:
- * - verts: the vertex array
- * - inds : the index array
+ * - verts / inds: geometry buffers
+ * - lodErrors: an array of float error metrics for each LOD (some approaches store multiple)
+ * - geometricError: a single float representing the error of this LOD relative to higher detail
  */
 struct LODMeshData
 {
-    std::vector<Vertex> verts;
+    std::vector<Vertex>   verts;
     std::vector<uint32_t> inds;
+
+    // For storing an error metric per LOD index (if needed)
+    std::vector<float>    lodErrors;
+
+    // Overall geometric error for this LOD
+    float geometricError = 0.f;
 };
 
 /**
@@ -25,20 +32,24 @@ struct LODMeshData
  */
 struct MultiLODResult
 {
+    // Which chunk these LODs belong to
     Chunk* chunkPtr = nullptr;
+
+    // Optional world coords if you need them
     int cx = 0;
     int cy = 0;
     int cz = 0;
 
-    static constexpr int MAX_LODS = 8;  // Change as desired
+    // We support up to 8 LODs in this example
+    static constexpr int MAX_LODS = 8;
     LODMeshData lods[MAX_LODS];
 };
 
 /**
  * LODMesher is responsible for building multiple LODs for a chunk.
  *
- * LOD0 is your original full-resolution mesh, which uses your existing IMesher.
- * LOD1, LOD2, etc. are built by a downsampling step and a simpler meshing pass.
+ * LOD0 is your original full-resolution mesh (via the IMesher).
+ * LOD1, LOD2, etc. can be built by downsampling or some coarser approach.
  */
 class LODMesher
 {
@@ -46,7 +57,7 @@ public:
     /**
      * buildAllLODs:
      *   - Creates LOD0 using the provided IMesher (Greedy, Naive, etc.).
-     *   - For each higher LOD (1..N), downsamples chunk voxel data and meshes that coarser data.
+     *   - Builds higher LODs by downsampling or skipping some samples.
      * Returns a MultiLODResult containing geometry for every LOD level.
      */
     static MultiLODResult buildAllLODs(
@@ -56,12 +67,15 @@ public:
         const ChunkManager& manager
     );
 
+    static LODMeshData buildLOD(Chunk& chunk, int cx, int cy, int cz, const IMesher* mesher, const ChunkManager& manager, int lodLevel);
+
 private:
     /**
      * downsampleChunkData:
-     *   - Reads the chunk’s voxel data and produces a coarser “factor x factor” downsampled array.
-     *   - For example, factor=2 means each 2x2x2 block in the original chunk is combined into 1 voxel.
-     *     The logic for “combining” (majority, average, etc.) is up to you.
+     *   - Reads the chunk’s voxel data and produces a coarser array
+     *     (factor x factor x factor blocks become 1 voxel).
+     *   - For factor=2, each 2x2x2 region merges into 1 voxel, etc.
+     *     The merging logic can be majority, average, etc.
      */
     static void downsampleChunkData(
         const Chunk& src,
@@ -71,8 +85,8 @@ private:
 
     /**
      * meshDownsampledData:
-     *   - Given a coarser voxel array (dimensions: sizeX=size/factor, etc.), produce geometry.
-     *   - You can do a naive “cube for each voxel” approach, or reuse your IMesher by faking a chunk.
+     *   - Given the coarser voxel array, produce geometry (verts+inds).
+     *   - You can do a naive approach or reuse your mesher.
      */
     static void meshDownsampledData(
         const std::vector<int>& coarseVoxels,

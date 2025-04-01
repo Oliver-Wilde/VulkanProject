@@ -25,11 +25,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-// A global CPU profiler used for display
-static CpuProfiler g_cpuProfiler;
-
-// If you want to reference a global thread pool:
 extern ThreadPool g_threadPool;
+static CpuProfiler g_cpuProfiler; // global CPU profiler
 
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
     : m_context(context)
@@ -72,25 +69,23 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         if (vkAllocateCommandBuffers(m_context->getDevice(), &cmdAlloc,
             &m_frames[i].commandBuffer) != VK_SUCCESS)
         {
-            throw std::runtime_error("Failed to allocate command buffer for frame " + std::to_string(i));
+            throw std::runtime_error("Failed to allocate cmd buffer for frame " + std::to_string(i));
         }
 
         VkSemaphoreCreateInfo semInfo{};
         semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
-            &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
-                &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
+
+        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
         {
             throw std::runtime_error("Failed to create semaphores for frame " + std::to_string(i));
         }
 
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // start signaled
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr,
-            &m_frames[i].inFlightFence) != VK_SUCCESS)
+        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &m_frames[i].inFlightFence) != VK_SUCCESS)
         {
             throw std::runtime_error("Failed to create fence for frame " + std::to_string(i));
         }
@@ -110,28 +105,33 @@ Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // Clean up per-frame resources
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (m_frames[i].commandBuffer) {
+    // Per-frame cleanup
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (m_frames[i].commandBuffer)
+        {
             vkFreeCommandBuffers(m_context->getDevice(),
                 m_context->getCommandPool(),
                 1,
                 &m_frames[i].commandBuffer);
             m_frames[i].commandBuffer = VK_NULL_HANDLE;
         }
-        if (m_frames[i].imageAvailableSemaphore) {
+        if (m_frames[i].imageAvailableSemaphore)
+        {
             vkDestroySemaphore(m_context->getDevice(),
                 m_frames[i].imageAvailableSemaphore,
                 nullptr);
             m_frames[i].imageAvailableSemaphore = VK_NULL_HANDLE;
         }
-        if (m_frames[i].renderFinishedSemaphore) {
+        if (m_frames[i].renderFinishedSemaphore)
+        {
             vkDestroySemaphore(m_context->getDevice(),
                 m_frames[i].renderFinishedSemaphore,
                 nullptr);
             m_frames[i].renderFinishedSemaphore = VK_NULL_HANDLE;
         }
-        if (m_frames[i].inFlightFence) {
+        if (m_frames[i].inFlightFence)
+        {
             vkDestroyFence(m_context->getDevice(),
                 m_frames[i].inFlightFence,
                 nullptr);
@@ -140,45 +140,54 @@ Renderer::~Renderer()
     }
 
     // Cleanup MVP resources
-    if (m_mvpBuffer) {
+    if (m_mvpBuffer)
+    {
         vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
         m_mvpBuffer = VK_NULL_HANDLE;
     }
-    if (m_mvpMemory) {
+    if (m_mvpMemory)
+    {
         vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
         m_mvpMemory = VK_NULL_HANDLE;
     }
-    if (m_mvpDescriptorPool) {
+    if (m_mvpDescriptorPool)
+    {
         vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
         m_mvpDescriptorPool = VK_NULL_HANDLE;
     }
-    if (m_mvpLayout) {
+    if (m_mvpLayout)
+    {
         vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
         m_mvpLayout = VK_NULL_HANDLE;
     }
 
     // Destroy UIRenderer
-    if (m_uiRenderer) {
+    if (m_uiRenderer)
+    {
         m_uiRenderer->cleanup();
         delete m_uiRenderer;
         m_uiRenderer = nullptr;
     }
 
     // Destroy managers
-    if (m_rpManager) {
+    if (m_rpManager)
+    {
         delete m_rpManager;
         m_rpManager = nullptr;
     }
-    if (m_pipelineMgr) {
+    if (m_pipelineMgr)
+    {
         delete m_pipelineMgr;
         m_pipelineMgr = nullptr;
     }
-    if (m_resourceMgr) {
+    if (m_resourceMgr)
+    {
         delete m_resourceMgr;
         m_resourceMgr = nullptr;
     }
 
-    if (m_swapChain) {
+    if (m_swapChain)
+    {
         m_swapChain->cleanup();
         delete m_swapChain;
         m_swapChain = nullptr;
@@ -190,9 +199,6 @@ void Renderer::setTime(Time* time)
     m_time = time;
 }
 
-//------------------------------------------------------------------------------
-// ring-buffer approach for deferred frees
-//------------------------------------------------------------------------------
 void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& qcd)
 {
     m_deferredFrees[m_currentFrame].push_back(qcd);
@@ -201,10 +207,14 @@ void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& qcd)
 void Renderer::freeDeferredResources()
 {
     auto& list = m_deferredFrees[m_currentFrame];
-    if (!list.empty()) {
-        for (auto& info : list) {
-            if (info.vb != VK_NULL_HANDLE || info.ib != VK_NULL_HANDLE) {
-                if (m_resourceMgr) {
+    if (!list.empty())
+    {
+        for (auto& info : list)
+        {
+            if (info.vb != VK_NULL_HANDLE || info.ib != VK_NULL_HANDLE)
+            {
+                if (m_resourceMgr)
+                {
                     m_resourceMgr->destroyChunkBuffers(
                         info.vb, info.vbMem,
                         info.ib, info.ibMem
@@ -216,36 +226,33 @@ void Renderer::freeDeferredResources()
     }
 }
 
-//------------------------------------------------------------------------------
-// renderFrame (with multi-lod logic in the draw loop)
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
+// renderFrame
+// ------------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
-    // [ADDED] Scoped timer to measure total time spent in renderFrame
-    CpuProfiler::ScopedTimer frameTimer("Renderer::renderFrame"); // [ADDED]
+    // measure total time spent in renderFrame
+    CpuProfiler::ScopedTimer timerFrame("Renderer::renderFrame");
 
+    // 1) update MVP data
     updateMVP();
 
-    // 1) Wait for the current frame’s fence
-    vkWaitForFences(
-        m_context->getDevice(),
+    // 2) wait for current frame’s fence
+    vkWaitForFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence,
         VK_TRUE,
-        UINT64_MAX
-    );
+        UINT64_MAX);
 
-    // 2) Freed resources from last usage of this frame
+    // free resources from last usage of this frame
     freeDeferredResources();
 
-    // 3) Reset fence
-    vkResetFences(
-        m_context->getDevice(),
+    // 3) reset fence
+    vkResetFences(m_context->getDevice(),
         1,
-        &m_frames[m_currentFrame].inFlightFence
-    );
+        &m_frames[m_currentFrame].inFlightFence);
 
-    // 4) Acquire next swap chain image
+    // 4) acquire next swapchain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
@@ -255,25 +262,29 @@ void Renderer::renderFrame()
         VK_NULL_HANDLE,
         &imageIndex
     );
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    {
         recreateSwapChain();
         return;
     }
-    else if (result != VK_SUCCESS) {
+    else if (result != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to acquire swapchain image!");
     }
 
-    // 5) Reset + begin cmd buffer
+    // 5) reset + begin cmd buffer
     VkCommandBuffer cmdBuf = m_frames[m_currentFrame].commandBuffer;
     vkResetCommandBuffer(cmdBuf, 0);
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to begin command buffer!");
+    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to begin cmd buffer!");
     }
 
-    // 6) Begin render pass
+    // 6) begin render pass
     VkClearValue clearVals[2];
     clearVals[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clearVals[1].depthStencil = { 1.f, 0 };
@@ -289,12 +300,12 @@ void Renderer::renderFrame()
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 7) Bind pipeline + descriptor sets
+    // 7) bind pipeline
     std::string pipelineName = (m_wireframeOn) ? "voxel_wireframe" : "voxel_fill";
     auto pipelineInfo = m_pipelineMgr->getPipeline(pipelineName);
-
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
 
+    // descriptor sets => MVP
     vkCmdBindDescriptorSets(
         cmdBuf,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -303,7 +314,7 @@ void Renderer::renderFrame()
         0, nullptr
     );
 
-    // 8) Gather stats
+    // 8) gather stats
     float dt = (m_time) ? m_time->getDeltaTime() : 0.f;
     float fps = (dt > 0.f) ? (1.f / dt) : 0.f;
     addSample(m_fpsSamples, fps);
@@ -313,17 +324,19 @@ void Renderer::renderFrame()
     addSample(m_cpuSamples, cpuUsage);
     float avgCpu = computeAverage(m_cpuSamples);
 
-    // 9) frustum culling if enabled
+    // 9) optional frustum cull
     Frustum frustum;
-    if (m_enableFrustumCulling) {
+    if (m_enableFrustumCulling)
+    {
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
-    // 10) Draw voxel chunks (multi-lod or single-lod)
-    uint32_t totalVertices = 0;
+    // 10) draw voxel chunks
+    uint32_t totalVerts = 0;
     uint32_t drawCallCount = 0;
 
-    if (m_voxelWorld) {
+    if (m_voxelWorld)
+    {
         const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
         bool useMultiLOD = m_voxelWorld->isUsingMultiLOD();
 
@@ -332,26 +345,24 @@ void Renderer::renderFrame()
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            if (m_enableFrustumCulling) {
+            if (m_enableFrustumCulling)
+            {
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
-                if (!frustum.intersectsAABB(minB, maxB)) {
+                if (!frustum.intersectsAABB(minB, maxB))
+                {
                     continue;
                 }
             }
 
             if (useMultiLOD)
             {
-                // compute distance from camera
-                float chunkCenterX = (chunk->worldX() + 0.5f) * Chunk::SIZE_X;
-                float chunkCenterY = (chunk->worldY() + 0.5f) * Chunk::SIZE_Y;
-                float chunkCenterZ = (chunk->worldZ() + 0.5f) * Chunk::SIZE_Z;
-                float dist = glm::distance(
-                    m_camera.position,
-                    glm::vec3(chunkCenterX, chunkCenterY, chunkCenterZ)
-                );
+                // naive approach => pick LOD based on distance
+                float cx = (chunk->worldX() + 0.5f) * Chunk::SIZE_X;
+                float cy = (chunk->worldY() + 0.5f) * Chunk::SIZE_Y;
+                float cz = (chunk->worldZ() + 0.5f) * Chunk::SIZE_Z;
+                float dist = glm::distance(m_camera.position, glm::vec3(cx, cy, cz));
 
-                // simple thresholds
                 int lodIndex = 0;
                 if (dist > 128.f)   lodIndex = 1;
                 if (dist > 256.f)   lodIndex = 2;
@@ -361,46 +372,49 @@ void Renderer::renderFrame()
                 if (dist > 4096.f)  lodIndex = 6;
                 if (dist > 8192.f)  lodIndex = 7;
 
-                if (lodIndex >= Chunk::MAX_LOD_LEVELS) {
+                if (lodIndex >= Chunk::MAX_LOD_LEVELS)
+                {
                     lodIndex = Chunk::MAX_LOD_LEVELS - 1;
                 }
 
                 const auto& cLOD = chunk->getLODData(lodIndex);
                 if (cLOD.vertexBuffer == VK_NULL_HANDLE || cLOD.indexCount == 0)
-                {
                     continue;
-                }
 
-                totalVertices += cLOD.vertexCount;
+                totalVerts += cLOD.vertexCount;
 
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmdBuf, 0, 1, &cLOD.vertexBuffer, offsets);
-
                 vkCmdBindIndexBuffer(cmdBuf, cLOD.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
                 uint32_t idxCount = cLOD.indexCount;
-                if (idxCount > 0) {
+                if (idxCount > 0)
+                {
                     vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
                     drawCallCount++;
                 }
             }
             else
             {
+                // single-lod
                 if (chunk->getVertexBuffer() == VK_NULL_HANDLE ||
                     chunk->getIndexBuffer() == VK_NULL_HANDLE)
                 {
                     continue;
                 }
-                totalVertices += chunk->getVertexCount();
+
+                totalVerts += chunk->getVertexCount();
 
                 VkDeviceSize offsets[] = { 0 };
-                VkBuffer vb = chunk->getVertexBuffer();
-                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
+                auto vb = chunk->getVertexBuffer();
+                auto ib = chunk->getIndexBuffer();
 
-                vkCmdBindIndexBuffer(cmdBuf, chunk->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindVertexBuffers(cmdBuf, 0, 1, &vb, offsets);
+                vkCmdBindIndexBuffer(cmdBuf, ib, 0, VK_INDEX_TYPE_UINT32);
 
                 uint32_t idxCount = chunk->getIndexCount();
-                if (idxCount > 0) {
+                if (idxCount > 0)
+                {
                     vkCmdDrawIndexed(cmdBuf, idxCount, 1, 0, 0, 0);
                     drawCallCount++;
                 }
@@ -408,17 +422,12 @@ void Renderer::renderFrame()
         }
     }
 
-    // 11) UI: begin frame, show debug window, record to cmdBuf
+    // 11) UI
     m_uiRenderer->beginFrame();
-
     m_uiRenderer->renderDebugWindow(
-        dt,
-        fps,
-        avgFps,
-        cpuUsage,
-        avgCpu,
-        totalVertices,
-        drawCallCount,
+        dt, fps, avgFps,
+        cpuUsage, avgCpu,
+        totalVerts, drawCallCount,
         m_voxelWorld,
         m_wireframeOn,
         m_enableFrustumCulling,
@@ -426,24 +435,25 @@ void Renderer::renderFrame()
     );
     m_uiRenderer->renderImGui(cmdBuf);
 
-    // 12) End render pass
+    // end render pass
     vkCmdEndRenderPass(cmdBuf);
 
-    // 13) End command buffer
-    if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to record command buffer!");
+    // end command buffer
+    if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to record cmd buffer!");
     }
 
-    // 14) Submit
+    // 12) submit
     VkSemaphore waitSemaphores[] = { m_frames[m_currentFrame].imageAvailableSemaphore };
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkPipelineStageFlags waitStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSemaphore signalSemaphores[] = { m_frames[m_currentFrame].renderFinishedSemaphore };
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.pWaitDstStageMask = &waitStages;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmdBuf;
     submitInfo.signalSemaphoreCount = 1;
@@ -452,10 +462,10 @@ void Renderer::renderFrame()
     if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo,
         m_frames[m_currentFrame].inFlightFence) != VK_SUCCESS)
     {
-        throw std::runtime_error("Failed to submit draw command buffer!");
+        throw std::runtime_error("Failed to submit draw cmd buffer!");
     }
 
-    // 15) Present
+    // 13) present
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -466,14 +476,16 @@ void Renderer::renderFrame()
     presentInfo.pImageIndices = &imageIndex;
 
     result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    {
         recreateSwapChain();
     }
-    else if (result != VK_SUCCESS) {
+    else if (result != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to present swapchain image!");
     }
 
-    // 16) Advance frame index
+    // 14) next frame
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
@@ -487,6 +499,14 @@ void Renderer::toggleWireframe()
     m_wireframeOn = !m_wireframeOn;
 }
 
+void Renderer::enableFrustumCulling(bool enable)
+{
+    m_enableFrustumCulling = enable;
+}
+
+// ------------------------------------------------------------------------------
+// MVP
+// ------------------------------------------------------------------------------
 void Renderer::createMVPUniformBuffer()
 {
     VkDeviceSize bufferSize = sizeof(MVPBlock);
@@ -497,41 +517,39 @@ void Renderer::createMVPUniformBuffer()
         m_mvpBuffer,
         m_mvpMemory);
 
-    // Create descriptor pool for exactly 1 UBO
+    // create descriptor pool
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSize.descriptorCount = 1;
 
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    VkDescriptorPoolCreateInfo dpInfo{};
+    dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpInfo.maxSets = 1;
+    dpInfo.poolSizeCount = 1;
+    dpInfo.pPoolSizes = &poolSize;
 
-    if (vkCreateDescriptorPool(m_context->getDevice(), &poolInfo, nullptr, &m_mvpDescriptorPool)
-        != VK_SUCCESS)
+    if (vkCreateDescriptorPool(m_context->getDevice(), &dpInfo, nullptr, &m_mvpDescriptorPool) != VK_SUCCESS)
     {
-        throw std::runtime_error("Failed to create descriptor pool for MVP!");
+        throw std::runtime_error("Failed to create MVP descriptor pool!");
     }
 
-    // Allocate descriptor set
+    // allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = m_mvpDescriptorPool;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &m_mvpLayout;
 
-    if (vkAllocateDescriptorSets(m_context->getDevice(), &allocInfo, &m_mvpDescriptorSet)
-        != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(m_context->getDevice(), &allocInfo, &m_mvpDescriptorSet) != VK_SUCCESS)
     {
-        throw std::runtime_error("Failed to allocate descriptor set for MVP!");
+        throw std::runtime_error("Failed to allocate MVP descriptor set!");
     }
 
-    // Update descriptor set
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = m_mvpBuffer;
-    bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(MVPBlock);
+    // update descriptor
+    VkDescriptorBufferInfo bufInfo{};
+    bufInfo.buffer = m_mvpBuffer;
+    bufInfo.offset = 0;
+    bufInfo.range = sizeof(MVPBlock);
 
     VkWriteDescriptorSet descWrite{};
     descWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -540,7 +558,7 @@ void Renderer::createMVPUniformBuffer()
     descWrite.dstArrayElement = 0;
     descWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     descWrite.descriptorCount = 1;
-    descWrite.pBufferInfo = &bufferInfo;
+    descWrite.pBufferInfo = &bufInfo;
 
     vkUpdateDescriptorSets(m_context->getDevice(), 1, &descWrite, 0, nullptr);
 }
@@ -552,9 +570,10 @@ void Renderer::updateMVP()
     glm::mat4 proj = glm::perspective(
         glm::radians(45.f),
         float(m_swapChain->getExtent().width) / float(m_swapChain->getExtent().height),
-        0.1f, 1000000.f
+        0.1f,
+        100000.f
     );
-    proj[1][1] *= -1.f; // Flip Y
+    proj[1][1] *= -1.f; // flip Y
 
     MVPBlock block{};
     block.mvp = proj * view * model;
@@ -565,13 +584,15 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
+// ------------------------------------------------------------------------------
+// createBuffer
+// ------------------------------------------------------------------------------
 void Renderer::createBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
     VkBuffer& buffer,
-    VkDeviceMemory& bufferMemory
-)
+    VkDeviceMemory& bufferMemory)
 {
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -579,7 +600,8 @@ void Renderer::createBuffer(
     bufInfo.usage = usage;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &buffer) != VK_SUCCESS) {
+    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &buffer) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create buffer!");
     }
 
@@ -591,7 +613,8 @@ void Renderer::createBuffer(
     allocInfo.allocationSize = memReq.size;
     allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, properties);
 
-    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to allocate buffer memory!");
     }
 
@@ -603,9 +626,10 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &memProps);
 
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+    {
         if ((filter & (1 << i)) &&
-            ((memProps.memoryTypes[i].propertyFlags & props) == props))
+            (memProps.memoryTypes[i].propertyFlags & props) == props)
         {
             return i;
         }
@@ -613,28 +637,32 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
+// ------------------------------------------------------------------------------
+// recreateSwapChain
+// ------------------------------------------------------------------------------
 void Renderer::recreateSwapChain()
 {
     int width = 0, height = 0;
     glfwGetFramebufferSize(m_window->getGLFWwindow(), &width, &height);
-    if (width == 0 || height == 0) {
-        return;
+    if (width == 0 || height == 0)
+    {
+        return; // minimized
     }
 
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // 1) Cleanup old
+    // 1) cleanup old
     m_rpManager->cleanup();
     m_swapChain->cleanup();
 
-    // 2) Re-init
+    // 2) re-init
     m_swapChain->init(m_context, m_window);
 
-    // 3) Recreate pass + framebuffers
+    // 3) re-create pass + framebuffers
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
-    // 4) Recreate pipelines
+    // 4) re-create pipelines
     vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
     m_mvpLayout = VK_NULL_HANDLE;
 
@@ -645,26 +673,33 @@ void Renderer::recreateSwapChain()
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    // 5) Recreate MVP uniform buffer
-    if (m_mvpBuffer) {
+    // 5) re-create MVP
+    if (m_mvpBuffer)
+    {
         vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
         m_mvpBuffer = VK_NULL_HANDLE;
     }
-    if (m_mvpMemory) {
+    if (m_mvpMemory)
+    {
         vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
         m_mvpMemory = VK_NULL_HANDLE;
     }
-    if (m_mvpDescriptorPool) {
+    if (m_mvpDescriptorPool)
+    {
         vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
         m_mvpDescriptorPool = VK_NULL_HANDLE;
     }
+
     createMVPUniformBuffer();
 }
 
-// Rolling-average sample
+// ------------------------------------------------------------------------------
+// Rolling average
+// ------------------------------------------------------------------------------
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
-    if (buffer.size() >= ROLLING_AVG_SAMPLES) {
+    if (buffer.size() >= ROLLING_AVG_SAMPLES)
+    {
         buffer.pop_front();
     }
     buffer.push_back(value);
@@ -672,10 +707,10 @@ void Renderer::addSample(std::deque<float>& buffer, float value)
 
 float Renderer::computeAverage(const std::deque<float>& buffer)
 {
-    if (buffer.empty()) return 0.0f;
+    if (buffer.empty())
+        return 0.f;
     float sum = 0.f;
-    for (float val : buffer) {
+    for (auto val : buffer)
         sum += val;
-    }
-    return sum / (float)buffer.size();
+    return (sum / float(buffer.size()));
 }

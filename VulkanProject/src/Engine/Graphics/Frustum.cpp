@@ -96,7 +96,9 @@ Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
     float aspect = float(extent.width) / float(extent.height);
 
     // 2) Create a standard perspective projection (45°, near=0.1f, far=1000.f)
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 1000.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 100000.0f);
+
+    
 
     // 3) Flip Y for Vulkan
     proj[1][1] *= -1.f;
