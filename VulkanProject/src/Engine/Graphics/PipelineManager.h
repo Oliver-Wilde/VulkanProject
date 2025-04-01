@@ -13,7 +13,7 @@
 
 // This structure holds both the pipeline and its layout.
 struct PipelineInfo {
-    VkPipeline       pipeline = VK_NULL_HANDLE;      // Vulkan pipeline handle
+    VkPipeline       pipeline = VK_NULL_HANDLE;       // Vulkan pipeline handle
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE; // Vulkan pipeline layout handle
 };
 
@@ -41,7 +41,8 @@ public:
     void createVoxelPipeline(
         const std::string& pipelineName,
         VkRenderPass renderPass,
-        VkExtent2D viewportExtent);
+        VkExtent2D viewportExtent
+    );
 
     // -----------------------------------------------------------------------------
     // 2) "Fill" pipeline WITH descriptor layout
@@ -52,7 +53,8 @@ public:
         const std::string& pipelineName,
         VkRenderPass renderPass,
         VkExtent2D viewportExtent,
-        VkDescriptorSetLayout descriptorLayout);
+        VkDescriptorSetLayout descriptorLayout
+    );
 
     // -----------------------------------------------------------------------------
     // 3) "Wireframe" pipeline WITH descriptor layout
@@ -63,7 +65,22 @@ public:
         const std::string& pipelineName,
         VkRenderPass renderPass,
         VkExtent2D viewportExtent,
-        VkDescriptorSetLayout descriptorLayout);
+        VkDescriptorSetLayout descriptorLayout
+    );
+
+    // -----------------------------------------------------------------------------
+    // 4) "Occlusion" pipeline (depth-only)
+    //
+    //    Pipeline for GPU occlusion queries (no color writes).
+    //    Optionally references a descriptor layout if you want push constants
+    //    or uniform data in the vertex stage (e.g. bounding box transforms).
+    // -----------------------------------------------------------------------------
+    void createVoxelOcclusionPipeline(
+        const std::string& pipelineName,
+        VkRenderPass renderPass,
+        VkExtent2D viewportExtent,
+        VkDescriptorSetLayout descriptorLayout = VK_NULL_HANDLE
+    );
 
     // -----------------------------------------------------------------------------
     // Create a descriptor set layout for the MVP uniform

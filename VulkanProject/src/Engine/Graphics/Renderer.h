@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <vector>            // for std::vector
+#include <unordered_map>     // for std::unordered_map
 #include <vulkan/vulkan.h>
 #include <glm/mat4x4.hpp>    // for MVPBlock
 #include "Engine/Scene/Camera.h"
@@ -16,6 +17,7 @@ class RenderPassManager;
 class Camera;
 class Time;
 class UIRenderer;
+class Chunk;
 
 /**
  * A simple struct holding our MVP matrix.
@@ -82,7 +84,7 @@ public:
     /**
      * Enable or disable frustum culling.
      */
-    void enableFrustumCulling(bool enable); 
+    void enableFrustumCulling(bool enable);
 
     /**
      * Provide a pointer to your Time object, if you want dt/fps in the renderer.
@@ -141,6 +143,52 @@ private:
      * Called each frame at start to free chunk buffers queued from previous usage.
      */
     void freeDeferredResources();
+
+    // ------------------------------------------------------------------------
+    // NEW: GPU Occlusion Query Fields & Methods
+    // ------------------------------------------------------------------------
+
+    /// Maximum number of occlusion queries we support at once.
+    static const uint32_t MAX_OCCLUSION_QUERIES = 4096;
+
+    /// A query pool for GPU occlusion queries.
+    VkQueryPool m_occlusionQueryPool = VK_NULL_HANDLE;
+
+    /// Raw results (number of samples that passed) for each query.
+    std::vector<uint64_t> m_queryResults;
+
+    /// A boolean per query to mark whether it passed (>0 samples) or not.
+    std::vector<bool> m_chunkVisibility;
+
+    /// Maps a Chunk pointer to its query index. If we run out, we skip.
+    std::unordered_map<Chunk*, uint32_t> m_chunkQueryIndices;
+
+    /**
+     * Gather results from last frame's occlusion queries.
+     * Interprets them into m_chunkVisibility.
+     */
+    void gatherOcclusionResults();
+
+    /**
+     * Renders bounding boxes in a pass with occlusion queries.
+     * Typically you'd do this in a small or separate depth pass.
+     */
+    void renderOcclusionPass(VkCommandBuffer cmdBuf);
+
+    /**
+     * Actually draws the bounding box for a chunk, enclosed by Begin/EndQuery.
+     */
+    void drawBoundingBox(Chunk* chunk, VkCommandBuffer cmdBuf);
+
+    /**
+     * Record that a given chunk is associated with a particular query index.
+     */
+    void setQueryIndexForChunk(Chunk* chunk, uint32_t index);
+
+    /**
+     * Retrieve the query index for a chunk, or -1 if none.
+     */
+    int getQueryIndexForChunk(Chunk* chunk);
 
 private:
     // Core references

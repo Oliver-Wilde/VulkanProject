@@ -2,37 +2,37 @@
 
 #include <glm/glm.hpp>
 #include <vulkan/vulkan_core.h>  // for VkExtent2D, if needed
-// If you have a separate "Camera.h", you can just forward-declare Camera here or include that header.
 
-// Forward-declare Camera so we can use it in the buildCameraFrustum signature
 class Camera;
+class ChunkManager;
 
-///
-/// A small utility for culling objects against the camera’s frustum.
-///
-class Frustum
+struct Frustum
 {
-public:
-    /// Each frustum plane: Ax + By + Cz + D = 0
     struct Plane {
         float A, B, C, D;
     };
 
-    /// We store 6 planes: left, right, top, bottom, near, far
     Plane planes[6];
 
-    /// Extracts planes from the given View-Projection matrix.
     void extractPlanes(const glm::mat4& vp);
-
-    /// Checks if the given axis-aligned bounding box (minB/maxB) intersects the frustum.
     bool intersectsAABB(const glm::vec3& minB, const glm::vec3& maxB) const;
 
+    // Naive line-of-sight approach
+    bool isAABBVisible(const glm::vec3& minB,
+        const glm::vec3& maxB,
+        const glm::vec3& cameraPos,
+        const ChunkManager& chunkMgr) const;
+
 private:
-    /// Normalize a plane's (A,B,C) so its normal is unit-length.
     void normalizePlane(Plane& plane);
+    bool isLineOccluded(const glm::vec3& start,
+        const glm::vec3& end,
+        const ChunkManager& chunkMgr) const;
+
+    // MISSING DECLARATION: 
+    bool isSolidAt(const glm::vec3& pos,
+        const ChunkManager& chunkMgr) const;
 };
 
-/// Builds a Frustum from a Camera and a swapchain extent.
-/// Typically used to do culling in Vulkan-based projects.
-/// Definition should be placed in Frustum.cpp (or exactly one .cpp file).
+// Build a Frustum from camera + swapchain extent
 Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent);

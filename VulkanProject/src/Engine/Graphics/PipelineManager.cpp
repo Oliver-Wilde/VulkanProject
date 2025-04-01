@@ -3,6 +3,7 @@
 #include "Engine/Graphics/VulkanContext.h"
 
 #include <stdexcept>
+#include <array>
 
 //--------------------------------------
 // Constructor / Destructor
@@ -178,9 +179,6 @@ void PipelineManager::createVoxelPipelineFill(
     VkExtent2D viewportExtent,
     VkDescriptorSetLayout descriptorLayout)
 {
-    // Same as the "no descriptor" fill, but we include the descriptor layout
-    // And also add the depth-stencil block
-
     // 1) Load shaders
     VkShaderModule vertModule = m_resourceMgr->loadShaderModule("shaders/simple.vert.spv");
     VkShaderModule fragModule = m_resourceMgr->loadShaderModule("shaders/simple.frag.spv");
@@ -407,7 +405,7 @@ void PipelineManager::createVoxelPipelineWireframe(
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;  // wireframe
     rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
@@ -471,6 +469,154 @@ void PipelineManager::createVoxelPipelineWireframe(
         &pipelineCI, nullptr, &pipeline) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create voxel WIREFRAME pipeline!");
+    }
+
+    PipelineInfo info;
+    info.pipeline = pipeline;
+    info.pipelineLayout = pipelineLayout;
+    m_pipelines[pipelineName] = info;
+}
+
+//--------------------------------------
+// createVoxelOcclusionPipeline
+// => Depth-only pipeline, color writes disabled, for occlusion queries
+//--------------------------------------
+void PipelineManager::createVoxelOcclusionPipeline(
+    const std::string& pipelineName,
+    VkRenderPass renderPass,
+    VkExtent2D viewportExtent,
+    VkDescriptorSetLayout descriptorLayout /* optional, if you do pushConstants for transforms */
+)
+{
+    // Suppose we have a simpler vertex shader that draws bounding boxes only,
+    // or we reuse simple.vert with push constants for transforms.
+    VkShaderModule vertModule = m_resourceMgr->loadShaderModule("shaders/occlusion.vert.spv");
+    // Possibly no fragment shader needed, or a trivial one that discards everything.
+    VkShaderModule fragModule = m_resourceMgr->loadShaderModule("shaders/empty.frag.spv");
+
+    VkPipelineShaderStageCreateInfo vertStage{};
+    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertStage.module = vertModule;
+    vertStage.pName = "main";
+
+    // You can skip fragment stage entirely by setting rasterizerDiscardEnable=VK_TRUE,
+    // but for occlusion queries we usually still need to run the depth test. 
+    // So let's keep a trivial frag shader that does nothing.
+    VkPipelineShaderStageCreateInfo fragStage{};
+    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragStage.module = fragModule;
+    fragStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = { vertStage, fragStage };
+
+    // Minimal vertex input => possibly none if we generate in the vertex shader
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    // no inputs => if we do pushConstant or instance data
+
+    // Input assembly
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    // Viewport/scissor
+    VkViewport viewport{};
+    viewport.x = 0.f;
+    viewport.y = 0.f;
+    viewport.width = static_cast<float>(viewportExtent.width);
+    viewport.height = static_cast<float>(viewportExtent.height);
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+
+    VkRect2D scissor{};
+    scissor.offset = { 0,0 };
+    scissor.extent = viewportExtent;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    // Rasterizer => fill
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE; // must be false to do occlusion tests
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.lineWidth = 1.0f;
+
+    // No color writes => set color blend to 0 
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = 0; // no writes
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1; // must match # of color attachments in RenderPass
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    // Depth test => must be ON
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    // Multisample => 1x
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Pipeline layout
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    if (descriptorLayout != VK_NULL_HANDLE)
+    {
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &descriptorLayout;
+    }
+    else
+    {
+        layoutInfo.setLayoutCount = 0;
+        layoutInfo.pSetLayouts = nullptr;
+    }
+    // no push constants for now
+
+    VkPipelineLayout pipelineLayout;
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to create pipeline layout for occlusion pipeline!");
+    }
+
+    // Create pipeline
+    VkGraphicsPipelineCreateInfo pipeCI{};
+    pipeCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeCI.stageCount = 2;
+    pipeCI.pStages = shaderStages;
+    pipeCI.pVertexInputState = &vertexInputInfo;
+    pipeCI.pInputAssemblyState = &inputAssembly;
+    pipeCI.pViewportState = &viewportState;
+    pipeCI.pRasterizationState = &rasterizer;
+    pipeCI.pMultisampleState = &multisampling;
+    pipeCI.pColorBlendState = &colorBlending;
+    pipeCI.pDepthStencilState = &depthStencil;
+    pipeCI.layout = pipelineLayout;
+    pipeCI.renderPass = renderPass;
+    pipeCI.subpass = 0;
+
+    VkPipeline pipeline;
+    if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1,
+        &pipeCI, nullptr, &pipeline) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to create voxel occlusion pipeline!");
     }
 
     PipelineInfo info;
