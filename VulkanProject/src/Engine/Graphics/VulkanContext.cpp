@@ -10,7 +10,9 @@
 #include <set>
 #include <cstring>
 
-// ============ Debug Callback Utility Functions ============ //
+// -----------------------------------------------------------------------------
+// Debug Callback Implementation
+// -----------------------------------------------------------------------------
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -21,6 +23,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE; // don't abort the call
 }
 
+// Already forward-declared in VulkanContext.h
 VkResult CreateDebugUtilsMessengerEXT(
     VkInstance instance,
     const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
@@ -46,8 +49,10 @@ void DestroyDebugUtilsMessengerEXT(
         func(instance, debugMessenger, pAllocator);
     }
 }
-// ========================================================== //
 
+// -----------------------------------------------------------------------------
+// init / cleanup
+// -----------------------------------------------------------------------------
 void VulkanContext::init(Window* window)
 {
     createInstance();
@@ -68,7 +73,6 @@ void VulkanContext::cleanup()
         m_debugMessenger = VK_NULL_HANDLE;
     }
 
-    // Destroy command pool if it exists
     if (m_commandPool) {
         vkDestroyCommandPool(m_device, m_commandPool, nullptr);
         m_commandPool = VK_NULL_HANDLE;
@@ -90,13 +94,16 @@ void VulkanContext::cleanup()
     }
 }
 
-// ============ createInstance() with validation layers ============ //
+// -----------------------------------------------------------------------------
+// createInstance => with validation layers + debug utils extension
+// -----------------------------------------------------------------------------
 void VulkanContext::createInstance()
 {
     if (enableValidationLayers && !checkValidationLayerSupport()) {
         throw std::runtime_error("Validation layers requested, but not available!");
     }
 
+    // 1) App info
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "MyVoxelEngine";
@@ -105,52 +112,66 @@ void VulkanContext::createInstance()
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.apiVersion = VK_API_VERSION_1_0;
 
-    // Get required extensions from GLFW
+    // 2) Required instance extensions (from GLFW)
     uint32_t glfwExtensionCount = 0;
-    const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+    const char** glfwExtensions =
+        glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
-    std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    std::vector<const char*> extensions(
+        glfwExtensions,
+        glfwExtensions + glfwExtensionCount
+    );
 
-    // If we're using validation layers, enable debug utils extension
+    // If validation layers => enable debug utils
     if (enableValidationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+    // 3) Instance create info
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.enabledExtensionCount =
+        static_cast<uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
 
     if (enableValidationLayers) {
-        createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+        createInfo.enabledLayerCount =
+            static_cast<uint32_t>(validationLayers.size());
         createInfo.ppEnabledLayerNames = validationLayers.data();
     }
     else {
         createInfo.enabledLayerCount = 0;
     }
 
-    // Optionally, we can populate debug messenger info here so issues can be caught early
+    // Optionally chain a debug info struct so we catch issues during createInstance
     VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
     if (enableValidationLayers) {
         populateDebugMessengerCreateInfo(debugCreateInfo);
         createInfo.pNext = &debugCreateInfo;
     }
 
+    // 4) Create instance
     if (vkCreateInstance(&createInfo, nullptr, &m_instance) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan instance!");
     }
 }
 
-// ============ createSurface() ============ //
+// -----------------------------------------------------------------------------
+// createSurface
+// -----------------------------------------------------------------------------
 void VulkanContext::createSurface(Window* window)
 {
-    if (glfwCreateWindowSurface(m_instance, window->getGLFWwindow(), nullptr, &m_surface) != VK_SUCCESS) {
+    if (glfwCreateWindowSurface(m_instance, window->getGLFWwindow(), nullptr, &m_surface)
+        != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create window surface!");
     }
 }
 
-// ============ pickPhysicalDevice() ============ //
+// -----------------------------------------------------------------------------
+// pickPhysicalDevice
+// -----------------------------------------------------------------------------
 void VulkanContext::pickPhysicalDevice()
 {
     uint32_t deviceCount = 0;
@@ -162,15 +183,16 @@ void VulkanContext::pickPhysicalDevice()
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
 
-    // Simple approach: pick the first device
+    // Simple approach => pick the first device
     m_physicalDevice = devices[0];
-
     if (m_physicalDevice == VK_NULL_HANDLE) {
         throw std::runtime_error("Failed to find a suitable GPU!");
     }
 }
 
-// ============ createLogicalDevice() ============ //
+// -----------------------------------------------------------------------------
+// createLogicalDevice
+// -----------------------------------------------------------------------------
 void VulkanContext::createLogicalDevice()
 {
     // 1) Find queue families
@@ -183,15 +205,18 @@ void VulkanContext::createLogicalDevice()
     int presentFamily = -1;
 
     for (int i = 0; i < static_cast<int>(queueFamilies.size()); i++) {
+        // check for graphics bit
         if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
             graphicsFamily = i;
         }
-        // Check if present is supported
+
+        // check present support
         VkBool32 presentSupport = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, i, m_surface, &presentSupport);
         if (presentSupport) {
             presentFamily = i;
         }
+
         if (graphicsFamily != -1 && presentFamily != -1) {
             break;
         }
@@ -217,53 +242,73 @@ void VulkanContext::createLogicalDevice()
         queueCreateInfos.push_back(queueInfo);
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures{};
-    deviceFeatures.fillModeNonSolid = VK_TRUE;
+    // 3) Check which device features are supported
+    VkPhysicalDeviceFeatures supportedFeatures;
+    vkGetPhysicalDeviceFeatures(m_physicalDevice, &supportedFeatures);
 
+    // We'll enable wireframe if supported
+    VkPhysicalDeviceFeatures deviceFeatures{};
+    if (supportedFeatures.fillModeNonSolid) {
+        deviceFeatures.fillModeNonSolid = VK_TRUE;
+    }
+
+    // (You can enable other features here, e.g. deviceFeatures.samplerAnisotropy = VK_TRUE; 
+    //  if supportedFeatures.samplerAnisotropy == VK_TRUE.)
+
+    // 4) Create device
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = &deviceFeatures;
 
-    const std::vector<const char*> deviceExtensions = {
+    // enable swapchain extension
+    std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
+    // if validation => pass the layers to device as well
     if (enableValidationLayers) {
-        createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+        createInfo.enabledLayerCount =
+            static_cast<uint32_t>(validationLayers.size());
         createInfo.ppEnabledLayerNames = validationLayers.data();
     }
     else {
         createInfo.enabledLayerCount = 0;
     }
 
-    if (vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device) != VK_SUCCESS) {
+    if (vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create logical device!");
     }
 
-    // 3) Get device queues
+    // 5) retrieve queue handles
     vkGetDeviceQueue(m_device, graphicsFamily, 0, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, presentFamily, 0, &m_presentQueue);
 
-    // 4) Create a command pool in VulkanContext
+    // 6) create command pool
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.queueFamilyIndex = m_graphicsFamilyIndex;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
-    if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create command pool in VulkanContext!");
+    if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to create command pool!");
     }
 }
 
-// ============ Validation Layer Helpers ============ //
+
+// -----------------------------------------------------------------------------
+// Validation Layer Helpers
+// -----------------------------------------------------------------------------
 bool VulkanContext::checkValidationLayerSupport()
 {
     uint32_t layerCount;
     vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+
     std::vector<VkLayerProperties> availableLayers(layerCount);
     vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
@@ -301,13 +346,13 @@ void VulkanContext::populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreate
     createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
     createInfo.messageSeverity =
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT
-        | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
-        | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
     createInfo.messageType =
-        VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
-        | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
-        | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     createInfo.pfnUserCallback = debugCallback;
-    createInfo.pUserData = nullptr;
+    createInfo.pUserData = nullptr; // optional
 }

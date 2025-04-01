@@ -24,20 +24,16 @@
 #include <deque>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <algorithm> // for std::min / std::max
+#include <algorithm>
 #include <array>
 #include <limits>
 
 extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler; // global CPU profiler
 
-// ------------------------------------------------------------------------------
-// For demonstration, we define a max chunk query count. Real code might do dynamic expansions.
-// ------------------------------------------------------------------------------
+// We'll define a max chunk query count for occlusion
 static const uint32_t MAX_OCCLUSION_QUERIES = 4096;
 
-// ------------------------------------------------------------------------------
-// Constructor / Destructor
 // ------------------------------------------------------------------------------
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
     : m_context(context)
@@ -53,9 +49,14 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_pipelineMgr = new PipelineManager(m_context, m_resourceMgr);
     m_rpManager = new RenderPassManager(m_context, m_swapChain);
 
-    // 3) Create render pass + framebuffers
+    // 3) Create main render pass + framebuffers
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
+
+    // Also create occlusion pass
+      // Make them match
+    m_rpManager->createOcclusionRenderPass();
+    m_rpManager->createOcclusionFramebuffers();
 
     // 4) Create pipelines (fill & wireframe) + MVP descriptor layout
     auto extent = m_swapChain->getExtent();
@@ -65,17 +66,19 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    // ------------------------------------------------------------------
-    // NEW: (Optional) Create a separate occlusion pipeline
-    // We'll assume the user modifies PipelineManager to have:
-    //   createVoxelOcclusionPipeline("voxel_occlusion", occlusionRenderPass, smallerExtent, ...)
-    // For now, we'll just reference "voxel_occlusion" as if it existed.
-    // ------------------------------------------------------------------
+    VkExtent2D scExtent = m_swapChain->getExtent();
+
+    // Create occlusion pipeline with the occlusion render pass
+    m_pipelineMgr->createVoxelOcclusionPipeline("voxel_occlusion",
+        m_rpManager->getOcclusionRenderPass(),
+        scExtent,       // pass the real extent, not nullptr
+        VK_NULL_HANDLE
+    );
 
     // 5) Create MVP uniform buffer
     createMVPUniformBuffer();
 
-    // 6) Create per-frame resources (command buffers, semaphores, fences)
+    // 6) Create per-frame resources (cmd buffers, semaphores, fences)
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         VkCommandBufferAllocateInfo cmdAlloc{};
@@ -93,8 +96,10 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         VkSemaphoreCreateInfo semInfo{};
         semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr, &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
+        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
+            &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
+                &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
         {
             throw std::runtime_error("Failed to create semaphores for frame " + std::to_string(i));
         }
@@ -103,13 +108,14 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &m_frames[i].inFlightFence) != VK_SUCCESS)
+        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr,
+            &m_frames[i].inFlightFence) != VK_SUCCESS)
         {
             throw std::runtime_error("Failed to create fence for frame " + std::to_string(i));
         }
     }
 
-    // 7) Create and initialize the UIRenderer
+    // 7) Create and init the UIRenderer
     m_uiRenderer = new UIRenderer();
     m_uiRenderer->init(
         m_context,
@@ -118,22 +124,20 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         m_swapChain->getImageCount()
     );
 
-    // ------------------------------------------------------------------
-    // NEW: Create an occlusion query pool. We'll store results for up to
-    // MAX_OCCLUSION_QUERIES. We do it once and reuse.
-    // We'll store the results in m_queryResults (size = MAX_OCCLUSION_QUERIES).
-    // ------------------------------------------------------------------
-    VkQueryPoolCreateInfo qpInfo{};
-    qpInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-    qpInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
-    qpInfo.queryCount = MAX_OCCLUSION_QUERIES;
-    if (vkCreateQueryPool(m_context->getDevice(), &qpInfo, nullptr, &m_occlusionQueryPool) != VK_SUCCESS)
+    // 8) Create an occlusion query pool
     {
-        throw std::runtime_error("Failed to create occlusion query pool!");
+        VkQueryPoolCreateInfo qpInfo{};
+        qpInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
+        qpInfo.queryCount = MAX_OCCLUSION_QUERIES;
+        if (vkCreateQueryPool(m_context->getDevice(), &qpInfo, nullptr,
+            &m_occlusionQueryPool) != VK_SUCCESS)
+        {
+            throw std::runtime_error("Failed to create occlusion query pool!");
+        }
+        m_queryResults.resize(MAX_OCCLUSION_QUERIES, 0ull);
+        m_chunkVisibility.resize(MAX_OCCLUSION_QUERIES, true);
     }
-
-    m_queryResults.resize(MAX_OCCLUSION_QUERIES, 0ull);
-    m_chunkVisibility.resize(MAX_OCCLUSION_QUERIES, true); // default = visible
 }
 
 Renderer::~Renderer()
@@ -174,7 +178,7 @@ Renderer::~Renderer()
         }
     }
 
-    // Cleanup MVP resources
+    // MVP buffer cleanup
     if (m_mvpBuffer)
     {
         vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
@@ -196,7 +200,7 @@ Renderer::~Renderer()
         m_mvpLayout = VK_NULL_HANDLE;
     }
 
-    // Destroy UIRenderer
+    // UIRenderer
     if (m_uiRenderer)
     {
         m_uiRenderer->cleanup();
@@ -204,7 +208,7 @@ Renderer::~Renderer()
         m_uiRenderer = nullptr;
     }
 
-    // Destroy managers
+    // managers
     if (m_rpManager)
     {
         delete m_rpManager;
@@ -221,6 +225,7 @@ Renderer::~Renderer()
         m_resourceMgr = nullptr;
     }
 
+    // swapchain
     if (m_swapChain)
     {
         m_swapChain->cleanup();
@@ -228,7 +233,7 @@ Renderer::~Renderer()
         m_swapChain = nullptr;
     }
 
-    // NEW: destroy occlusion query pool
+    // occlusion query pool
     if (m_occlusionQueryPool)
     {
         vkDestroyQueryPool(m_context->getDevice(), m_occlusionQueryPool, nullptr);
@@ -236,6 +241,7 @@ Renderer::~Renderer()
     }
 }
 
+// ------------------------------------------------------------------------------
 void Renderer::setTime(Time* time)
 {
     m_time = time;
@@ -269,32 +275,28 @@ void Renderer::freeDeferredResources()
 }
 
 // ------------------------------------------------------------------------------
-// MAIN renderFrame
-// ------------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
-    // measure total time spent in renderFrame
+    static bool firstFrame = true; // one-frame-late approach
+
     CpuProfiler::ScopedTimer timerFrame("Renderer::renderFrame");
 
-    // 1) update MVP data
+    // 1) update MVP
     updateMVP();
 
-    // 2) wait for current frame’s fence
+    // 2) wait for current frame fence
     vkWaitForFences(m_context->getDevice(),
         1,
         &m_frames[m_currentFrame].inFlightFence,
         VK_TRUE,
         UINT64_MAX);
 
-    // free resources from last usage of this frame
     freeDeferredResources();
 
     // 3) reset fence
-    vkResetFences(m_context->getDevice(),
-        1,
-        &m_frames[m_currentFrame].inFlightFence);
+    vkResetFences(m_context->getDevice(), 1, &m_frames[m_currentFrame].inFlightFence);
 
-    // 4) acquire next swapchain image
+    // 4) acquire swapchain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
@@ -326,21 +328,15 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to begin cmd buffer!");
     }
 
-    // ------------------------------------------------------------------
-    // NEW: We gather last frame's occlusion results (one-frame-late) here
-    // ------------------------------------------------------------------
-    gatherOcclusionResults(); // read GPU data from last frame
+    // skip gatherOcclusionResults() on the first frame
+    if (!firstFrame) {
+        gatherOcclusionResults();
+    }
 
-    // ------------------------------------------------------------------
-    // NEW: Issue occlusion pass => we draw bounding boxes of each chunk
-    // at some small pass with the occlusion pipeline. For simplicity,
-    // we'll do it in the same command buffer. In practice, you might
-    // set up a separate smaller-fbo pass or let the user do so in
-    // RenderPassManager. We'll just do a "render pass" that clears depth.
-    // ------------------------------------------------------------------
+    // do an occlusion pass first
     renderOcclusionPass(cmdBuf);
 
-    // 6) begin main render pass
+    // 6) main render pass
     VkClearValue clearVals[2];
     clearVals[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clearVals[1].depthStencil = { 1.f, 0 };
@@ -356,7 +352,7 @@ void Renderer::renderFrame()
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 7) bind pipeline
+    // bind pipeline
     std::string pipelineName = (m_wireframeOn) ? "voxel_wireframe" : "voxel_fill";
     auto pipelineInfo = m_pipelineMgr->getPipeline(pipelineName);
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
@@ -370,7 +366,7 @@ void Renderer::renderFrame()
         0, nullptr
     );
 
-    // 8) gather stats
+    // gather stats
     float dt = (m_time) ? m_time->getDeltaTime() : 0.f;
     float fps = (dt > 0.f) ? (1.f / dt) : 0.f;
     addSample(m_fpsSamples, fps);
@@ -380,14 +376,14 @@ void Renderer::renderFrame()
     addSample(m_cpuSamples, cpuUsage);
     float avgCpu = computeAverage(m_cpuSamples);
 
-    // 9) optional frustum cull
+    // optional frustum cull
     Frustum frustum;
     if (m_enableFrustumCulling)
     {
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
     }
 
-    // 10) draw voxel chunks
+    // draw voxel chunks
     uint32_t totalVerts = 0;
     uint32_t drawCallCount = 0;
 
@@ -396,23 +392,19 @@ void Renderer::renderFrame()
         const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
         bool useMultiLOD = m_voxelWorld->isUsingMultiLOD();
 
-        // We'll maintain a local index for queries. The chunk => "queryIndex" is
-        // from last pass. We skip the chunk if that query said "0 samples" => occluded.
         for (auto& kv : allChunks)
         {
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
 
-            int queryIdx = getQueryIndexForChunk(chunk); // see below: returns -1 if not found
+            int queryIdx = getQueryIndexForChunk(chunk);
             bool chunkVisible = true;
-
             if (queryIdx >= 0 && queryIdx < int(m_chunkVisibility.size()))
             {
                 chunkVisible = m_chunkVisibility[queryIdx];
             }
 
-            // Frustum test
-            if (m_enableFrustumCulling)
+            if (m_enableFrustumCulling && chunkVisible)
             {
                 glm::vec3 minB, maxB;
                 chunk->getBoundingBox(minB, maxB);
@@ -428,10 +420,9 @@ void Renderer::renderFrame()
                 continue;
             }
 
-            // proceed with normal or LOD rendering
+            // proceed with normal or multi-LOD
             if (useMultiLOD)
             {
-                // naive approach => pick LOD based on distance
                 float cx = (chunk->worldX() + 0.5f) * Chunk::SIZE_X;
                 float cy = (chunk->worldY() + 0.5f) * Chunk::SIZE_Y;
                 float cz = (chunk->worldZ() + 0.5f) * Chunk::SIZE_Z;
@@ -509,7 +500,7 @@ void Renderer::renderFrame()
     );
     m_uiRenderer->renderImGui(cmdBuf);
 
-    // end render pass
+    // end main pass
     vkCmdEndRenderPass(cmdBuf);
 
     // end command buffer
@@ -561,8 +552,11 @@ void Renderer::renderFrame()
 
     // 14) next frame
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    firstFrame = false; // subsequent frames will gather results
 }
 
+// ------------------------------------------------------------------------------
 void Renderer::setCamera(const Camera& cam)
 {
     m_camera = cam;
@@ -578,8 +572,6 @@ void Renderer::enableFrustumCulling(bool enable)
     m_enableFrustumCulling = enable;
 }
 
-// ------------------------------------------------------------------------------
-// MVP
 // ------------------------------------------------------------------------------
 void Renderer::createMVPUniformBuffer()
 {
@@ -602,7 +594,8 @@ void Renderer::createMVPUniformBuffer()
     dpInfo.poolSizeCount = 1;
     dpInfo.pPoolSizes = &poolSize;
 
-    if (vkCreateDescriptorPool(m_context->getDevice(), &dpInfo, nullptr, &m_mvpDescriptorPool) != VK_SUCCESS)
+    if (vkCreateDescriptorPool(m_context->getDevice(), &dpInfo, nullptr,
+        &m_mvpDescriptorPool) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create MVP descriptor pool!");
     }
@@ -614,7 +607,8 @@ void Renderer::createMVPUniformBuffer()
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &m_mvpLayout;
 
-    if (vkAllocateDescriptorSets(m_context->getDevice(), &allocInfo, &m_mvpDescriptorSet) != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(m_context->getDevice(), &allocInfo,
+        &m_mvpDescriptorSet) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to allocate MVP descriptor set!");
     }
@@ -647,7 +641,7 @@ void Renderer::updateMVP()
         0.1f,
         100000.f
     );
-    proj[1][1] *= -1.f; // flip Y
+    proj[1][1] *= -1.f; // flip Y for Vulkan
 
     MVPBlock block{};
     block.mvp = proj * view * model;
@@ -658,9 +652,6 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
-// ------------------------------------------------------------------------------
-// createBuffer
-// ------------------------------------------------------------------------------
 void Renderer::createBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
@@ -711,9 +702,6 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-// ------------------------------------------------------------------------------
-// recreateSwapChain
-// ------------------------------------------------------------------------------
 void Renderer::recreateSwapChain()
 {
     int width = 0, height = 0;
@@ -736,6 +724,10 @@ void Renderer::recreateSwapChain()
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
+    m_rpManager->setOcclusionExtent(m_swapChain->getExtent());
+    m_rpManager->createOcclusionRenderPass();
+    m_rpManager->createOcclusionFramebuffers();
+
     // 4) re-create pipelines
     vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
     m_mvpLayout = VK_NULL_HANDLE;
@@ -747,8 +739,14 @@ void Renderer::recreateSwapChain()
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    // (Optionally re-create occlusion pipeline if needed)
-    // e.g. m_pipelineMgr->createVoxelOcclusionPipeline("voxel_occlusion", <something>);
+    VkExtent2D scExtent = m_swapChain->getExtent();
+    // Re-create occlusion pipeline
+    m_pipelineMgr->createVoxelOcclusionPipeline(
+        "voxel_occlusion",
+        m_rpManager->getOcclusionRenderPass(),
+        m_swapChain->getExtent(),  // Instead of nullptr
+        VK_NULL_HANDLE
+    );
 
     // 5) re-create MVP
     if (m_mvpBuffer)
@@ -771,15 +769,9 @@ void Renderer::recreateSwapChain()
 }
 
 // ------------------------------------------------------------------------------
-// NEW: gatherOcclusionResults
-// We retrieve last frame's queries from the GPU. This sets m_chunkVisibility
-// for each query. Then we reset queries for the next pass.
-// ------------------------------------------------------------------------------
 void Renderer::gatherOcclusionResults()
 {
-    // We read the results from all queries. We do WAIT so we block until
-    // the GPU data is ready. If you want asynchronous, you'd do partial or
-    // use VK_QUERY_RESULT_WITH_AVAILABILITY_BIT, etc.
+    // We do a blocking read (VK_QUERY_RESULT_WAIT_BIT)
     vkGetQueryPoolResults(
         m_context->getDevice(),
         m_occlusionQueryPool,
@@ -791,133 +783,93 @@ void Renderer::gatherOcclusionResults()
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
     );
 
-    // If m_queryResults[i] == 0 => no samples passed => occluded
-    // If >0 => visible
+    // If m_queryResults[i] == 0 => geometry had zero samples => occluded
     for (uint32_t i = 0; i < MAX_OCCLUSION_QUERIES; i++)
     {
         m_chunkVisibility[i] = (m_queryResults[i] > 0);
-        // We also reset to 0 for next usage
-        m_queryResults[i] = 0;
+        m_queryResults[i] = 0; // reset for next time
     }
-
-    // Reset queries for new frame
-    vkCmdResetQueryPool(
-        m_frames[m_currentFrame].commandBuffer,
-        m_occlusionQueryPool,
-        0,
-        MAX_OCCLUSION_QUERIES
-    );
 }
 
 // ------------------------------------------------------------------------------
-// NEW: renderOcclusionPass
-// We'll do a minimal pass that draws bounding boxes with "voxel_occlusion" pipeline.
-// We begin a small offscreen pass or reuse existing pass but do so before clearing the main pass.
-// For demonstration, this is a bare-bones approach that doesn't do an actual separate
-// depth-only pass with smaller resolution. Real usage would create a special RenderPass
-// at reduced size. The pipeline would have color writes disabled, using occlusion queries.
-// ------------------------------------------------------------------------------
 void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
 {
-    // We'll use the main window extent. In a real engine, do a smaller pass or
-    // a separate FBO. We'll do a trivial pass here.
-    VkExtent2D extent = m_swapChain->getExtent();
-
-    // We'll just do a new render pass here for demonstration. In production,
-    // you'd create a dedicated occlusion RenderPass in RenderPassManager.
-    // For now, we can do it inline as an example:
-    // (If you do a second "rpBegin" it might conflict with your GPU pipeline. So
-    //  consider that you might do a multi-subpass approach or a separate pass with
-    //  another command buffer. We'll keep it simple.)
+    // We do an offscreen pass with the occlusion render pass
+    VkExtent2D scExtent = m_swapChain->getExtent();
 
     VkClearValue clearVal{};
     clearVal.depthStencil = { 1.0f, 0 };
 
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    // Suppose we added an occlusionRenderPass in RenderPassManager
-    // rpBegin.renderPass = m_rpManager->getOcclusionRenderPass(); 
-    // For the sake of demonstration, let's do the same render pass, but it
-    // might cause issues if you rely on the same attachments. We'll assume
-    // we have a second set of framebuffers for occlusion in m_rpManager.
-    // We'll call them getOcclusionFramebuffers()[m_currentFrame]
-    // 
-    // TEMP: reusing the main pass is not correct in real usage
-    rpBegin.renderPass = m_rpManager->getRenderPass();
-    rpBegin.framebuffer = m_rpManager->getFramebuffers()[0];
-    rpBegin.renderArea.offset = { 0, 0 };
-    rpBegin.renderArea.extent = extent;
+    rpBegin.renderPass = m_rpManager->getOcclusionRenderPass();
+    rpBegin.framebuffer = m_rpManager->getOcclusionFramebuffers()[0];
+    rpBegin.renderArea.offset = { 0,0 };
+    rpBegin.renderArea.extent = scExtent;
     rpBegin.clearValueCount = 1;
     rpBegin.pClearValues = &clearVal;
 
-    // Insert a pipeline barrier or transitions if needed. We'll skip here.
-
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Bind occlusion pipeline
+    // 1) BIND occlusion pipeline
     auto pipelineInfo = m_pipelineMgr->getPipeline("voxel_occlusion");
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
 
-    // We also reset query pool here so we can write fresh data.
+    // 2) RESET the entire query pool
     vkCmdResetQueryPool(cmdBuf, m_occlusionQueryPool, 0, MAX_OCCLUSION_QUERIES);
 
-    // For each chunk => issue a query. 
-    const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
-    uint32_t queryIndex = 0;
-    for (auto& kv : allChunks)
+    // 3) For each chunk => begin/end query
+    if (m_voxelWorld)
     {
-        Chunk* chunk = kv.second.get();
-        if (!chunk) continue;
-        if (queryIndex >= MAX_OCCLUSION_QUERIES) break;
+        const auto& allChunks = m_voxelWorld->getChunkManager().getAllChunks();
+        uint32_t queryIndex = 0;
+        const float MAX_OCCLUSION_RANGE = 2000.0f;
 
-        // Record the mapping in our map
-        setQueryIndexForChunk(chunk, queryIndex);
+        for (auto& kv : allChunks)
+        {
+            Chunk* chunk = kv.second.get();
+            if (!chunk) continue;
+            if (queryIndex >= MAX_OCCLUSION_QUERIES) break;
 
-        // Begin query
-        vkCmdBeginQuery(cmdBuf, m_occlusionQueryPool, queryIndex, 0);
+            glm::vec3 minB, maxB;
+            chunk->getBoundingBox(minB, maxB);
+            glm::vec3 center = 0.5f * (minB + maxB);
+            float dist = glm::distance(center, m_camera.position);
+            if (dist > MAX_OCCLUSION_RANGE)
+            {
+                // assume visible if too far => skip actual bounding box
+                setQueryIndexForChunk(chunk, queryIndex);
+                m_chunkVisibility[queryIndex] = true;
+                queryIndex++;
+                continue;
+            }
 
-        // Draw bounding box. Typically you'd have a small VB with the box corners,
-        // or do a push constant to scale a unit cube. We'll do something simple:
-        // 
-        // e.g. we might have a GPU buffer for a single box. Then use instance transform
-        // for each chunk. We'll show only the logic in short form. Real code might differ.
+            // record mapping
+            setQueryIndexForChunk(chunk, queryIndex);
 
-        // Pseudocode:
-        //   - update a push constant with chunk transform
-        //   - bind a small vertex buffer for a 12-tri bounding cube
-        //   - vkCmdDraw(...) for that bounding cube instance
+            // begin query
+            vkCmdBeginQuery(cmdBuf, m_occlusionQueryPool, queryIndex, 0);
 
-        // We'll skip the actual geometry code here due to complexity.
-        // We'll assume you have a "drawBoundingBox(chunk, cmdBuf)" function:
-        drawBoundingBox(chunk, cmdBuf);
+            // 4) draw bounding box
+            drawBoundingBox(chunk, cmdBuf);
 
-        // End query
-        vkCmdEndQuery(cmdBuf, m_occlusionQueryPool, queryIndex);
+            // end query
+            vkCmdEndQuery(cmdBuf, m_occlusionQueryPool, queryIndex);
 
-        queryIndex++;
+            queryIndex++;
+        }
     }
 
     vkCmdEndRenderPass(cmdBuf);
 }
 
 // ------------------------------------------------------------------------------
-// NEW: drawBoundingBox
-// Stubs a bounding box draw. Typically you'd have a static GPU buffer for a cube
-// and a descriptor for transforms. We'll do a placeholder here.
-// ------------------------------------------------------------------------------
 void Renderer::drawBoundingBox(Chunk* chunk, VkCommandBuffer cmdBuf)
 {
-    // Example: if we have a single 'unitCubeVB' + 'unitCubeIB' in the pipeline manager or resource manager.
-    // We do the minimal steps. We won't show the entire code because it's engine-specific.
-    // Possibly we also do a push constant for the chunk's world transform.
-    // For demonstration, a no-op:
-
-    // (No real code: you'd do vb/ib binding and then vkCmdDrawIndexed)
+    // If you had a bounding box VB or push-constant approach, you’d do it here.
+    // For now, we might do nothing or a simple draw that covers the chunk region in the vertex shader.
 }
 
-// ------------------------------------------------------------------------------
-// We keep track of which chunk maps to which query index. We store that in
-// m_chunkQueryIndices. If we run out of queries, we skip. 
 // ------------------------------------------------------------------------------
 void Renderer::setQueryIndexForChunk(Chunk* chunk, uint32_t index)
 {
@@ -935,8 +887,6 @@ int Renderer::getQueryIndexForChunk(Chunk* chunk)
 }
 
 // ------------------------------------------------------------------------------
-// Rolling average
-// ------------------------------------------------------------------------------
 void Renderer::addSample(std::deque<float>& buffer, float value)
 {
     if (buffer.size() >= ROLLING_AVG_SAMPLES)
@@ -948,8 +898,7 @@ void Renderer::addSample(std::deque<float>& buffer, float value)
 
 float Renderer::computeAverage(const std::deque<float>& buffer)
 {
-    if (buffer.empty())
-        return 0.f;
+    if (buffer.empty()) return 0.f;
     float sum = 0.f;
     for (auto val : buffer)
         sum += val;

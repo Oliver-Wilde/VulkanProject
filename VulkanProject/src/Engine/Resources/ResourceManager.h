@@ -38,7 +38,7 @@ public:
      * buffers and memory handles are returned in outVertexBuffer, outVertexMemory,
      * outIndexBuffer, outIndexMemory.
      */
-    void createChunkBuffers(
+    bool createChunkBuffers(
         const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVertexBuffer,

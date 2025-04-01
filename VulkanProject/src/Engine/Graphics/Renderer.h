@@ -96,6 +96,23 @@ public:
      */
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
+    /**
+     * Gather results from last frame's occlusion queries,
+     * storing them into m_chunkVisibility. Then
+     * the next pass can safely reset queries.
+     *
+     * Make this public so Application.cpp can call it
+     * in the one-frame-late approach.
+     */
+    void gatherOcclusionResults();
+
+    /**
+     * Called typically in Application::cleanup() to ensure
+     * all chunk buffers queued for destruction are actually freed
+     * before the device is destroyed.
+     */
+    void freeDeferredResources();
+
 private:
     /**
      * Creates the uniform buffer for MVP (model-view-projection),
@@ -139,39 +156,28 @@ private:
      */
     float computeAverage(const std::deque<float>& buffer);
 
-    /**
-     * Called each frame at start to free chunk buffers queued from previous usage.
-     */
-    void freeDeferredResources();
-
     // ------------------------------------------------------------------------
-    // NEW: GPU Occlusion Query Fields & Methods
+    // GPU Occlusion Query Fields & Methods
     // ------------------------------------------------------------------------
 
-    /// Maximum number of occlusion queries we support at once.
+    /// Maximum number of occlusion queries we can handle at once.
     static const uint32_t MAX_OCCLUSION_QUERIES = 4096;
 
-    /// A query pool for GPU occlusion queries.
+    /// Query pool for GPU occlusion queries.
     VkQueryPool m_occlusionQueryPool = VK_NULL_HANDLE;
 
-    /// Raw results (number of samples that passed) for each query.
+    /// Array to hold raw fragment-passed results for each query.
     std::vector<uint64_t> m_queryResults;
 
-    /// A boolean per query to mark whether it passed (>0 samples) or not.
+    /// A boolean array to record whether each query indicates “visible” (>0) or “occluded” (0).
     std::vector<bool> m_chunkVisibility;
 
-    /// Maps a Chunk pointer to its query index. If we run out, we skip.
+    /// Maps a Chunk pointer to a query index.
     std::unordered_map<Chunk*, uint32_t> m_chunkQueryIndices;
 
     /**
-     * Gather results from last frame's occlusion queries.
-     * Interprets them into m_chunkVisibility.
-     */
-    void gatherOcclusionResults();
-
-    /**
-     * Renders bounding boxes in a pass with occlusion queries.
-     * Typically you'd do this in a small or separate depth pass.
+     * Runs a pass to draw bounding boxes for each chunk, issuing occlusion queries.
+     * Typically done in a smaller or separate depth-only pass, rather than the main pass.
      */
     void renderOcclusionPass(VkCommandBuffer cmdBuf);
 
@@ -181,41 +187,47 @@ private:
     void drawBoundingBox(Chunk* chunk, VkCommandBuffer cmdBuf);
 
     /**
-     * Record that a given chunk is associated with a particular query index.
+     * Assigns a query index to a chunk. If we run out of queries, we skip that chunk.
      */
     void setQueryIndexForChunk(Chunk* chunk, uint32_t index);
 
     /**
-     * Retrieve the query index for a chunk, or -1 if none.
+     * Retrieves the query index for a chunk, or -1 if none assigned.
      */
     int getQueryIndexForChunk(Chunk* chunk);
 
 private:
+    // ------------------------------------------------------------------------
     // Core references
+    // ------------------------------------------------------------------------
     VulkanContext* m_context = nullptr;
     Window* m_window = nullptr;
     VoxelWorld* m_voxelWorld = nullptr;
 
+    // ------------------------------------------------------------------------
     // Manager objects
+    // ------------------------------------------------------------------------
     ResourceManager* m_resourceMgr = nullptr;
     PipelineManager* m_pipelineMgr = nullptr;
     RenderPassManager* m_rpManager = nullptr;
     UIRenderer* m_uiRenderer = nullptr;
 
+    // ------------------------------------------------------------------------
     // Swap chain + MVP data
+    // ------------------------------------------------------------------------
     class SwapChain* m_swapChain = nullptr;
-    VkBuffer            m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory      m_mvpMemory = VK_NULL_HANDLE;
-    VkDescriptorPool    m_mvpDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer         m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory   m_mvpMemory = VK_NULL_HANDLE;
+    VkDescriptorPool m_mvpDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet  m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
     // For ring-buffer chunk destruction
     std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
     // Per-frame resources
-    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
-    int            m_currentFrame = 0; // which frame in flight
+    FrameResources   m_frames[MAX_FRAMES_IN_FLIGHT];
+    int              m_currentFrame = 0;
 
     // If using Time for dt/fps
     Time* m_time = nullptr;

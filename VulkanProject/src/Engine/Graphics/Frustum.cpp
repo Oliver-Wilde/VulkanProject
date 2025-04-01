@@ -6,47 +6,47 @@
 #include <Engine/Voxels/ChunkManager.h>
 #include <Engine/Voxels/VoxelTypeRegistry.h>
 #include <Engine/Voxels/VoxelType.h>
-#include <glm/gtc/matrix_transform.hpp> // for perspective etc.
+#include <glm/gtc/matrix_transform.hpp> // for perspective, etc.
 
 // 1) The existing plane extraction logic
 void Frustum::extractPlanes(const glm::mat4& vp)
 {
-    // Example of extracting left plane:
+    // Left plane
     planes[0].A = vp[0][3] + vp[0][0];
     planes[0].B = vp[1][3] + vp[1][0];
     planes[0].C = vp[2][3] + vp[2][0];
     planes[0].D = vp[3][3] + vp[3][0];
     normalizePlane(planes[0]);
 
-    // right plane
+    // Right plane
     planes[1].A = vp[0][3] - vp[0][0];
     planes[1].B = vp[1][3] - vp[1][0];
     planes[1].C = vp[2][3] - vp[2][0];
     planes[1].D = vp[3][3] - vp[3][0];
     normalizePlane(planes[1]);
 
-    // bottom
+    // Bottom plane
     planes[2].A = vp[0][3] + vp[0][1];
     planes[2].B = vp[1][3] + vp[1][1];
     planes[2].C = vp[2][3] + vp[2][1];
     planes[2].D = vp[3][3] + vp[3][1];
     normalizePlane(planes[2]);
 
-    // top
+    // Top plane
     planes[3].A = vp[0][3] - vp[0][1];
     planes[3].B = vp[1][3] - vp[1][1];
     planes[3].C = vp[2][3] - vp[2][1];
     planes[3].D = vp[3][3] - vp[3][1];
     normalizePlane(planes[3]);
 
-    // near
+    // Near plane
     planes[4].A = vp[0][3] + vp[0][2];
     planes[4].B = vp[1][3] + vp[1][2];
     planes[4].C = vp[2][3] + vp[2][2];
     planes[4].D = vp[3][3] + vp[3][2];
     normalizePlane(planes[4]);
 
-    // far
+    // Far plane
     planes[5].A = vp[0][3] - vp[0][2];
     planes[5].B = vp[1][3] - vp[1][2];
     planes[5].C = vp[2][3] - vp[2][2];
@@ -102,7 +102,7 @@ bool Frustum::isAABBVisible(const glm::vec3& minB,
         return false;
     }
 
-    // b) Check line-of-sight from camera => bounding box center
+    // b) Check line-of-sight from camera => bounding-box center
     glm::vec3 center = 0.5f * (minB + maxB);
     if (isLineOccluded(cameraPos, center, chunkMgr))
     {
@@ -114,7 +114,7 @@ bool Frustum::isAABBVisible(const glm::vec3& minB,
     return true;
 }
 
-// 5) isLineOccluded => naive stepping
+// 5) isLineOccluded => naive stepping with additional constraints
 bool Frustum::isLineOccluded(const glm::vec3& start,
     const glm::vec3& end,
     const ChunkManager& chunkMgr) const
@@ -127,30 +127,37 @@ bool Frustum::isLineOccluded(const glm::vec3& start,
     // normalize direction
     dir /= length;
 
-
-    // If line length is beyond some max, skip or assume not occluded
-    const float MAX_OCCLUSION_DISTANCE = 2000.0f;
-    if (length > MAX_OCCLUSION_DISTANCE) {
-        // Either skip occlusion (return false => not occluded)
-        // or assume it's occluded, depending on preference
+    // ------------------------------------------------------------------------
+    //  a) Hard clamp: if line is beyond some maximum => skip occlusion entirely
+    // ------------------------------------------------------------------------
+    const float MAX_LINEOFSIGHT_DISTANCE = 512.0f; // you can tweak as needed
+    if (length > MAX_LINEOFSIGHT_DISTANCE) {
+        // We skip the check => treat as "not occluded"
         return false;
     }
-    // Increase step size to 4.0
-    const float stepSize = 4.0f;
+
+    // ------------------------------------------------------------------------
+    //  b) Increase step size => fewer samples
+    // ------------------------------------------------------------------------
+    const float stepSize = 8.0f; // bigger steps => fewer iterations
     float traveled = 0.0f;
 
     while (traveled < length)
     {
         glm::vec3 probe = start + dir * traveled;
-        if (isSolidAt(probe, chunkMgr)) {
+
+        // If we find a solid voxel => occluded
+        if (isSolidAt(probe, chunkMgr))
+        {
             return true;
         }
         traveled += stepSize;
     }
+
     return false;
 }
 
-// Optional helper => checks if 'pos' hits a solid voxel in chunkMgr
+// 6) isSolidAt => checks if 'pos' hits a solid voxel in chunkMgr
 bool Frustum::isSolidAt(const glm::vec3& pos,
     const ChunkManager& chunkMgr) const
 {
@@ -159,6 +166,7 @@ bool Frustum::isSolidAt(const glm::vec3& pos,
     int iy = static_cast<int>(std::floor(pos.y));
     int iz = static_cast<int>(std::floor(pos.z));
 
+    // Determine chunk coords
     int chunkX = (ix >= 0)
         ? (ix / Chunk::SIZE_X)
         : ((ix - Chunk::SIZE_X + 1) / Chunk::SIZE_X);
@@ -178,6 +186,8 @@ bool Frustum::isSolidAt(const glm::vec3& pos,
     int localX = ix - (chunkX * Chunk::SIZE_X);
     int localY = iy - (chunkY * Chunk::SIZE_Y);
     int localZ = iz - (chunkZ * Chunk::SIZE_Z);
+
+    // Bounds check
     if (localX < 0 || localX >= Chunk::SIZE_X ||
         localY < 0 || localY >= Chunk::SIZE_Y ||
         localZ < 0 || localZ >= Chunk::SIZE_Z)
@@ -189,12 +199,13 @@ bool Frustum::isSolidAt(const glm::vec3& pos,
     if (blockID <= 0) {
         return false; // air or invalid
     }
+
     // check if block is solid
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     return vt.isSolid;
 }
 
-// 6) buildCameraFrustum => typical usage
+// 7) buildCameraFrustum => typical usage
 Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
     // example: 45° vertical FOV, near=0.1, far=1000

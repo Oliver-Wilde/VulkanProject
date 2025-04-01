@@ -200,7 +200,7 @@ void PipelineManager::createVoxelPipelineFill(
     // 2) Vertex input
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = sizeof(float) * 6;
+    bindingDesc.stride = sizeof(float) * 6; // 3 for pos, 3 for color
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     VkVertexInputAttributeDescription attrDescs[2]{};
@@ -281,11 +281,13 @@ void PipelineManager::createVoxelPipelineFill(
     layoutInfo.pSetLayouts = &descriptorLayout;
 
     VkPipelineLayout pipelineLayout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr,
+        &pipelineLayout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout for fill pipeline!");
     }
 
-    // Depth-Stencil
+    // 9) Depth-stencil
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
@@ -294,7 +296,7 @@ void PipelineManager::createVoxelPipelineFill(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
-    // 9) Create pipeline
+    // 10) Create pipeline
     VkGraphicsPipelineCreateInfo pipelineCI{};
     pipelineCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineCI.stageCount = 2;
@@ -435,11 +437,12 @@ void PipelineManager::createVoxelPipelineWireframe(
     layoutInfo.pSetLayouts = &descriptorLayout;
 
     VkPipelineLayout pipelineLayout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout for wireframe pipeline!");
     }
 
-    // 9) Depth-stencil state
+    // 9) Depth-stencil
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
@@ -485,13 +488,11 @@ void PipelineManager::createVoxelOcclusionPipeline(
     const std::string& pipelineName,
     VkRenderPass renderPass,
     VkExtent2D viewportExtent,
-    VkDescriptorSetLayout descriptorLayout /* optional, if you do pushConstants for transforms */
+    VkDescriptorSetLayout descriptorLayout /* optional */
 )
 {
-    // Suppose we have a simpler vertex shader that draws bounding boxes only,
-    // or we reuse simple.vert with push constants for transforms.
+    // 1) Load occlusion shaders
     VkShaderModule vertModule = m_resourceMgr->loadShaderModule("shaders/occlusion.vert.spv");
-    // Possibly no fragment shader needed, or a trivial one that discards everything.
     VkShaderModule fragModule = m_resourceMgr->loadShaderModule("shaders/empty.frag.spv");
 
     VkPipelineShaderStageCreateInfo vertStage{};
@@ -500,9 +501,6 @@ void PipelineManager::createVoxelOcclusionPipeline(
     vertStage.module = vertModule;
     vertStage.pName = "main";
 
-    // You can skip fragment stage entirely by setting rasterizerDiscardEnable=VK_TRUE,
-    // but for occlusion queries we usually still need to run the depth test. 
-    // So let's keep a trivial frag shader that does nothing.
     VkPipelineShaderStageCreateInfo fragStage{};
     fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -511,17 +509,34 @@ void PipelineManager::createVoxelOcclusionPipeline(
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertStage, fragStage };
 
-    // Minimal vertex input => possibly none if we generate in the vertex shader
+    // 2) Vertex input
+    // If occlusion.vert uses "layout(location=0) in vec3 inPos;",
+    // we must define an attribute at location=0. 
+    // If your shader doesn't actually need that input, remove it from the shader or remove the attribute below.
+    VkVertexInputBindingDescription occBindingDesc{};
+    occBindingDesc.binding = 0;
+    occBindingDesc.stride = sizeof(float) * 3; // just a vec3
+    occBindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription occAttrDesc{};
+    occAttrDesc.binding = 0;
+    occAttrDesc.location = 0;  // matches "layout(location=0) in vec3"
+    occAttrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
+    occAttrDesc.offset = 0;
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    // no inputs => if we do pushConstant or instance data
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &occBindingDesc;
+    vertexInputInfo.vertexAttributeDescriptionCount = 1;
+    vertexInputInfo.pVertexAttributeDescriptions = &occAttrDesc;
 
-    // Input assembly
+    // 3) Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-    // Viewport/scissor
+    // 4) Viewport/scissor
     VkViewport viewport{};
     viewport.x = 0.f;
     viewport.y = 0.f;
@@ -541,27 +556,27 @@ void PipelineManager::createVoxelOcclusionPipeline(
     viewportState.scissorCount = 1;
     viewportState.pScissors = &scissor;
 
-    // Rasterizer => fill
+    // 5) Rasterizer => fill
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
-    rasterizer.rasterizerDiscardEnable = VK_FALSE; // must be false to do occlusion tests
+    rasterizer.rasterizerDiscardEnable = VK_FALSE; // must be false for occlusion queries to see geometry
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
 
-    // No color writes => set color blend to 0 
+    // 6) Color blend => disabled
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-    colorBlendAttachment.colorWriteMask = 0; // no writes
+    colorBlendAttachment.colorWriteMask = 0;
     colorBlendAttachment.blendEnable = VK_FALSE;
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.attachmentCount = 1; // must match # of color attachments in RenderPass
+    colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
 
-    // Depth test => must be ON
+    // 7) Depth test => must be on
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
@@ -570,38 +585,47 @@ void PipelineManager::createVoxelOcclusionPipeline(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
-    // Multisample => 1x
+    // 8) Multisampling => 1x
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    // Pipeline layout
+    // 9) Pipeline layout
+    // If your occlusion shader uses push constants (like "layout(push_constant) uniform ...")
+    // you MUST define a push constant range that includes VK_SHADER_STAGE_VERTEX_BIT.
+    // For example:
+    VkPushConstantRange pcRange{};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;  // if your occlusion.vert uses push constants
+    pcRange.offset = 0;
+    pcRange.size = sizeof(float) * 16;            // e.g. enough for a mat4
+
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
     if (descriptorLayout != VK_NULL_HANDLE)
     {
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &descriptorLayout;
     }
-    else
-    {
-        layoutInfo.setLayoutCount = 0;
-        layoutInfo.pSetLayouts = nullptr;
-    }
-    // no push constants for now
+
+    // If you do NOT use push constants in occlusion.vert, set rangeCount=0. 
+    // If you do, set this to 1, and pPushConstantRanges = &pcRange.
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pcRange;
 
     VkPipelineLayout pipelineLayout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr,
+        &pipelineLayout) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create pipeline layout for occlusion pipeline!");
     }
 
-    // Create pipeline
+    // 10) Create pipeline
     VkGraphicsPipelineCreateInfo pipeCI{};
     pipeCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipeCI.stageCount = 2;
     pipeCI.pStages = shaderStages;
-    pipeCI.pVertexInputState = &vertexInputInfo;
+    pipeCI.pVertexInputState = &vertexInputInfo;   // used if your vertex shader has location=0
     pipeCI.pInputAssemblyState = &inputAssembly;
     pipeCI.pViewportState = &viewportState;
     pipeCI.pRasterizationState = &rasterizer;
@@ -634,7 +658,7 @@ VkDescriptorSetLayout PipelineManager::createMVPDescriptorSetLayout()
     uboLayoutBinding.binding = 0;
     uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     uboLayoutBinding.descriptorCount = 1;
-    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; // MVP typically used in VS
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -642,8 +666,8 @@ VkDescriptorSetLayout PipelineManager::createMVPDescriptorSetLayout()
     layoutInfo.pBindings = &uboLayoutBinding;
 
     VkDescriptorSetLayout descriptorSetLayout;
-    if (vkCreateDescriptorSetLayout(m_context->getDevice(), &layoutInfo, nullptr, &descriptorSetLayout)
-        != VK_SUCCESS)
+    if (vkCreateDescriptorSetLayout(m_context->getDevice(), &layoutInfo, nullptr,
+        &descriptorSetLayout) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create descriptor set layout for MVP!");
     }
@@ -659,7 +683,8 @@ VkPipelineLayout PipelineManager::createEmptyPipelineLayout()
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 
     VkPipelineLayout layout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &layout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout!");
     }
     return layout;

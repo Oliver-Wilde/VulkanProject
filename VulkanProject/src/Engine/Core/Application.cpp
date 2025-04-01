@@ -9,9 +9,7 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
 
-// If ResourceManager is in Engine/Resources:
 #include "Engine/Resources/ResourceManager.h"
-// or if it’s in Engine/Utils, adjust accordingly.
 
 #include <stdexcept>
 #include <iostream>
@@ -49,14 +47,14 @@ void Application::init()
     // 5) Create ResourceManager
     m_resourceManager = new ResourceManager(m_vulkanCtx);
 
-    // 6) Create VoxelWorld, passing the same pointers
+    // 6) Create VoxelWorld
     m_voxelWorld = new VoxelWorld(m_vulkanCtx, m_resourceManager);
-    m_voxelWorld->setRenderer(m_renderer);
     m_voxelWorld->initWorld();
 
     // 7) Create Renderer
     m_renderer = new Renderer(m_vulkanCtx, m_window, m_voxelWorld);
-    
+    // Let voxelWorld know about renderer if needed
+    m_voxelWorld->setRenderer(m_renderer);
 
     m_renderer->setTime(m_time);
 
@@ -67,7 +65,6 @@ void Application::handleInput(Camera& cam, float dt)
 {
     GLFWwindow* window = m_window->getGLFWwindow();
 
-    // Example movement
     glm::vec3 direction(
         cos(glm::radians(cam.yaw)) * cos(glm::radians(cam.pitch)),
         sin(glm::radians(cam.pitch)),
@@ -106,6 +103,8 @@ void Application::runLoop()
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
     bool wireframeWasPressed = false;
 
+    size_t frameCount = 0;
+
     while (m_isRunning && !m_window->shouldClose())
     {
         m_window->pollEvents();
@@ -129,9 +128,18 @@ void Application::runLoop()
         }
         wireframeWasPressed = wireframeIsPressed;
 
-        // 4) Render
+        // One-frame-late approach for occlusion queries:
+        if (frameCount > 0)
+        {
+            // gather results from previous frame's pass
+            m_renderer->gatherOcclusionResults();
+        }
+
+        // 4) Render => includes resetting queries & new occlusion pass
         m_renderer->setCamera(camera);
         m_renderer->renderFrame();
+
+        frameCount++;
     }
 }
 
@@ -143,32 +151,37 @@ void Application::cleanup()
         m_voxelWorld = nullptr;
     }
 
-    // 2) Destroy renderer
+    // 2) Flush any leftover chunk buffers so they're destroyed
+    if (m_renderer) {
+        m_renderer->freeDeferredResources();
+    }
+
+    // 3) Destroy renderer
     if (m_renderer) {
         delete m_renderer;
         m_renderer = nullptr;
     }
 
-    // 3) Destroy resource manager
+    // 4) Destroy resource manager
     if (m_resourceManager) {
         delete m_resourceManager;
         m_resourceManager = nullptr;
     }
 
-    // 4) Vulkan context
+    // 5) Vulkan context
     if (m_vulkanCtx) {
         m_vulkanCtx->cleanup();
         delete m_vulkanCtx;
         m_vulkanCtx = nullptr;
     }
 
-    // 5) Window
+    // 6) Window
     if (m_window) {
         delete m_window;
         m_window = nullptr;
     }
 
-    // 6) Time
+    // 7) Time
     if (m_time) {
         delete m_time;
         m_time = nullptr;

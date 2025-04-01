@@ -11,7 +11,9 @@
 // Structs & Forward Declarations
 // -----------------------------------------------------------------------------
 
-// This structure holds both the pipeline and its layout.
+/**
+ * Holds both the pipeline and its layout.
+ */
 struct PipelineInfo {
     VkPipeline       pipeline = VK_NULL_HANDLE;       // Vulkan pipeline handle
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE; // Vulkan pipeline layout handle
@@ -33,10 +35,8 @@ public:
 
     // -----------------------------------------------------------------------------
     // 1) No-descriptor pipeline (fill mode)
-    //
     //    This pipeline doesn't require a descriptor set layout.
-    //    It can be used if you do not need to bind uniform buffers
-    //    or other resources.
+    //    It can be used if you do not need to bind uniform buffers.
     // -----------------------------------------------------------------------------
     void createVoxelPipeline(
         const std::string& pipelineName,
@@ -46,8 +46,7 @@ public:
 
     // -----------------------------------------------------------------------------
     // 2) "Fill" pipeline WITH descriptor layout
-    //
-    //    This pipeline supports a descriptor set for passing uniforms/textures.
+    //    This pipeline supports a descriptor set for passing uniforms or textures.
     // -----------------------------------------------------------------------------
     void createVoxelPipelineFill(
         const std::string& pipelineName,
@@ -58,7 +57,6 @@ public:
 
     // -----------------------------------------------------------------------------
     // 3) "Wireframe" pipeline WITH descriptor layout
-    //
     //    Similar to the fill pipeline, but renders in wireframe mode.
     // -----------------------------------------------------------------------------
     void createVoxelPipelineWireframe(
@@ -70,10 +68,9 @@ public:
 
     // -----------------------------------------------------------------------------
     // 4) "Occlusion" pipeline (depth-only)
-    //
     //    Pipeline for GPU occlusion queries (no color writes).
     //    Optionally references a descriptor layout if you want push constants
-    //    or uniform data in the vertex stage (e.g. bounding box transforms).
+    //    or uniform data in the vertex stage (e.g. bounding-box transforms).
     // -----------------------------------------------------------------------------
     void createVoxelOcclusionPipeline(
         const std::string& pipelineName,
@@ -94,15 +91,12 @@ public:
 
 private:
     // -----------------------------------------------------------------------------
-    // Create an empty pipeline layout (no descriptor sets bound)
+    // Creates an empty pipeline layout (no descriptor sets bound)
     // -----------------------------------------------------------------------------
     VkPipelineLayout createEmptyPipelineLayout();
 
 private:
-    // -----------------------------------------------------------------------------
-    // Member Variables
-    // -----------------------------------------------------------------------------
-    VulkanContext* m_context = nullptr;                           // Vulkan context pointer
-    ResourceManager* m_resourceMgr = nullptr;                     // Resource manager pointer
-    std::unordered_map<std::string, PipelineInfo> m_pipelines;    // Map of pipeline name -> PipelineInfo
+    VulkanContext* m_context = nullptr;                // Vulkan context
+    ResourceManager* m_resourceMgr = nullptr;          // Resource manager pointer
+    std::unordered_map<std::string, PipelineInfo> m_pipelines; // pipelines by name
 };

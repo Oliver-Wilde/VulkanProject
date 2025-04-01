@@ -6,11 +6,9 @@
 #include <stdexcept>
 #include <cstring> // for memcpy
 #include <iostream>
+#include <atomic>  // for atomic usage in global memory counter
 
-// [ADDED] For atomic usage in global memory counter
-#include <atomic>
-
-// [ADDED] A global/static atomic to track total GPU buffer usage:
+// A global/static atomic to track total GPU buffer usage:
 static std::atomic<size_t> g_totalGPUBufferBytes(0);
 
 static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024; // 4MB default
@@ -149,8 +147,9 @@ VkShaderModule ResourceManager::loadShaderModule(const std::string& filePath)
 
 // -------------------------------------------
 // createChunkBuffers => uses single staging
+//  => Now gracefully handles copy failures
 // -------------------------------------------
-void ResourceManager::createChunkBuffers(
+bool ResourceManager::createChunkBuffers(
     const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
     VkBuffer& outVertexBuffer,
@@ -158,10 +157,15 @@ void ResourceManager::createChunkBuffers(
     VkBuffer& outIndexBuffer,
     VkDeviceMemory& outIndexMemory)
 {
+    // We'll return a bool to indicate success/failure,
+    // so the caller knows if it worked or not.
+
+    // Calculate sizes
     VkDeviceSize vbSize = sizeof(Vertex) * verts.size();
     VkDeviceSize ibSize = sizeof(uint32_t) * inds.size();
 
     // 1) Create device-local buffers
+    //    (No changes here)
     createBuffer(
         vbSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -169,7 +173,6 @@ void ResourceManager::createChunkBuffers(
         outVertexBuffer,
         outVertexMemory
     );
-
     createBuffer(
         ibSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -178,7 +181,7 @@ void ResourceManager::createChunkBuffers(
         outIndexMemory
     );
 
-    // 2) Get or create staging buffer large enough for both vertex + index data
+    // 2) staging
     VkDeviceSize totalSize = vbSize + ibSize;
     auto stagingPair = getOrCreateStagingBuffer(totalSize);
     VkBuffer stagingBuf = stagingPair.first;
@@ -187,14 +190,12 @@ void ResourceManager::createChunkBuffers(
     // 3) Copy CPU data into staging
     VkDeviceSize vbOffset = 0;
     VkDeviceSize ibOffset = vbSize;
-
     if (vbSize > 0) {
         void* data = nullptr;
         vkMapMemory(m_context->getDevice(), stagingMem, vbOffset, vbSize, 0, &data);
         std::memcpy(data, verts.data(), static_cast<size_t>(vbSize));
         vkUnmapMemory(m_context->getDevice(), stagingMem);
     }
-
     if (ibSize > 0) {
         void* data = nullptr;
         vkMapMemory(m_context->getDevice(), stagingMem, ibOffset, ibSize, 0, &data);
@@ -202,23 +203,57 @@ void ResourceManager::createChunkBuffers(
         vkUnmapMemory(m_context->getDevice(), stagingMem);
     }
 
-    // 4) Copy from stagingBuf => device-local for vertex + index
-    // We'll do two distinct copy regions
-    if (vbSize > 0) {
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = vbOffset;
-        copyRegion.dstOffset = 0;
-        copyRegion.size = vbSize;
-        copyBufferRegions(stagingBuf, outVertexBuffer, &copyRegion, 1);
+    // 4) Attempt the copy with a try/catch block
+    try
+    {
+        // Copy from staging => device-local vertex buffer
+        if (vbSize > 0)
+        {
+            VkBufferCopy copyV{};
+            copyV.srcOffset = vbOffset;
+            copyV.dstOffset = 0;
+            copyV.size = vbSize;
+            copyBufferRegions(stagingBuf, outVertexBuffer, &copyV, 1); // can throw
+        }
+        if (ibSize > 0)
+        {
+            VkBufferCopy copyI{};
+            copyI.srcOffset = ibOffset;
+            copyI.dstOffset = 0;
+            copyI.size = ibSize;
+            copyBufferRegions(stagingBuf, outIndexBuffer, &copyI, 1);  // can throw
+        }
+    }
+    catch (const std::exception& e)
+    {
+        // Something failed inside copyBufferRegions (likely vkQueueSubmit).
+        // So we must clean up the newly created buffers to avoid a GPU leak.
+
+        std::cerr << "[ResourceManager] createChunkBuffers: Caught exception: "
+            << e.what() << std::endl;
+
+        // We allocated these, so let's destroy them so they're not left behind:
+        if (outVertexBuffer != VK_NULL_HANDLE || outVertexMemory != VK_NULL_HANDLE)
+        {
+            destroyChunkBuffers(outVertexBuffer, outVertexMemory,
+                VK_NULL_HANDLE, VK_NULL_HANDLE);
+            outVertexBuffer = VK_NULL_HANDLE;
+            outVertexMemory = VK_NULL_HANDLE;
+        }
+        if (outIndexBuffer != VK_NULL_HANDLE || outIndexMemory != VK_NULL_HANDLE)
+        {
+            destroyChunkBuffers(VK_NULL_HANDLE, VK_NULL_HANDLE,
+                outIndexBuffer, outIndexMemory);
+            outIndexBuffer = VK_NULL_HANDLE;
+            outIndexMemory = VK_NULL_HANDLE;
+        }
+
+        // Instead of rethrowing, we just log and return false:
+        return false;
     }
 
-    if (ibSize > 0) {
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = ibOffset;
-        copyRegion.dstOffset = 0;
-        copyRegion.size = ibSize;
-        copyBufferRegions(stagingBuf, outIndexBuffer, &copyRegion, 1);
-    }
+    // If we reach here, everything succeeded:
+    return true;
 }
 
 // -------------------------------------------
@@ -229,11 +264,10 @@ void ResourceManager::destroyChunkBuffers(
     VkBuffer ib, VkDeviceMemory ibMem)
 {
     if (vb != VK_NULL_HANDLE) {
-        // Optionally re-query memory size to subtract from global usage
         VkMemoryRequirements memReq;
         vkGetBufferMemoryRequirements(m_context->getDevice(), vb, &memReq);
 
-        // [ADDED] decrement usage
+        // Decrement usage
         g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
 
         vkDestroyBuffer(m_context->getDevice(), vb, nullptr);
@@ -246,7 +280,6 @@ void ResourceManager::destroyChunkBuffers(
         VkMemoryRequirements memReq;
         vkGetBufferMemoryRequirements(m_context->getDevice(), ib, &memReq);
 
-        // [ADDED] decrement usage
         g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
 
         vkDestroyBuffer(m_context->getDevice(), ib, nullptr);
@@ -290,7 +323,7 @@ void ResourceManager::createBuffer(
 
     vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 
-    // [ADDED] Increase global GPU usage
+    // Increase global GPU usage
     g_totalGPUBufferBytes.fetch_add(memReq.size, std::memory_order_relaxed);
 }
 
@@ -434,7 +467,7 @@ uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags 
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-// [ADDED] A simple getter so the UI or other code can read total GPU usage
+// A simple getter so the UI or other code can read total GPU usage
 size_t ResourceManager::GetTotalGPUBufferBytes() const
 {
     return g_totalGPUBufferBytes.load(std::memory_order_relaxed);

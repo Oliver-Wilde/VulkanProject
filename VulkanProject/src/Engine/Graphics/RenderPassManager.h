@@ -58,13 +58,13 @@ public:
     void createOcclusionRenderPass();
 
     /**
-     * Creates a single (or multiple) occlusion pass framebuffer(s) using a
-     * smaller depth image at m_occlusionExtent.
+     * Creates one or more occlusion pass framebuffer(s) using a smaller depth image
+     * at m_occlusionExtent.
      */
     void createOcclusionFramebuffers();
 
     /**
-     * Returns the occlusion render pass.
+     * Returns the occlusion render pass (depth-only).
      */
     VkRenderPass getOcclusionRenderPass() const { return m_occlusionRenderPass; }
 
@@ -74,14 +74,14 @@ public:
     const std::vector<VkFramebuffer>& getOcclusionFramebuffers() const { return m_occlusionFramebuffers; }
 
     /**
-     * Set the resolution for the occlusion pass. Typically smaller than swapchain extent.
+     * Sets the resolution for the occlusion pass. Typically smaller than
+     * the swapchain extent for performance reasons.
      */
     void setOcclusionExtent(VkExtent2D extent) { m_occlusionExtent = extent; }
 
 private:
     // Creates the depth image + memory + view for the main pass
     void createDepthResources();
-
     // Utility to pick memory type
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
@@ -103,22 +103,22 @@ private:
     VkImageView    m_depthImageView = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_framebuffers;
 
-    // We pick a single hardcoded depth format for simplicity
+    // Hardcoded depth format for the main pass
     const VkFormat m_depthFormat = VK_FORMAT_D32_SFLOAT;
 
     // -------------------------------------------------------------------------
-    // Occlusion pass (optional)
+    // Occlusion pass (depth-only)
     // -------------------------------------------------------------------------
     VkRenderPass               m_occlusionRenderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_occlusionFramebuffers;
 
-    // Depth resources for occlusion pass
+    // Depth resources for the occlusion pass
     VkImage        m_occlusionDepthImage = VK_NULL_HANDLE;
     VkDeviceMemory m_occlusionDepthMemory = VK_NULL_HANDLE;
     VkImageView    m_occlusionDepthView = VK_NULL_HANDLE;
 
     // Format and extent for the occlusion pass
-    // Could differ from main pass resolution
-    VkFormat    m_occlusionDepthFormat = VK_FORMAT_D32_SFLOAT;
-    VkExtent2D  m_occlusionExtent = { 256, 256 }; // example default
+    // (Can differ from the main pass resolution)
+    VkFormat   m_occlusionDepthFormat = VK_FORMAT_D32_SFLOAT;
+    VkExtent2D m_occlusionExtent = { 256, 256 }; // default example
 };

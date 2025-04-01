@@ -645,6 +645,8 @@
     <None Include="External Libraries\glm\gtx\vector_angle.inl" />
     <None Include="External Libraries\glm\gtx\vector_query.inl" />
     <None Include="External Libraries\glm\gtx\wrap.inl" />
+    <None Include="shaders\empty.frag" />
+    <None Include="shaders\occlusion.vert" />
     <None Include="shaders\simple.frag" />
     <None Include="shaders\simple.vert" />
   </ItemGroup>
