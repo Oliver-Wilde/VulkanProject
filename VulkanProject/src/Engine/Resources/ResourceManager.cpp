@@ -7,6 +7,7 @@
 #include <cstring> // for memcpy
 #include <iostream>
 #include <atomic>  // for atomic usage in global memory counter
+#include <Engine/Utils/Logger.h>
 
 // A global/static atomic to track total GPU buffer usage:
 static std::atomic<size_t> g_totalGPUBufferBytes(0);
@@ -263,29 +264,43 @@ void ResourceManager::destroyChunkBuffers(
     VkBuffer vb, VkDeviceMemory vbMem,
     VkBuffer ib, VkDeviceMemory ibMem)
 {
-    if (vb != VK_NULL_HANDLE) {
+    // Log them for debugging
+    Logger::Info("destroyChunkBuffers => vb=" + std::to_string((uint64_t)vb) +
+        " vbMem=" + std::to_string((uint64_t)vbMem) +
+        " ib=" + std::to_string((uint64_t)ib) +
+        " ibMem=" + std::to_string((uint64_t)ibMem));
+
+    if (vb != VK_NULL_HANDLE)
+    {
+        // Also log if vkGetBufferMemoryRequirements fails
         VkMemoryRequirements memReq;
         vkGetBufferMemoryRequirements(m_context->getDevice(), vb, &memReq);
 
-        // Decrement usage
         g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
 
         vkDestroyBuffer(m_context->getDevice(), vb, nullptr);
+        vb = VK_NULL_HANDLE;
     }
-    if (vbMem != VK_NULL_HANDLE) {
+    if (vbMem != VK_NULL_HANDLE)
+    {
         vkFreeMemory(m_context->getDevice(), vbMem, nullptr);
+        vbMem = VK_NULL_HANDLE;
     }
 
-    if (ib != VK_NULL_HANDLE) {
+    if (ib != VK_NULL_HANDLE)
+    {
         VkMemoryRequirements memReq;
         vkGetBufferMemoryRequirements(m_context->getDevice(), ib, &memReq);
 
         g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
 
         vkDestroyBuffer(m_context->getDevice(), ib, nullptr);
+        ib = VK_NULL_HANDLE;
     }
-    if (ibMem != VK_NULL_HANDLE) {
+    if (ibMem != VK_NULL_HANDLE)
+    {
         vkFreeMemory(m_context->getDevice(), ibMem, nullptr);
+        ibMem = VK_NULL_HANDLE;
     }
 }
 

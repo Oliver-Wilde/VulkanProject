@@ -1,20 +1,23 @@
 #version 450
 
-// A simple vertex shader that expects a push constant containing a 4x4 matrix
-// and a single attribute (location=0) for the vertex position.
-//
-// If you want to do bounding boxes, you can pass inPos as the 8 corners or more.
-
-layout(location = 0) in vec3 inPos;
-
-// We'll define a push constant block with a single transform (MVP or anything you like).
-layout(push_constant) uniform PushConstantData
+layout(push_constant) uniform PCData
 {
-    mat4 transform;
+    vec3 center;    // (cx, cy, cz)
+    vec3 scale;     // (sx, sy, sz)
 } pc;
+
+// If you have a uniform buffer for the MVP:
+layout(set = 0, binding = 0) uniform MVPBlock
+{
+    mat4 mvp;
+} ubo;
+
+layout(location = 0) in vec3 inPos;  // Vertex position for the 1󪻑 cube
 
 void main()
 {
-    // Multiply inPos by our transform to get clip-space position.
-    gl_Position = pc.transform * vec4(inPos, 1.0);
+    // Expand the 1󪻑 cube to chunk size, then offset to chunk center
+    vec3 worldPos = pc.center + pc.scale * inPos;
+
+    gl_Position = ubo.mvp * vec4(worldPos, 1.0);
 }

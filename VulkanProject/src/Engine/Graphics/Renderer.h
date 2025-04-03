@@ -97,18 +97,14 @@ public:
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
     /**
-     * Gather results from last frame's occlusion queries,
-     * storing them into m_chunkVisibility. Then
-     * the next pass can safely reset queries.
-     *
-     * Make this public so Application.cpp can call it
-     * in the one-frame-late approach.
+     * Gather results from the previous frame's occlusion queries,
+     * storing them into m_chunkVisibility.
      */
     void gatherOcclusionResults();
 
     /**
-     * Called typically in Application::cleanup() to ensure
-     * all chunk buffers queued for destruction are actually freed
+     * Called in e.g. Application::cleanup() to ensure
+     * all chunk buffers queued for destruction are freed
      * before the device is destroyed.
      */
     void freeDeferredResources();
@@ -142,6 +138,11 @@ private:
     );
 
     /**
+     * Copies data from src to dst buffer using a transient command buffer.
+     */
+    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+
+    /**
      * Finds a memory type from the GPU that fits 'filter' and 'props'.
      */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
@@ -169,7 +170,7 @@ private:
     /// Array to hold raw fragment-passed results for each query.
     std::vector<uint64_t> m_queryResults;
 
-    /// A boolean array to record whether each query indicates “visible” (>0) or “occluded” (0).
+    /// Boolean array indicating whether each query was visible (>0) or occluded (0).
     std::vector<bool> m_chunkVisibility;
 
     /// Maps a Chunk pointer to a query index.
@@ -177,17 +178,16 @@ private:
 
     /**
      * Runs a pass to draw bounding boxes for each chunk, issuing occlusion queries.
-     * Typically done in a smaller or separate depth-only pass, rather than the main pass.
      */
     void renderOcclusionPass(VkCommandBuffer cmdBuf);
 
     /**
-     * Actually draws the bounding box for a chunk, enclosed by Begin/EndQuery.
+     * Draws a bounding box for the chunk, wrapped in Begin/EndQuery.
      */
     void drawBoundingBox(Chunk* chunk, VkCommandBuffer cmdBuf);
 
     /**
-     * Assigns a query index to a chunk. If we run out of queries, we skip that chunk.
+     * Assigns a query index to a chunk.
      */
     void setQueryIndexForChunk(Chunk* chunk, uint32_t index);
 
@@ -195,6 +195,15 @@ private:
      * Retrieves the query index for a chunk, or -1 if none assigned.
      */
     int getQueryIndexForChunk(Chunk* chunk);
+
+    // ------------------------------------------------------------------------
+    // BBox for Occlusion
+    // ------------------------------------------------------------------------
+
+    /**
+     * Creates the GPU vertex buffer for a 1×1×1 cube. Used in the occlusion pass.
+     */
+    void initDummyBBox();
 
 private:
     // ------------------------------------------------------------------------
@@ -216,20 +225,27 @@ private:
     // Swap chain + MVP data
     // ------------------------------------------------------------------------
     class SwapChain* m_swapChain = nullptr;
-    VkBuffer         m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory   m_mvpMemory = VK_NULL_HANDLE;
-    VkDescriptorPool m_mvpDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet  m_mvpDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer             m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory       m_mvpMemory = VK_NULL_HANDLE;
+    VkDescriptorPool     m_mvpDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet      m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
-    // For ring-buffer chunk destruction
+    // ------------------------------------------------------------------------
+    // Dummy bounding box for occlusion pass
+    // ------------------------------------------------------------------------
+    VkBuffer       m_dummyBBoxVB = VK_NULL_HANDLE;
+    VkDeviceMemory m_dummyBBoxMem = VK_NULL_HANDLE;
+    uint32_t       m_dummyBBoxVertexCount = 0;
+
+    // Deferred frees for chunk buffers
     std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
     // Per-frame resources
-    FrameResources   m_frames[MAX_FRAMES_IN_FLIGHT];
-    int              m_currentFrame = 0;
+    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
+    int            m_currentFrame = 0;
 
-    // If using Time for dt/fps
+    // Optional pointer to a Time class for dt/fps tracking
     Time* m_time = nullptr;
 
     // Toggles

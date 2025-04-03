@@ -28,11 +28,12 @@
 #include <array>
 #include <limits>
 
+// Global thread pool
 extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler; // global CPU profiler
 
 // We'll define a max chunk query count for occlusion
-static const uint32_t MAX_OCCLUSION_QUERIES = 4096;
+static const uint32_t MAX_OCCLUSION_QUERIES_UB = 4096; // for local usage
 
 // ------------------------------------------------------------------------------
 Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
@@ -53,8 +54,8 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
-    // Also create occlusion pass
-      // Make them match
+    // --- Make sure we set the occlusion extent before building occlusion pass ---
+    m_rpManager->setOcclusionExtent(m_swapChain->getExtent());
     m_rpManager->createOcclusionRenderPass();
     m_rpManager->createOcclusionFramebuffers();
 
@@ -66,14 +67,16 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    VkExtent2D scExtent = m_swapChain->getExtent();
-
     // Create occlusion pipeline with the occlusion render pass
-    m_pipelineMgr->createVoxelOcclusionPipeline("voxel_occlusion",
+    m_pipelineMgr->createVoxelOcclusionPipeline(
+        "voxel_occlusion",
         m_rpManager->getOcclusionRenderPass(),
-        scExtent,       // pass the real extent, not nullptr
-        VK_NULL_HANDLE
+        extent,
+        m_mvpLayout
     );
+
+    // NEW: Initialize the dummy bounding box buffer after we have our managers set up.
+    initDummyBBox(); // <--- THIS IS NEW
 
     // 5) Create MVP uniform buffer
     createMVPUniformBuffer();
@@ -130,6 +133,7 @@ Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorl
         qpInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         qpInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
         qpInfo.queryCount = MAX_OCCLUSION_QUERIES;
+
         if (vkCreateQueryPool(m_context->getDevice(), &qpInfo, nullptr,
             &m_occlusionQueryPool) != VK_SUCCESS)
         {
@@ -176,6 +180,18 @@ Renderer::~Renderer()
                 nullptr);
             m_frames[i].inFlightFence = VK_NULL_HANDLE;
         }
+    }
+
+    // Free dummy BBox buffer
+    if (m_dummyBBoxVB)
+    {
+        vkDestroyBuffer(m_context->getDevice(), m_dummyBBoxVB, nullptr);
+        m_dummyBBoxVB = VK_NULL_HANDLE;
+    }
+    if (m_dummyBBoxMem)
+    {
+        vkFreeMemory(m_context->getDevice(), m_dummyBBoxMem, nullptr);
+        m_dummyBBoxMem = VK_NULL_HANDLE;
     }
 
     // MVP buffer cleanup
@@ -241,6 +257,80 @@ Renderer::~Renderer()
     }
 }
 
+// NEW: Implementation of initDummyBBox() (the function we call in the constructor)
+void Renderer::initDummyBBox()
+{
+    // A 1󪻑 cube with 36 vertices (two triangles per face � 6 faces).
+    // Centered at (0,0,0). Each line: (x, y, z).
+    static const float s_cubeVertices[36 * 3] = {
+        // front
+        -0.5f, -0.5f, +0.5f,
+        +0.5f, -0.5f, +0.5f,
+        +0.5f, +0.5f, +0.5f,
+        +0.5f, +0.5f, +0.5f,
+        -0.5f, +0.5f, +0.5f,
+        -0.5f, -0.5f, +0.5f,
+
+        // back
+        +0.5f, -0.5f, -0.5f,
+        -0.5f, -0.5f, -0.5f,
+        -0.5f, +0.5f, -0.5f,
+        -0.5f, +0.5f, -0.5f,
+        +0.5f, +0.5f, -0.5f,
+        +0.5f, -0.5f, -0.5f,
+
+        // left
+        -0.5f, -0.5f, -0.5f,
+        -0.5f, -0.5f, +0.5f,
+        -0.5f, +0.5f, +0.5f,
+        -0.5f, +0.5f, +0.5f,
+        -0.5f, +0.5f, -0.5f,
+        -0.5f, -0.5f, -0.5f,
+
+        // right
+        +0.5f, -0.5f, +0.5f,
+        +0.5f, -0.5f, -0.5f,
+        +0.5f, +0.5f, -0.5f,
+        +0.5f, +0.5f, -0.5f,
+        +0.5f, +0.5f, +0.5f,
+        +0.5f, +0.5f, +0.5f,
+
+        // top
+        -0.5f, +0.5f, +0.5f,
+        +0.5f, +0.5f, +0.5f,
+        +0.5f, +0.5f, -0.5f,
+        +0.5f, +0.5f, -0.5f,
+        -0.5f, +0.5f, -0.5f,
+        -0.5f, +0.5f, +0.5f,
+
+        // bottom
+        -0.5f, -0.5f, -0.5f,
+        +0.5f, -0.5f, -0.5f,
+        +0.5f, -0.5f, +0.5f,
+        +0.5f, -0.5f, +0.5f,
+        -0.5f, -0.5f, +0.5f,
+        -0.5f, -0.5f, -0.5f
+    };
+
+    m_dummyBBoxVertexCount = 36;  // total vertices
+    VkDeviceSize vbSize = sizeof(s_cubeVertices);
+
+    // Create a buffer with HOST_VISIBLE so we can map & copy directly.
+    createBuffer(
+        vbSize,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        m_dummyBBoxVB,
+        m_dummyBBoxMem
+    );
+
+    // Map & copy
+    void* data = nullptr;
+    vkMapMemory(m_context->getDevice(), m_dummyBBoxMem, 0, vbSize, 0, &data);
+    memcpy(data, s_cubeVertices, vbSize);
+    vkUnmapMemory(m_context->getDevice(), m_dummyBBoxMem);
+}
+
 // ------------------------------------------------------------------------------
 void Renderer::setTime(Time* time)
 {
@@ -277,7 +367,7 @@ void Renderer::freeDeferredResources()
 // ------------------------------------------------------------------------------
 void Renderer::renderFrame()
 {
-    static bool firstFrame = true; // one-frame-late approach
+    static bool firstFrame = true;
 
     CpuProfiler::ScopedTimer timerFrame("Renderer::renderFrame");
 
@@ -296,7 +386,14 @@ void Renderer::renderFrame()
     // 3) reset fence
     vkResetFences(m_context->getDevice(), 1, &m_frames[m_currentFrame].inFlightFence);
 
-    // 4) acquire swapchain image
+    // 4) gather occlusion results from the PREVIOUS frame
+    if (!firstFrame)
+    {
+        gatherOcclusionResults(); // no WAIT_BIT needed
+    }
+    firstFrame = false;
+
+    // 5) acquire swapchain image
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         m_context->getDevice(),
@@ -317,7 +414,7 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to acquire swapchain image!");
     }
 
-    // 5) reset + begin cmd buffer
+    // 6) reset + begin cmd buffer
     VkCommandBuffer cmdBuf = m_frames[m_currentFrame].commandBuffer;
     vkResetCommandBuffer(cmdBuf, 0);
 
@@ -328,15 +425,10 @@ void Renderer::renderFrame()
         throw std::runtime_error("Failed to begin cmd buffer!");
     }
 
-    // skip gatherOcclusionResults() on the first frame
-    if (!firstFrame) {
-        gatherOcclusionResults();
-    }
-
     // do an occlusion pass first
     renderOcclusionPass(cmdBuf);
 
-    // 6) main render pass
+    // 7) main render pass
     VkClearValue clearVals[2];
     clearVals[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clearVals[1].depthStencil = { 1.f, 0 };
@@ -552,8 +644,6 @@ void Renderer::renderFrame()
 
     // 14) next frame
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    firstFrame = false; // subsequent frames will gather results
 }
 
 // ------------------------------------------------------------------------------
@@ -577,11 +667,13 @@ void Renderer::createMVPUniformBuffer()
 {
     VkDeviceSize bufferSize = sizeof(MVPBlock);
 
-    createBuffer(bufferSize,
+    createBuffer(
+        bufferSize,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_mvpBuffer,
-        m_mvpMemory);
+        m_mvpMemory
+    );
 
     // create descriptor pool
     VkDescriptorPoolSize poolSize{};
@@ -631,6 +723,7 @@ void Renderer::createMVPUniformBuffer()
     vkUpdateDescriptorSets(m_context->getDevice(), 1, &descWrite, 0, nullptr);
 }
 
+// ------------------------------------------------------------------------------
 void Renderer::updateMVP()
 {
     glm::mat4 model = glm::mat4(1.f);
@@ -652,40 +745,69 @@ void Renderer::updateMVP()
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
 
-void Renderer::createBuffer(
-    VkDeviceSize size,
-    VkBufferUsageFlags usage,
-    VkMemoryPropertyFlags properties,
-    VkBuffer& buffer,
-    VkDeviceMemory& bufferMemory)
+// ------------------------------------------------------------------------------
+void Renderer::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 {
-    VkBufferCreateInfo bufInfo{};
-    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufInfo.size = size;
-    bufInfo.usage = usage;
-    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &buffer) != VK_SUCCESS)
-    {
-        throw std::runtime_error("Failed to create buffer!");
+    if (size == 0) {
+        return;
     }
 
-    VkMemoryRequirements memReq;
-    vkGetBufferMemoryRequirements(m_context->getDevice(), buffer, &memReq);
+    VkCommandPool   cmdPool = m_context->getCommandPool();
+    VkQueue         gfxQueue = m_context->getGraphicsQueue();
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReq.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, properties);
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = cmdPool;
+    allocInfo.commandBufferCount = 1;
 
-    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
+    VkCommandBuffer cmdBuf;
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS)
     {
-        throw std::runtime_error("Failed to allocate buffer memory!");
+        throw std::runtime_error("Failed to allocate staging command buffer!");
     }
 
-    vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    VkBufferCopy copyRegion{};
+    copyRegion.size = size;
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+
+    vkCmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion);
+
+    vkEndCommandBuffer(cmdBuf);
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+    VkFence copyFence;
+    if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &copyFence) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to create fence for copyBuffer!");
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS)
+    {
+        vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+        throw std::runtime_error("Failed to submit copy command buffer!");
+    }
+
+    vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
+
+    vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
 }
 
+// ------------------------------------------------------------------------------
 uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties memProps;
@@ -702,6 +824,7 @@ uint32_t Renderer::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
+// ------------------------------------------------------------------------------
 void Renderer::recreateSwapChain()
 {
     int width = 0, height = 0;
@@ -724,6 +847,7 @@ void Renderer::recreateSwapChain()
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
+    // crucial: update occlusion extent again
     m_rpManager->setOcclusionExtent(m_swapChain->getExtent());
     m_rpManager->createOcclusionRenderPass();
     m_rpManager->createOcclusionFramebuffers();
@@ -739,13 +863,12 @@ void Renderer::recreateSwapChain()
     m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
     m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
 
-    VkExtent2D scExtent = m_swapChain->getExtent();
-    // Re-create occlusion pipeline
+    // IMPORTANT: now pass m_mvpLayout here
     m_pipelineMgr->createVoxelOcclusionPipeline(
         "voxel_occlusion",
         m_rpManager->getOcclusionRenderPass(),
-        m_swapChain->getExtent(),  // Instead of nullptr
-        VK_NULL_HANDLE
+        extent,
+        m_mvpLayout
     );
 
     // 5) re-create MVP
@@ -771,19 +894,18 @@ void Renderer::recreateSwapChain()
 // ------------------------------------------------------------------------------
 void Renderer::gatherOcclusionResults()
 {
-    // We do a blocking read (VK_QUERY_RESULT_WAIT_BIT)
+    // We do a non-blocking get, because we already waited on the fence
     vkGetQueryPoolResults(
         m_context->getDevice(),
         m_occlusionQueryPool,
-        0, // firstQuery
+        0,
         MAX_OCCLUSION_QUERIES,
         sizeof(uint64_t) * m_queryResults.size(),
         m_queryResults.data(),
         sizeof(uint64_t),
-        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+        VK_QUERY_RESULT_64_BIT
     );
 
-    // If m_queryResults[i] == 0 => geometry had zero samples => occluded
     for (uint32_t i = 0; i < MAX_OCCLUSION_QUERIES; i++)
     {
         m_chunkVisibility[i] = (m_queryResults[i] > 0);
@@ -794,6 +916,9 @@ void Renderer::gatherOcclusionResults()
 // ------------------------------------------------------------------------------
 void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
 {
+    // 1) RESET the entire query pool *outside* the render pass
+    vkCmdResetQueryPool(cmdBuf, m_occlusionQueryPool, 0, MAX_OCCLUSION_QUERIES);
+
     // We do an offscreen pass with the occlusion render pass
     VkExtent2D scExtent = m_swapChain->getExtent();
 
@@ -811,12 +936,19 @@ void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
 
     vkCmdBeginRenderPass(cmdBuf, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 1) BIND occlusion pipeline
+    // 2) BIND occlusion pipeline
     auto pipelineInfo = m_pipelineMgr->getPipeline("voxel_occlusion");
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.pipeline);
 
-    // 2) RESET the entire query pool
-    vkCmdResetQueryPool(cmdBuf, m_occlusionQueryPool, 0, MAX_OCCLUSION_QUERIES);
+    // 2a) BIND the same descriptor set used for MVP
+    vkCmdBindDescriptorSets(
+        cmdBuf,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        pipelineInfo.pipelineLayout,
+        0, 1,
+        &m_mvpDescriptorSet,
+        0, nullptr
+    );
 
     // 3) For each chunk => begin/end query
     if (m_voxelWorld)
@@ -827,9 +959,10 @@ void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
 
         for (auto& kv : allChunks)
         {
+            if (queryIndex >= MAX_OCCLUSION_QUERIES) break;
+
             Chunk* chunk = kv.second.get();
             if (!chunk) continue;
-            if (queryIndex >= MAX_OCCLUSION_QUERIES) break;
 
             glm::vec3 minB, maxB;
             chunk->getBoundingBox(minB, maxB);
@@ -837,7 +970,7 @@ void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
             float dist = glm::distance(center, m_camera.position);
             if (dist > MAX_OCCLUSION_RANGE)
             {
-                // assume visible if too far => skip actual bounding box
+                // assume visible if too far => skip bounding box
                 setQueryIndexForChunk(chunk, queryIndex);
                 m_chunkVisibility[queryIndex] = true;
                 queryIndex++;
@@ -850,12 +983,10 @@ void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
             // begin query
             vkCmdBeginQuery(cmdBuf, m_occlusionQueryPool, queryIndex, 0);
 
-            // 4) draw bounding box
+            // 4) draw bounding box or minimal geometry
             drawBoundingBox(chunk, cmdBuf);
 
-            // end query
             vkCmdEndQuery(cmdBuf, m_occlusionQueryPool, queryIndex);
-
             queryIndex++;
         }
     }
@@ -866,8 +997,38 @@ void Renderer::renderOcclusionPass(VkCommandBuffer cmdBuf)
 // ------------------------------------------------------------------------------
 void Renderer::drawBoundingBox(Chunk* chunk, VkCommandBuffer cmdBuf)
 {
-    // If you had a bounding box VB or push-constant approach, you抎 do it here.
-    // For now, we might do nothing or a simple draw that covers the chunk region in the vertex shader.
+    // Compute chunk center
+    float cx = (chunk->worldX() + 0.5f) * Chunk::SIZE_X;
+    float cy = (chunk->worldY() + 0.5f) * Chunk::SIZE_Y;
+    float cz = (chunk->worldZ() + 0.5f) * Chunk::SIZE_Z;
+
+    // Prepare push-constant data => center + chunk dimensions
+    struct {
+        float x, y, z;   // center
+        float sx, sy, sz; // scale
+    } pcData{
+        cx, cy, cz,
+        static_cast<float>(Chunk::SIZE_X),
+        static_cast<float>(Chunk::SIZE_Y),
+        static_cast<float>(Chunk::SIZE_Z)
+    };
+
+    auto pipelineInfo = m_pipelineMgr->getPipeline("voxel_occlusion");
+    vkCmdPushConstants(
+        cmdBuf,
+        pipelineInfo.pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(pcData),
+        &pcData
+    );
+
+    // Bind our dummyBBox VB (a 1󪻑 cube)
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(cmdBuf, 0, 1, &m_dummyBBoxVB, offsets);
+
+    // Issue draw => 36 vertices for the 1󪻑 cube
+    vkCmdDraw(cmdBuf, m_dummyBBoxVertexCount, 1, 0, 0);
 }
 
 // ------------------------------------------------------------------------------
@@ -903,4 +1064,44 @@ float Renderer::computeAverage(const std::deque<float>& buffer)
     for (auto val : buffer)
         sum += val;
     return (sum / float(buffer.size()));
+}
+
+
+void Renderer::createBuffer(
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    VkBuffer& buffer,
+    VkDeviceMemory& bufferMemory
+)
+{
+    // 1) Create the VkBuffer
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(m_context->getDevice(), &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to create buffer!");
+    }
+
+    // 2) Get memory requirements
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(m_context->getDevice(), buffer, &memReq);
+
+    // 3) Allocate memory
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, properties);
+
+    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
+    {
+        throw std::runtime_error("Failed to allocate buffer memory!");
+    }
+
+    // 4) Bind buffer and memory
+    vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
 }

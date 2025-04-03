@@ -1,9 +1,8 @@
 #version 450
 
-// This fragment shader does no color output.
-// It's used in a depth-only occlusion pass.
-
+// We discard color output so it never writes to color attachments
+// (in a depth-only pass, there is no color attachment anyway)
 void main()
 {
-    // No outputs => depth test only.
+    // No output
 }

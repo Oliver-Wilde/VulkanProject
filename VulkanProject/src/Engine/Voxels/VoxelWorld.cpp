@@ -17,22 +17,20 @@
 #include <thread>
 #include <sstream>
 
-// Thread pool declared externally:
+// Global thread pool
 extern ThreadPool g_threadPool;
 
-// ------------------------------------------------------------------------
 // Stats for measuring meshing times
-// ------------------------------------------------------------------------
 static double s_totalMeshTime = 0.0;
 static int    s_meshCount = 0;
 
-// Protects multi-lod results
+// Protect multi-lod results
 static std::mutex s_resultMutex;
 static std::vector<MultiLODResult> s_pendingLODResults;
 
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 // Constructor / Destructor
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
     : m_context(context)
     , m_resourceManager(resourceMgr)
@@ -42,56 +40,52 @@ VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
 
 VoxelWorld::~VoxelWorld()
 {
-    // Clean up GPU buffers for all chunks.
+    // Clean up GPU buffers for all chunks
     auto& allChunks = m_chunkManager.getAllChunks();
     for (auto& kv : allChunks)
     {
-        if (Chunk* chunk = kv.second.get())
-        {
-            // For each LOD, queue ring-buffer destruction
-            for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; lod++)
-            {
-                auto& lodData = chunk->getLODData(lod);
-                if (lodData.vertexBuffer || lodData.indexBuffer)
-                {
-                    if (m_renderer)
-                    {
-                        QueuedChunkDestruction qcd;
-                        qcd.vb = lodData.vertexBuffer;
-                        qcd.vbMem = lodData.vertexMemory;
-                        qcd.ib = lodData.indexBuffer;
-                        qcd.ibMem = lodData.indexMemory;
-                        m_renderer->enqueueDeferredDestroy(qcd);
-                    }
+        Chunk* chunk = kv.second.get();
+        if (!chunk) continue;
 
-                    lodData.vertexBuffer = VK_NULL_HANDLE;
-                    lodData.vertexMemory = VK_NULL_HANDLE;
-                    lodData.indexBuffer = VK_NULL_HANDLE;
-                    lodData.indexMemory = VK_NULL_HANDLE;
-                    lodData.vertexCount = 0;
-                    lodData.indexCount = 0;
+        // For each LOD, queue ring-buffer destruction
+        for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; lod++)
+        {
+            auto& ld = chunk->getLODData(lod);
+            if (ld.vertexBuffer || ld.indexBuffer)
+            {
+                if (m_renderer)
+                {
+                    QueuedChunkDestruction qcd;
+                    qcd.vb = ld.vertexBuffer;
+                    qcd.vbMem = ld.vertexMemory;
+                    qcd.ib = ld.indexBuffer;
+                    qcd.ibMem = ld.indexMemory;
+                    m_renderer->enqueueDeferredDestroy(qcd);
                 }
+
+                // Nullify them so we never free them again
+                ld.vertexBuffer = VK_NULL_HANDLE;
+                ld.vertexMemory = VK_NULL_HANDLE;
+                ld.indexBuffer = VK_NULL_HANDLE;
+                ld.indexMemory = VK_NULL_HANDLE;
+                ld.vertexCount = 0;
+                ld.indexCount = 0;
             }
         }
     }
 }
 
-// ------------------------------------------------------------------------
-// setRenderer
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::setRenderer(Renderer* renderer)
 {
     m_renderer = renderer;
 }
 
-// ------------------------------------------------------------------------
-// initWorld => generate initial chunks around origin
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::initWorld()
 {
     Logger::Info("VoxelWorld::initWorld() => generating initial region.");
 
-    // We only generate at y=0 for simplicity
     int minCy = 0;
     int maxCy = 0;
 
@@ -120,114 +114,74 @@ void VoxelWorld::initWorld()
     Logger::Info("initWorld() => queued chunk tasks around origin.");
 }
 
-// ------------------------------------------------------------------------
-// updateChunksAroundPlayer => ring-buffer load/unload + LOD scheduling
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
-    // Convert to chunk coords
-    int centerX = static_cast<int>(std::floor(playerPosX / float(Chunk::SIZE_X)));
-    int centerZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
+    int centerX = int(std::floor(playerPosX / float(Chunk::SIZE_X)));
+    int centerZ = int(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-    // For now, only y=0
-    int minCy = 0;
-    int maxCy = 0;
-
-    // 1) Identify newly in-range chunks
+    // 1) Identify new chunks
+    std::vector<ChunkCoord> toLoad;
+    for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
     {
-        std::vector<ChunkCoord> toLoad;
-        toLoad.reserve((2 * VIEW_DISTANCE + 1) * (2 * VIEW_DISTANCE + 1));
-
-        for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
+        for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
         {
-            for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
+            if (!m_chunkManager.hasChunk(cx, 0, cz))
             {
-                for (int cy = minCy; cy <= maxCy; ++cy)
-                {
-                    if (!m_chunkManager.hasChunk(cx, cy, cz))
-                    {
-                        toLoad.push_back({ cx, cy, cz });
-                    }
-                }
+                toLoad.push_back({ cx, 0, cz });
             }
-        }
-
-        // Sort nearest first
-        auto distSq = [&](const ChunkCoord& cc)
-            {
-                int dx = cc.x - centerX;
-                int dz = cc.z - centerZ;
-                return dx * dx + dz * dz;
-            };
-        std::sort(toLoad.begin(), toLoad.end(),
-            [&](auto& a, auto& b) {return distSq(a) < distSq(b); });
-
-        for (auto& cc : toLoad)
-        {
-            m_chunksToLoad.push_back(cc);
         }
     }
 
-    // 2) Identify out-of-range chunks
-    {
-        const auto& allChunks = m_chunkManager.getAllChunks();
-        std::vector<ChunkCoord> outOfRange;
-        outOfRange.reserve(allChunks.size());
+    // Sort nearest-first
+    auto distSq = [&](const ChunkCoord& cc) {
+        int dx = cc.x - centerX;
+        int dz = cc.z - centerZ;
+        return dx * dx + dz * dz;
+        };
+    std::sort(toLoad.begin(), toLoad.end(), [&](auto& a, auto& b) {
+        return distSq(a) < distSq(b);
+        });
 
-        for (auto& kv : allChunks)
-        {
-            const ChunkCoord& cc = kv.first;
-            int dx = std::abs(cc.x - centerX);
-            int dz = std::abs(cc.z - centerZ);
-            if (dx > VIEW_DISTANCE || dz > VIEW_DISTANCE)
-            {
-                outOfRange.push_back(cc);
-            }
-        }
-
-        for (auto& cc : outOfRange)
-        {
-            m_chunksToUnload.push_back(cc);
-        }
-    }
-
-    // 3) Batch loading
-    const int LOAD_BUDGET = 250;
+    // 2) Strict load budget
+    const int LOAD_BUDGET = 5;
     int loadedCount = 0;
-    while (!m_chunksToLoad.empty() && loadedCount < LOAD_BUDGET)
+    for (auto& c : toLoad)
     {
-        ChunkCoord c = m_chunksToLoad.front();
-        m_chunksToLoad.pop_front();
+        if (loadedCount >= LOAD_BUDGET) break;
         loadOneChunk(c);
         loadedCount++;
     }
 
-    // 4) Batch unloading
-    const int UNLOAD_BUDGET = 250;
-    const int UNLOAD_BATCHSIZE = 20;
-
-    int unloadedCount = 0;
-    int batchCount = 0;
-    while (!m_chunksToUnload.empty() &&
-        unloadedCount < UNLOAD_BUDGET &&
-        batchCount < UNLOAD_BATCHSIZE)
+    // 3) Identify out-of-range => remove
+    std::vector<ChunkCoord> toUnload;
+    const auto& allChunks = m_chunkManager.getAllChunks();
+    for (auto& kv : allChunks)
     {
-        ChunkCoord c = m_chunksToUnload.front();
-        m_chunksToUnload.pop_front();
-
-        unloadOneChunk(c);
-        unloadedCount++;
-        batchCount++;
+        const ChunkCoord& cc = kv.first;
+        if (std::abs(cc.x - centerX) > VIEW_DISTANCE ||
+            std::abs(cc.z - centerZ) > VIEW_DISTANCE)
+        {
+            toUnload.push_back(cc);
+        }
     }
 
-    // 5) schedule LOD building + poll results
+    // 4) Strict unload budget
+    const int UNLOAD_BUDGET = 5;
+    int unloadedCount = 0;
+    for (auto& c : toUnload)
+    {
+        if (unloadedCount >= UNLOAD_BUDGET) break;
+        unloadOneChunk(c);
+        unloadedCount++;
+    }
+
+    // 5) schedule meshing
     scheduleMeshingForDirtyChunks();
     pollMeshBuildResults();
 }
 
-// ------------------------------------------------------------------------
-// loadOneChunk => create + queue generation
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::loadOneChunk(const ChunkCoord& c)
 {
     CpuProfiler::ScopedTimer timeLoad("VoxelWorld::loadOneChunk");
@@ -251,26 +205,21 @@ void VoxelWorld::loadOneChunk(const ChunkCoord& c)
     );
 }
 
-// ------------------------------------------------------------------------
-// unloadOneChunk => ring-buffer destroy & remove
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
 {
     CpuProfiler::ScopedTimer timeUnload("VoxelWorld::unloadOneChunk");
 
     Chunk* chunk = m_chunkManager.getChunk(c.x, c.y, c.z);
-    if (!chunk)
-    {
-        return; // not existing
-    }
+    if (!chunk) return;
 
-    // Wait if chunk is still uploading
+    // If chunk is still uploading => re-queue
     if (chunk->isUploading())
     {
-        Logger::Info("unloadOneChunk => chunk uploading, re-queue: " +
-            std::to_string(c.x) + "," +
-            std::to_string(c.y) + "," +
-            std::to_string(c.z));
+        Logger::Info("unloadOneChunk => chunk uploading, re-queue: "
+            + std::to_string(c.x) + ","
+            + std::to_string(c.y) + ","
+            + std::to_string(c.z));
         m_chunksToUnload.push_back(c);
         return;
     }
@@ -290,6 +239,7 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
                 qcd.ibMem = ld.indexMemory;
                 m_renderer->enqueueDeferredDestroy(qcd);
 
+                // Immediately null them out => avoid double-free
                 ld.vertexBuffer = VK_NULL_HANDLE;
                 ld.vertexMemory = VK_NULL_HANDLE;
                 ld.indexBuffer = VK_NULL_HANDLE;
@@ -300,17 +250,15 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
         }
     }
 
-    Logger::Info("unloadOneChunk => removing chunk (" +
-        std::to_string(c.x) + "," +
-        std::to_string(c.y) + "," +
-        std::to_string(c.z) + ")");
+    Logger::Info("unloadOneChunk => removing chunk ("
+        + std::to_string(c.x) + ","
+        + std::to_string(c.y) + ","
+        + std::to_string(c.z) + ")");
 
     m_chunkManager.removeChunk(c.x, c.y, c.z);
 }
 
-// ------------------------------------------------------------------------
-// scheduleMeshingForDirtyChunks => multi-lod only
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
     CpuProfiler::ScopedTimer timeSched("VoxelWorld::scheduleMeshing");
@@ -322,17 +270,17 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
         ? static_cast<const IMesher*>(&m_greedyMesher)
         : static_cast<const IMesher*>(&m_naiveMesher);
 
-    // For each chunk that is dirty & normal => build LOD
     for (auto& kv : all)
     {
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
         if (!chunk->isDirty()) continue;
 
-        // If chunk is uniform empty or uniform solid => no geometry
+        // If chunk is uniform => skip
         if (chunk->getState() != Chunk::ChunkState::NORMAL)
         {
             chunk->clearDirty();
+            chunk->setIsUploading(false);
             continue;
         }
 
@@ -357,7 +305,6 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
 
                 auto tEnd = std::chrono::high_resolution_clock::now();
                 double sec = std::chrono::duration<double>(tEnd - tBegin).count();
-
                 s_totalMeshTime += sec;
                 s_meshCount++;
 
@@ -372,62 +319,43 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
     }
 }
 
-// ------------------------------------------------------------------------
-// pollMeshBuildResults => finalize LOD GPU uploads
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
+// pollMeshBuildResults => read s_pendingLODResults, finalize
+// -------------------------------------------------------------
 void VoxelWorld::pollMeshBuildResults()
 {
-    static std::deque<MultiLODResult> leftover;
-
-    // Move fresh results into leftover
+    // Grab all results that were finished so far
+    std::vector<MultiLODResult> results;
     {
-        std::vector<MultiLODResult> local;
+        std::lock_guard<std::mutex> lk(s_resultMutex);
+        if (!s_pendingLODResults.empty())
         {
-            std::lock_guard<std::mutex> lk(s_resultMutex);
-            if (!s_pendingLODResults.empty())
-            {
-                local.swap(s_pendingLODResults);
-            }
-        }
-        for (auto& r : local)
-        {
-            leftover.push_back(std::move(r));
+            results.swap(s_pendingLODResults);
         }
     }
 
-    // Process a limited number each frame
-    static const int MAX_UPLOADS_PER_FRAME = 25;
-    int processed = 0;
-
-    while (!leftover.empty() && processed < MAX_UPLOADS_PER_FRAME)
+    for (auto& mlr : results)
     {
-        MultiLODResult mlr = std::move(leftover.front());
-        leftover.pop_front();
         finalizeMultiLOD(mlr);
-        if (mlr.chunkPtr)
-        {
-            mlr.chunkPtr->setIsUploading(false);
-        }
-        processed++;
     }
 }
 
-// ------------------------------------------------------------------------
-// finalizeMultiLOD => put LOD geometry on the GPU
-// ------------------------------------------------------------------------
+// -------------------------------------------------------------
 void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
 {
     Chunk* c = mlr.chunkPtr;
     if (!c) return;
 
+    // For each LOD
     for (int i = 0; i < MultiLODResult::MAX_LODS; i++)
     {
         auto& newLOD = mlr.lods[i];
         auto& oldData = c->getLODData(i);
 
-        // ring-buffer free old
+        // Enqueue the old buffers for destruction
         if (m_renderer &&
-            (oldData.vertexBuffer != VK_NULL_HANDLE || oldData.indexBuffer != VK_NULL_HANDLE))
+            (oldData.vertexBuffer != VK_NULL_HANDLE ||
+                oldData.indexBuffer != VK_NULL_HANDLE))
         {
             QueuedChunkDestruction qcd;
             qcd.vb = oldData.vertexBuffer;
@@ -437,7 +365,7 @@ void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
             m_renderer->enqueueDeferredDestroy(qcd);
         }
 
-        // Reset to null
+        // Immediately set them to null
         oldData.vertexBuffer = VK_NULL_HANDLE;
         oldData.vertexMemory = VK_NULL_HANDLE;
         oldData.indexBuffer = VK_NULL_HANDLE;
@@ -450,45 +378,74 @@ void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
         {
             VkBuffer vb, ib;
             VkDeviceMemory vbMem, ibMem;
-            m_resourceManager->createChunkBuffers(newLOD.verts, newLOD.inds, vb, vbMem, ib, ibMem);
-
-            oldData.vertexBuffer = vb;
-            oldData.vertexMemory = vbMem;
-            oldData.indexBuffer = ib;
-            oldData.indexMemory = ibMem;
-            oldData.vertexCount = static_cast<uint32_t>(newLOD.verts.size());
-            oldData.indexCount = static_cast<uint32_t>(newLOD.inds.size());
-
-            // Optional: store an error metric if the LODMesher provided it
-            if (i < static_cast<int>(newLOD.lodErrors.size()))
+            bool success = m_resourceManager->createChunkBuffers(
+                newLOD.verts, newLOD.inds,
+                vb, vbMem, ib, ibMem
+            );
+            if (success)
             {
-                float eVal = newLOD.lodErrors[i];
-                c->setLODErrorValue(i, eVal);
+                oldData.vertexBuffer = vb;
+                oldData.vertexMemory = vbMem;
+                oldData.indexBuffer = ib;
+                oldData.indexMemory = ibMem;
+                oldData.vertexCount = static_cast<uint32_t>(newLOD.verts.size());
+                oldData.indexCount = static_cast<uint32_t>(newLOD.inds.size());
             }
-            else
-            {
-                c->setLODErrorValue(i, 0.f);
-            }
-            c->setLODGenerated(i, true);
+
+            // if createChunkBuffers failed, chunk remains with null buffers
+            // to avoid partial GPU leaks
         }
         else
         {
-            // No geometry => skip
             c->setLODGenerated(i, false);
             c->setLODErrorValue(i, 0.f);
+            continue;
         }
+
+        // optional: store an error metric
+        if (i < static_cast<int>(newLOD.lodErrors.size()))
+        {
+            c->setLODErrorValue(i, newLOD.lodErrors[i]);
+        }
+        else
+        {
+            c->setLODErrorValue(i, 0.f);
+        }
+        c->setLODGenerated(i, true);
     }
+
+    // Mark chunk as done uploading
+    c->setIsUploading(false);
 }
 
-// ------------------------------------------------------------------------
-// getAvgMeshTime => simple statistic
-// ------------------------------------------------------------------------
-double VoxelWorld::getAvgMeshTime()
-{
-    if (s_meshCount == 0) return 0.0;
-    return s_totalMeshTime / double(s_meshCount);
-}
+//// -------------------------------------------------------------
+//bool VoxelWorld::isUsingMultiLOD() const
+//{
+//    return m_useMultiLOD;
+//}
+//
+//// -------------------------------------------------------------
+//void VoxelWorld::setUseMultiLOD(bool enable)
+//{
+//    m_useMultiLOD = enable;
+//}
 
-// No duplicates of isUsingMultiLOD, setUseMultiLOD, setMesherType, etc. 
-// left here, because they've already been defined inline in VoxelWorld.h 
-// or we've removed them to avoid "already has a body" errors.
+// -------------------------------------------------------------
+//bool VoxelWorld::isChunkVisible(Chunk* chunk) const
+//{
+//    // Not used if using occlusion pass
+//    return true;
+//}
+
+//// -------------------------------------------------------------
+//void VoxelWorld::setMesherType(MesherType t)
+//{
+//    m_currentMesherType = t;
+//}
+
+//// -------------------------------------------------------------
+//VoxelWorld::MesherType VoxelWorld::getMesherType() const
+//{
+//    return m_currentMesherType;
+//}
+
