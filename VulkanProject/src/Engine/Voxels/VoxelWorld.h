@@ -116,7 +116,7 @@ private:
     bool m_useMultiLOD = true;
 
     // Chunk streaming distance
-    static constexpr int VIEW_DISTANCE = 24;
+    static constexpr int VIEW_DISTANCE = 4;
 
     // Queues to handle loading/unloading
     std::deque<ChunkCoord> m_chunksToLoad;

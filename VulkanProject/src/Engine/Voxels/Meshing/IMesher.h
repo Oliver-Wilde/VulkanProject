@@ -6,14 +6,15 @@
 #include "../Chunk.h"
 #include "../ChunkManager.h"
 
-// The actual struct definition here:
+// A packed vertex with position (x,y,z) and color in RGBA8 format.
 struct Vertex
 {
-    float x, y, z;
-    float r, g, b;
+    float x, y, z;      // 12 bytes for position
+    uint32_t color;     // 4 bytes for packed color (R8G8B8A8, etc.)
 
-    Vertex(float X, float Y, float Z, float R, float G, float B)
-        : x(X), y(Y), z(Z), r(R), g(G), b(B)
+    // Constructor takes position + a packed color integer
+    Vertex(float X, float Y, float Z, uint32_t packedColor)
+        : x(X), y(Y), z(Z), color(packedColor)
     {}
 };
 

@@ -1,7 +1,7 @@
 #include "PipelineManager.h"
 #include "Engine/Resources/ResourceManager.h"
 #include "Engine/Graphics/VulkanContext.h"
-
+#include "Engine/Voxels/Meshing/IMesher.h"
 #include <stdexcept>
 
 //--------------------------------------
@@ -50,22 +50,27 @@ void PipelineManager::createVoxelPipeline(
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertStage, fragStage };
 
-    // Vertex Input (pos + color => 6 floats)
+    // Vertex input => we now want 16-byte vertices as well. If you truly don't
+    // use descriptors here, you can keep it simpler, but let's unify the format:
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = sizeof(float) * 6;
+    bindingDesc.stride = sizeof(Vertex); // match Vertex from IMesher.h
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
+    // pos(3 floats) + color(packed RGBA8)
     VkVertexInputAttributeDescription attrDescs[2]{};
+
+    // position => layout(location=0)
     attrDescs[0].binding = 0;
     attrDescs[0].location = 0;
     attrDescs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrDescs[0].offset = 0;
 
+    // color => layout(location=1)
     attrDescs[1].binding = 0;
     attrDescs[1].location = 1;
-    attrDescs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDescs[1].offset = sizeof(float) * 3;
+    attrDescs[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+    attrDescs[1].offset = offsetof(Vertex, color); // 12 bytes offset
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -89,7 +94,7 @@ void PipelineManager::createVoxelPipeline(
     viewport.maxDepth = 1.f;
 
     VkRect2D scissor{};
-    scissor.offset = { 0,0 };
+    scissor.offset = { 0, 0 };
     scissor.extent = viewportExtent;
 
     VkPipelineViewportStateCreateInfo viewportState{};
@@ -133,8 +138,6 @@ void PipelineManager::createVoxelPipeline(
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_TRUE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable = VK_FALSE;
 
     // Pipeline layout (no descriptor sets)
     VkPipelineLayout pipelineLayout = createEmptyPipelineLayout();
@@ -178,9 +181,6 @@ void PipelineManager::createVoxelPipelineFill(
     VkExtent2D viewportExtent,
     VkDescriptorSetLayout descriptorLayout)
 {
-    // Same as the "no descriptor" fill, but we include the descriptor layout
-    // And also add the depth-stencil block
-
     // 1) Load shaders
     VkShaderModule vertModule = m_resourceMgr->loadShaderModule("shaders/simple.vert.spv");
     VkShaderModule fragModule = m_resourceMgr->loadShaderModule("shaders/simple.frag.spv");
@@ -200,21 +200,26 @@ void PipelineManager::createVoxelPipelineFill(
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertStage, fragStage };
 
     // 2) Vertex input
+    //    We're now using a 16-byte struct: (x, y, z) + (uint32_t color).
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = sizeof(float) * 6;
+    bindingDesc.stride = sizeof(Vertex);   // <-- updated for our new Vertex
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
+    // We'll have two attributes: pos(3 floats) and color(packed RGBA8).
     VkVertexInputAttributeDescription attrDescs[2]{};
+
+    // (a) Position => layout(location=0): VK_FORMAT_R32G32B32_SFLOAT
     attrDescs[0].binding = 0;
     attrDescs[0].location = 0;
     attrDescs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDescs[0].offset = 0;
+    attrDescs[0].offset = 0;  // x,y,z start at byte offset 0
 
+    // (b) Color => layout(location=1): VK_FORMAT_R8G8B8A8_UNORM
     attrDescs[1].binding = 0;
     attrDescs[1].location = 1;
-    attrDescs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDescs[1].offset = sizeof(float) * 3;
+    attrDescs[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+    attrDescs[1].offset = offsetof(Vertex, color); // 12 bytes after x,y,z
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -238,7 +243,7 @@ void PipelineManager::createVoxelPipelineFill(
     viewport.maxDepth = 1.f;
 
     VkRect2D scissor{};
-    scissor.offset = { 0,0 };
+    scissor.offset = { 0, 0 };
     scissor.extent = viewportExtent;
 
     VkPipelineViewportStateCreateInfo viewportState{};
@@ -248,7 +253,7 @@ void PipelineManager::createVoxelPipelineFill(
     viewportState.scissorCount = 1;
     viewportState.pScissors = &scissor;
 
-    // 5) Rasterizer => fill
+    // 5) Rasterizer => fill mode
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
@@ -276,18 +281,19 @@ void PipelineManager::createVoxelPipelineFill(
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
 
-    // 8) Layout with descriptor
+    // 8) Pipeline layout referencing our descriptor for MVP
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &descriptorLayout;
 
     VkPipelineLayout pipelineLayout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout for fill pipeline!");
     }
 
-    // Depth-Stencil
+    // 9) Depth-stencil
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
@@ -296,7 +302,7 @@ void PipelineManager::createVoxelPipelineFill(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
-    // 9) Create pipeline
+    // 10) Create the graphics pipeline
     VkGraphicsPipelineCreateInfo pipelineCI{};
     pipelineCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineCI.stageCount = 2;
@@ -310,15 +316,21 @@ void PipelineManager::createVoxelPipelineFill(
     pipelineCI.layout = pipelineLayout;
     pipelineCI.renderPass = renderPass;
     pipelineCI.subpass = 0;
-    pipelineCI.pDepthStencilState = &depthStencil; // enable depth
+    pipelineCI.pDepthStencilState = &depthStencil; // enable depth testing
 
     VkPipeline pipeline;
-    if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1,
-        &pipelineCI, nullptr, &pipeline) != VK_SUCCESS)
+    if (vkCreateGraphicsPipelines(
+        m_context->getDevice(),
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCI,
+        nullptr,
+        &pipeline) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create voxel FILL pipeline!");
     }
 
+    // 11) Store pipeline info
     PipelineInfo info;
     info.pipeline = pipeline;
     info.pipelineLayout = pipelineLayout;
@@ -328,6 +340,10 @@ void PipelineManager::createVoxelPipelineFill(
 //--------------------------------------
 // createVoxelPipelineWireframe
 // => Wireframe mode, WITH descriptor
+//--------------------------------------
+//--------------------------------------
+// createVoxelPipelineWireframe
+// => Wireframe mode, but same vertex format
 //--------------------------------------
 void PipelineManager::createVoxelPipelineWireframe(
     const std::string& pipelineName,
@@ -353,22 +369,25 @@ void PipelineManager::createVoxelPipelineWireframe(
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertStage, fragStage };
 
-    // 2) Vertex input
+    // 2) Vertex input => same as fill pipeline (x,y,z + packed RGBA8 color).
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = sizeof(float) * 6;
+    bindingDesc.stride = sizeof(Vertex);
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     VkVertexInputAttributeDescription attrDescs[2]{};
+
+    // position => layout(location=0)
     attrDescs[0].binding = 0;
     attrDescs[0].location = 0;
     attrDescs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrDescs[0].offset = 0;
 
+    // color => layout(location=1)
     attrDescs[1].binding = 0;
     attrDescs[1].location = 1;
-    attrDescs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDescs[1].offset = sizeof(float) * 3;
+    attrDescs[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+    attrDescs[1].offset = offsetof(Vertex, color);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -392,7 +411,7 @@ void PipelineManager::createVoxelPipelineWireframe(
     viewport.maxDepth = 1.f;
 
     VkRect2D scissor{};
-    scissor.offset = { 0,0 };
+    scissor.offset = { 0, 0 };
     scissor.extent = viewportExtent;
 
     VkPipelineViewportStateCreateInfo viewportState{};
@@ -407,7 +426,7 @@ void PipelineManager::createVoxelPipelineWireframe(
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE; // wireframe
     rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
@@ -437,18 +456,17 @@ void PipelineManager::createVoxelPipelineWireframe(
     layoutInfo.pSetLayouts = &descriptorLayout;
 
     VkPipelineLayout pipelineLayout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout for wireframe pipeline!");
     }
 
-    // 9) Depth-stencil state
+    // 9) Depth-stencil
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_TRUE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable = VK_FALSE;
 
     // 10) Create pipeline
     VkGraphicsPipelineCreateInfo pipelineCI{};
@@ -464,11 +482,16 @@ void PipelineManager::createVoxelPipelineWireframe(
     pipelineCI.layout = pipelineLayout;
     pipelineCI.renderPass = renderPass;
     pipelineCI.subpass = 0;
-    pipelineCI.pDepthStencilState = &depthStencil; // enable depth
+    pipelineCI.pDepthStencilState = &depthStencil;
 
     VkPipeline pipeline;
-    if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1,
-        &pipelineCI, nullptr, &pipeline) != VK_SUCCESS)
+    if (vkCreateGraphicsPipelines(
+        m_context->getDevice(),
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCI,
+        nullptr,
+        &pipeline) != VK_SUCCESS)
     {
         throw std::runtime_error("Failed to create voxel WIREFRAME pipeline!");
     }
@@ -513,7 +536,8 @@ VkPipelineLayout PipelineManager::createEmptyPipelineLayout()
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 
     VkPipelineLayout layout;
-    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &layout) != VK_SUCCESS)
+    {
         throw std::runtime_error("Failed to create pipeline layout!");
     }
     return layout;

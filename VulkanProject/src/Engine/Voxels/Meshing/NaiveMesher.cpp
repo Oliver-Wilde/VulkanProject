@@ -7,7 +7,25 @@
 #include <vector>
 #include <cmath>
 
-// Helper function: check if the given voxel ID corresponds to a solid voxel.
+// Helper function to pack float color into uint32_t RGBA8.
+static uint32_t packColor(float r, float g, float b)
+{
+    // clamp
+    if (r < 0.f) r = 0.f; if (r > 1.f) r = 1.f;
+    if (g < 0.f) g = 0.f; if (g > 1.f) g = 1.f;
+    if (b < 0.f) b = 0.f; if (b > 1.f) b = 1.f;
+
+    uint32_t R = static_cast<uint32_t>(r * 255.0f);
+    uint32_t G = static_cast<uint32_t>(g * 255.0f);
+    uint32_t B = static_cast<uint32_t>(b * 255.0f);
+    uint32_t A = 255; // full opacity
+
+    // Store as 0xAABBGGRR by default
+    // (The exact ordering is up to you, but your fragment shader should match.)
+    return (A << 24) | (B << 16) | (G << 8) | (R << 0);
+}
+
+// Helper function: check if the given voxel ID is a solid voxel.
 static bool isSolidID(int voxelID) {
     if (voxelID < 0)
         return false;
@@ -15,8 +33,7 @@ static bool isSolidID(int voxelID) {
     return vt.isSolid;
 }
 
-// Helper function: checks if the voxel at global coordinates is solid.
-// If the coordinates are out-of-bounds in the current chunk, it checks the neighboring chunk.
+// Helper: checks if the voxel at (x,y,z) is solid. If out-of-bounds, checks neighbor chunk.
 static bool isSolidGlobal(
     const Chunk& currentChunk,
     int cx, int cy, int cz,
@@ -64,10 +81,12 @@ bool NaiveMesher::generateMesh(
             for (int z = 0; z < Chunk::SIZE_Z; z++) {
                 int voxelID = chunk.getBlock(x, y, z);
                 if (voxelID <= 0)
-                    continue; // Skip air voxels.
+                    continue; // Skip air.
 
+                // Grab the voxel color
                 const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
                 float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+                uint32_t packedColor = packColor(r, g, b);
 
                 float baseX = static_cast<float>(x + offsetX);
                 float baseY = static_cast<float>(y + offsetY);
@@ -76,10 +95,10 @@ bool NaiveMesher::generateMesh(
                 // +X face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x + 1, y, z, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);
@@ -91,10 +110,10 @@ bool NaiveMesher::generateMesh(
                 // -X face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x - 1, y, z, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);
@@ -106,10 +125,10 @@ bool NaiveMesher::generateMesh(
                 // +Y face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x, y + 1, z, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);
@@ -121,10 +140,10 @@ bool NaiveMesher::generateMesh(
                 // -Y face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x, y - 1, z, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);
@@ -136,10 +155,10 @@ bool NaiveMesher::generateMesh(
                 // +Z face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x, y, z + 1, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, r, g, b));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ + 1, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ + 1, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);
@@ -151,10 +170,10 @@ bool NaiveMesher::generateMesh(
                 // -Z face
                 if (!isSolidGlobal(chunk, cx, cy, cz, x, y, z - 1, manager)) {
                     int startIdx = static_cast<int>(outVertices.size());
-                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, r, g, b));
-                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, r, g, b));
+                    outVertices.push_back(Vertex(baseX + 1, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX, baseY + 1, baseZ, packedColor));
+                    outVertices.push_back(Vertex(baseX + 1, baseY + 1, baseZ, packedColor));
 
                     outIndices.push_back(startIdx + 0);
                     outIndices.push_back(startIdx + 1);

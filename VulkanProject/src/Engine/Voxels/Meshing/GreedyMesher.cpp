@@ -9,6 +9,27 @@
 #include <stdexcept>
 #include <algorithm>
 
+// -----------------------------------------------------------------------------
+// Helper to pack float color [0..1] into a 32-bit RGBA8 format.
+// -----------------------------------------------------------------------------
+static uint32_t packColor(float r, float g, float b)
+{
+    // Clamp each channel
+    if (r < 0.f) r = 0.f; if (r > 1.f) r = 1.f;
+    if (g < 0.f) g = 0.f; if (g > 1.f) g = 1.f;
+    if (b < 0.f) b = 0.f; if (b > 1.f) b = 1.f;
+
+    uint32_t R = static_cast<uint32_t>(r * 255.0f);
+    uint32_t G = static_cast<uint32_t>(g * 255.0f);
+    uint32_t B = static_cast<uint32_t>(b * 255.0f);
+    uint32_t A = 255; // full opacity
+
+    // Typically RGBA is in the order: A << 24 | B << 16 | G << 8 | R.
+    // But you can reorder if you prefer BGRA or something else in the shader.
+    // We'll store it as 0xAABBGGRR (little-endian machine reads it as RGBA).
+    return (A << 24) | (B << 16) | (G << 8) | (R << 0);
+}
+
 //-------------------- Utility Functions for Building Quads --------------------
 
 // +Z face
@@ -22,6 +43,7 @@ static void buildQuadPosZ(
     // Inline getVoxel => color
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float zPos = static_cast<float>(z + 1 + offsetZ);
     float X0 = static_cast<float>(startX + offsetX);
@@ -30,10 +52,10 @@ static void buildQuadPosZ(
     float Y1 = static_cast<float>(startY + height + offsetY);
 
     int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(X0, Y0, zPos, r, g, b));
-    outVertices.push_back(Vertex(X1, Y0, zPos, r, g, b));
-    outVertices.push_back(Vertex(X1, Y1, zPos, r, g, b));
-    outVertices.push_back(Vertex(X0, Y1, zPos, r, g, b));
+    outVertices.push_back(Vertex(X0, Y0, zPos, packedColor));
+    outVertices.push_back(Vertex(X1, Y0, zPos, packedColor));
+    outVertices.push_back(Vertex(X1, Y1, zPos, packedColor));
+    outVertices.push_back(Vertex(X0, Y1, zPos, packedColor));
 
     // Indices
     outIndices.push_back(startIndex + 0);
@@ -54,6 +76,7 @@ static void buildQuadNegZ(
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float zPos = static_cast<float>(z + offsetZ);
     float X0 = static_cast<float>(startX + offsetX);
@@ -63,10 +86,10 @@ static void buildQuadNegZ(
 
     int startIndex = static_cast<int>(outVertices.size());
     // Reverse winding for -Z
-    outVertices.push_back(Vertex(X1, Y0, zPos, r, g, b));
-    outVertices.push_back(Vertex(X0, Y0, zPos, r, g, b));
-    outVertices.push_back(Vertex(X0, Y1, zPos, r, g, b));
-    outVertices.push_back(Vertex(X1, Y1, zPos, r, g, b));
+    outVertices.push_back(Vertex(X1, Y0, zPos, packedColor));
+    outVertices.push_back(Vertex(X0, Y0, zPos, packedColor));
+    outVertices.push_back(Vertex(X0, Y1, zPos, packedColor));
+    outVertices.push_back(Vertex(X1, Y1, zPos, packedColor));
 
     outIndices.push_back(startIndex + 0);
     outIndices.push_back(startIndex + 1);
@@ -86,6 +109,7 @@ static void buildQuadPosX(
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float xPos = static_cast<float>(x + 1 + offsetX);
     float Y0 = static_cast<float>(startY + offsetY);
@@ -94,10 +118,10 @@ static void buildQuadPosX(
     float Z1 = static_cast<float>(startZ + depth + offsetZ);
 
     int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(xPos, Y0, Z0, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y0, Z1, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y1, Z1, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y1, Z0, r, g, b));
+    outVertices.push_back(Vertex(xPos, Y0, Z0, packedColor));
+    outVertices.push_back(Vertex(xPos, Y0, Z1, packedColor));
+    outVertices.push_back(Vertex(xPos, Y1, Z1, packedColor));
+    outVertices.push_back(Vertex(xPos, Y1, Z0, packedColor));
 
     outIndices.push_back(startIndex + 0);
     outIndices.push_back(startIndex + 1);
@@ -117,6 +141,7 @@ static void buildQuadNegX(
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float xPos = static_cast<float>(x + offsetX);
     float Y0 = static_cast<float>(startY + offsetY);
@@ -126,10 +151,10 @@ static void buildQuadNegX(
 
     int startIndex = static_cast<int>(outVertices.size());
     // Reverse winding for -X
-    outVertices.push_back(Vertex(xPos, Y0, Z1, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y0, Z0, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y1, Z0, r, g, b));
-    outVertices.push_back(Vertex(xPos, Y1, Z1, r, g, b));
+    outVertices.push_back(Vertex(xPos, Y0, Z1, packedColor));
+    outVertices.push_back(Vertex(xPos, Y0, Z0, packedColor));
+    outVertices.push_back(Vertex(xPos, Y1, Z0, packedColor));
+    outVertices.push_back(Vertex(xPos, Y1, Z1, packedColor));
 
     outIndices.push_back(startIndex + 0);
     outIndices.push_back(startIndex + 1);
@@ -149,6 +174,7 @@ static void buildQuadPosY(
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float yPos = static_cast<float>(y + 1 + offsetY);
     float X0 = static_cast<float>(startX + offsetX);
@@ -157,10 +183,10 @@ static void buildQuadPosY(
     float Z1 = static_cast<float>(startZ + depth + offsetZ);
 
     int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(X0, yPos, Z0, r, g, b));
-    outVertices.push_back(Vertex(X1, yPos, Z0, r, g, b));
-    outVertices.push_back(Vertex(X1, yPos, Z1, r, g, b));
-    outVertices.push_back(Vertex(X0, yPos, Z1, r, g, b));
+    outVertices.push_back(Vertex(X0, yPos, Z0, packedColor));
+    outVertices.push_back(Vertex(X1, yPos, Z0, packedColor));
+    outVertices.push_back(Vertex(X1, yPos, Z1, packedColor));
+    outVertices.push_back(Vertex(X0, yPos, Z1, packedColor));
 
     outIndices.push_back(startIndex + 0);
     outIndices.push_back(startIndex + 1);
@@ -180,6 +206,7 @@ static void buildQuadNegY(
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
     float r = vt.color.r, g = vt.color.g, b = vt.color.b;
+    uint32_t packedColor = packColor(r, g, b);
 
     float yPos = static_cast<float>(y + offsetY);
     float X0 = static_cast<float>(startX + offsetX);
@@ -189,10 +216,10 @@ static void buildQuadNegY(
 
     int startIndex = static_cast<int>(outVertices.size());
     // Reverse winding for -Y
-    outVertices.push_back(Vertex(X1, yPos, Z0, r, g, b));
-    outVertices.push_back(Vertex(X0, yPos, Z0, r, g, b));
-    outVertices.push_back(Vertex(X0, yPos, Z1, r, g, b));
-    outVertices.push_back(Vertex(X1, yPos, Z1, r, g, b));
+    outVertices.push_back(Vertex(X1, yPos, Z0, packedColor));
+    outVertices.push_back(Vertex(X0, yPos, Z0, packedColor));
+    outVertices.push_back(Vertex(X0, yPos, Z1, packedColor));
+    outVertices.push_back(Vertex(X1, yPos, Z1, packedColor));
 
     outIndices.push_back(startIndex + 0);
     outIndices.push_back(startIndex + 1);
@@ -217,19 +244,16 @@ bool GreedyMesher::generateMesh(
     outIndices.clear();
 
     // 2) Reserve some capacity to reduce dynamic allocations
-    // In the worst case: each voxel has 6 faces * 4 verts => 24 million for 16x128x16 => too big!
-    // We'll pick something smaller to reduce some overhead. We can refine to your chunk size.
     outVertices.reserve(4096);
     outIndices.reserve(6144);
 
-    // 3) Cache chunk's voxel data in a local array to skip repeated chunk.getBlock calls
+    // 3) Cache chunk's voxel data in a local array
     const int sizeX = Chunk::SIZE_X;
     const int sizeY = Chunk::SIZE_Y;
     const int sizeZ = Chunk::SIZE_Z;
     std::vector<int> localVoxels;
     localVoxels.resize(sizeX * sizeY * sizeZ, 0);
 
-    // Copy chunk's data
     for (int z = 0; z < sizeZ; z++) {
         for (int y = 0; y < sizeY; y++) {
             for (int x = 0; x < sizeX; x++) {
@@ -238,29 +262,26 @@ bool GreedyMesher::generateMesh(
         }
     }
 
-    // Inline helper to check if a voxel is solid
+    // isSolidID checks if a block ID is a solid voxel
     auto isSolidID = [](int voxelID) -> bool {
         if (voxelID < 0) return false;
         const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
         return vt.isSolid;
         };
 
-    // For local in-bounds lookups
+    // Quick local accessor
     auto getLocalVoxel = [&](int x, int y, int z) -> int {
         return localVoxels[z * sizeY * sizeX + y * sizeX + x];
         };
 
-    // Expand isSolidGlobal to do local check for in-bounds, fallback to neighbor chunk
+    // For out-of-bounds => check neighbor chunk
     auto isSolidGlobal = [&](int x, int y, int z) -> bool {
-        if (x >= 0 && x < sizeX &&
-            y >= 0 && y < sizeY &&
-            z >= 0 && z < sizeZ)
+        if (x >= 0 && x < sizeX && y >= 0 && y < sizeY && z >= 0 && z < sizeZ)
         {
             int nid = getLocalVoxel(x, y, z);
             return (nid > 0) ? isSolidID(nid) : false;
         }
         else {
-            // Out-of-bounds => check neighbor chunk
             int nx = cx, ny = cy, nz = cz;
             int localX = x, localY = y, localZ = z;
 
@@ -279,9 +300,6 @@ bool GreedyMesher::generateMesh(
             return (nid > 0) ? isSolidID(nid) : false;
         }
         };
-
-    // All the following code remains the same “mask-based” logic
-    // but now it calls isSolidGlobal(...) and uses local data as needed
 
     // ---------- +Z Faces ----------
     for (int z = 0; z < sizeZ; z++) {
@@ -320,8 +338,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
-                // Mark them consumed
                 for (int dy = 0; dy < height; dy++) {
                     for (int dx = 0; dx < width; dx++) {
                         size_t idx4 = static_cast<size_t>(row + dy) * sizeX + (col + dx);
@@ -370,8 +386,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
-                // Mark used
                 for (int dy = 0; dy < height; dy++) {
                     for (int dx = 0; dx < width; dx++) {
                         size_t idx4 = static_cast<size_t>(row + dy) * sizeX + (col + dx);
@@ -420,7 +434,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
                 for (int d = 0; d < depth; d++) {
                     for (int h = 0; h < height; h++) {
                         size_t idx4 = static_cast<size_t>(row + d) * sizeY + (col + h);
@@ -469,7 +482,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
                 for (int d = 0; d < depth; d++) {
                     for (int h = 0; h < height; h++) {
                         size_t idx4 = static_cast<size_t>(row + d) * sizeY + (col + h);
@@ -518,7 +530,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
                 for (int d = 0; d < depth; d++) {
                     for (int w = 0; w < width; w++) {
                         size_t idx4 = static_cast<size_t>(row + d) * sizeX + (col + w);
@@ -567,7 +578,6 @@ bool GreedyMesher::generateMesh(
                     offsetX, offsetY, offsetZ,
                     currentID,
                     outVertices, outIndices);
-
                 for (int d = 0; d < depth; d++) {
                     for (int w = 0; w < width; w++) {
                         size_t idx4 = static_cast<size_t>(row + d) * sizeX + (col + w);
