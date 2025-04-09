@@ -1,5 +1,5 @@
-﻿#include "Engine/Voxels/VoxelWorld.h"            // or "VoxelWorld.h" if located in the same folder
-#include "Engine/Voxels/Chunk.h"
+﻿#include "VoxelWorld.h"
+#include "Chunk.h"
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Resources/ResourceManager.h"
 #include "Engine/Utils/Logger.h"
@@ -17,7 +17,7 @@
 #include <thread>
 #include <sstream>
 
-// Thread pool declared externally:
+// Externally declared:
 extern ThreadPool g_threadPool;
 
 // ------------------------------------------------------------------------
@@ -26,7 +26,7 @@ extern ThreadPool g_threadPool;
 static double s_totalMeshTime = 0.0;
 static int    s_meshCount = 0;
 
-// Protects multi-lod results
+// Protect multi-lod results
 static std::mutex s_resultMutex;
 static std::vector<MultiLODResult> s_pendingLODResults;
 
@@ -117,7 +117,6 @@ void VoxelWorld::initWorld()
             }
         }
     }
-
     Logger::Info("initWorld() => queued multiple y-layers around (y=0).");
 }
 
@@ -138,7 +137,7 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
     int centerY = static_cast<int>(std::floor(playerPosY / float(Chunk::SIZE_Y)));
 
-    int verticalRange = 2; // how many layers to load above/below camera
+    int verticalRange = 2;
     int minCy = centerY - verticalRange;
     int maxCy = centerY + verticalRange;
 
@@ -162,7 +161,7 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
             }
         }
 
-        // Sort nearest first (3D distance squared)
+        // Sort nearest first
         auto distSq = [&](const ChunkCoord& cc)
             {
                 int dx = cc.x - centerX;
@@ -277,7 +276,7 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
         return; // not existing
     }
 
-    // Wait if chunk is still uploading
+    // If chunk is still uploading
     if (chunk->isUploading())
     {
         Logger::Info("unloadOneChunk => chunk uploading, re-queue: "
@@ -314,9 +313,9 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
     }
 
     Logger::Info("unloadOneChunk => removing chunk (" +
-        std::to_string(c.x) + ","
-        + std::to_string(c.y) + ","
-        + std::to_string(c.z) + ")");
+        std::to_string(c.x) + "," +
+        std::to_string(c.y) + "," +
+        std::to_string(c.z) + ")");
 
     m_chunkManager.removeChunk(c.x, c.y, c.z);
 }
@@ -342,9 +341,16 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
         if (!chunk) continue;
         if (!chunk->isDirty()) continue;
 
+        // [NEW] Recalc bounding box if chunk is NORMAL, so culling is always up-to-date
+        if (chunk->getState() == Chunk::ChunkState::NORMAL)
+        {
+            chunk->recalcFilledBounds();
+        }
+
         // If chunk is uniform empty or uniform solid => no geometry
         if (chunk->getState() != Chunk::ChunkState::NORMAL)
         {
+            // It's either all empty or uniform => skip big geometry
             chunk->clearDirty();
             continue;
         }
@@ -352,6 +358,7 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
         chunk->clearDirty();
         chunk->setIsUploading(true);
 
+        // Kick off multi-LOD build on a worker thread
         g_threadPool.enqueueTask(
             [this, chunk, baseMesher]()
             {
@@ -393,7 +400,7 @@ void VoxelWorld::pollMeshBuildResults()
 {
     static std::deque<MultiLODResult> leftover;
 
-    // Move fresh results into leftover
+    // 1) Move fresh results into leftover
     {
         std::vector<MultiLODResult> local;
         {
@@ -409,7 +416,7 @@ void VoxelWorld::pollMeshBuildResults()
         }
     }
 
-    // Process a limited number each frame
+    // 2) Process a limited number each frame
     static const int MAX_UPLOADS_PER_FRAME = 25;
     int processed = 0;
 
@@ -465,7 +472,10 @@ void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
         {
             VkBuffer vb, ib;
             VkDeviceMemory vbMem, ibMem;
-            m_resourceManager->createChunkBuffers(newLOD.verts, newLOD.inds, vb, vbMem, ib, ibMem);
+            m_resourceManager->createChunkBuffers(
+                newLOD.verts, newLOD.inds,
+                vb, vbMem, ib, ibMem
+            );
 
             oldData.vertexBuffer = vb;
             oldData.vertexMemory = vbMem;
@@ -502,3 +512,4 @@ double VoxelWorld::getAvgMeshTime()
     if (s_meshCount == 0) return 0.0;
     return s_totalMeshTime / double(s_meshCount);
 }
+
