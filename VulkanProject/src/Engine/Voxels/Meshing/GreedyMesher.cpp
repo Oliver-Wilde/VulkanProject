@@ -1,20 +1,20 @@
 #include "GreedyMesher.h"
-#include "../Chunk.h"
-#include "../ChunkManager.h"
-#include "IMesher.h"
+#include "Engine/Voxels/IBlockProvider.h"
 #include "../VoxelTypeRegistry.h"
 #include "../VoxelType.h"
+#include "../Chunk.h"
+#include "../ChunkManager.h"
+
 #include <vector>
 #include <cstddef>
 #include <stdexcept>
-#include <algorithm>
+#include <algorithm> // for std::fill or other usage
 
 // -----------------------------------------------------------------------------
-// Helper to pack float color [0..1] into a 32-bit RGBA8 format.
+// Helper: Pack (r,g,b) float [0..1] into a RGBA8 uint32_t
 // -----------------------------------------------------------------------------
 static uint32_t packColor(float r, float g, float b)
 {
-    // Clamp each channel
     if (r < 0.f) r = 0.f; if (r > 1.f) r = 1.f;
     if (g < 0.f) g = 0.f; if (g > 1.f) g = 1.f;
     if (b < 0.f) b = 0.f; if (b > 1.f) b = 1.f;
@@ -23,16 +23,12 @@ static uint32_t packColor(float r, float g, float b)
     uint32_t G = static_cast<uint32_t>(g * 255.0f);
     uint32_t B = static_cast<uint32_t>(b * 255.0f);
     uint32_t A = 255; // full opacity
-
-    // Typically RGBA is in the order: A << 24 | B << 16 | G << 8 | R.
-    // But you can reorder if you prefer BGRA or something else in the shader.
-    // We'll store it as 0xAABBGGRR (little-endian machine reads it as RGBA).
     return (A << 24) | (B << 16) | (G << 8) | (R << 0);
 }
 
-//-------------------- Utility Functions for Building Quads --------------------
-
-// +Z face
+// -----------------------------------------------------------------------------
+// BuildQuad utilities for each face direction
+// -----------------------------------------------------------------------------
 static void buildQuadPosZ(
     int startX, int startY, int width, int height, int z,
     int offsetX, int offsetY, int offsetZ,
@@ -40,33 +36,29 @@ static void buildQuadPosZ(
     std::vector<Vertex>& outVertices,
     std::vector<uint32_t>& outIndices)
 {
-    // Inline getVoxel => color
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float zPos = static_cast<float>(z + 1 + offsetZ);
-    float X0 = static_cast<float>(startX + offsetX);
-    float Y0 = static_cast<float>(startY + offsetY);
-    float X1 = static_cast<float>(startX + width + offsetX);
-    float Y1 = static_cast<float>(startY + height + offsetY);
+    float Zpos = float(z + 1 + offsetZ);
+    float X0 = float(startX + offsetX);
+    float Y0 = float(startY + offsetY);
+    float X1 = float(startX + width + offsetX);
+    float Y1 = float(startY + height + offsetY);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(X0, Y0, zPos, packedColor));
-    outVertices.push_back(Vertex(X1, Y0, zPos, packedColor));
-    outVertices.push_back(Vertex(X1, Y1, zPos, packedColor));
-    outVertices.push_back(Vertex(X0, Y1, zPos, packedColor));
+    int baseIdx = (int)outVertices.size();
+    outVertices.emplace_back(X0, Y0, Zpos, col);
+    outVertices.emplace_back(X1, Y0, Zpos, col);
+    outVertices.emplace_back(X1, Y1, Zpos, col);
+    outVertices.emplace_back(X0, Y1, Zpos, col);
 
-    // Indices
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-// -Z face
 static void buildQuadNegZ(
     int startX, int startY, int width, int height, int z,
     int offsetX, int offsetY, int offsetZ,
@@ -75,31 +67,29 @@ static void buildQuadNegZ(
     std::vector<uint32_t>& outIndices)
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float zPos = static_cast<float>(z + offsetZ);
-    float X0 = static_cast<float>(startX + offsetX);
-    float Y0 = static_cast<float>(startY + offsetY);
-    float X1 = static_cast<float>(startX + width + offsetX);
-    float Y1 = static_cast<float>(startY + height + offsetY);
+    float Zpos = float(z + offsetZ);
+    float X0 = float(startX + offsetX);
+    float Y0 = float(startY + offsetY);
+    float X1 = float(startX + width + offsetX);
+    float Y1 = float(startY + height + offsetY);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    // Reverse winding for -Z
-    outVertices.push_back(Vertex(X1, Y0, zPos, packedColor));
-    outVertices.push_back(Vertex(X0, Y0, zPos, packedColor));
-    outVertices.push_back(Vertex(X0, Y1, zPos, packedColor));
-    outVertices.push_back(Vertex(X1, Y1, zPos, packedColor));
+    int baseIdx = (int)outVertices.size();
+    // reversed winding
+    outVertices.emplace_back(X1, Y0, Zpos, col);
+    outVertices.emplace_back(X0, Y0, Zpos, col);
+    outVertices.emplace_back(X0, Y1, Zpos, col);
+    outVertices.emplace_back(X1, Y1, Zpos, col);
 
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-// +X face
 static void buildQuadPosX(
     int startY, int startZ, int height, int depth, int x,
     int offsetX, int offsetY, int offsetZ,
@@ -108,30 +98,28 @@ static void buildQuadPosX(
     std::vector<uint32_t>& outIndices)
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float xPos = static_cast<float>(x + 1 + offsetX);
-    float Y0 = static_cast<float>(startY + offsetY);
-    float Z0 = static_cast<float>(startZ + offsetZ);
-    float Y1 = static_cast<float>(startY + height + offsetY);
-    float Z1 = static_cast<float>(startZ + depth + offsetZ);
+    float Xpos = float(x + 1 + offsetX);
+    float Y0 = float(startY + offsetY);
+    float Z0 = float(startZ + offsetZ);
+    float Y1 = float(startY + height + offsetY);
+    float Z1 = float(startZ + depth + offsetZ);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(xPos, Y0, Z0, packedColor));
-    outVertices.push_back(Vertex(xPos, Y0, Z1, packedColor));
-    outVertices.push_back(Vertex(xPos, Y1, Z1, packedColor));
-    outVertices.push_back(Vertex(xPos, Y1, Z0, packedColor));
+    int baseIdx = (int)outVertices.size();
+    outVertices.emplace_back(Xpos, Y0, Z0, col);
+    outVertices.emplace_back(Xpos, Y0, Z1, col);
+    outVertices.emplace_back(Xpos, Y1, Z1, col);
+    outVertices.emplace_back(Xpos, Y1, Z0, col);
 
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-// -X face
 static void buildQuadNegX(
     int startY, int startZ, int height, int depth, int x,
     int offsetX, int offsetY, int offsetZ,
@@ -140,31 +128,29 @@ static void buildQuadNegX(
     std::vector<uint32_t>& outIndices)
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float xPos = static_cast<float>(x + offsetX);
-    float Y0 = static_cast<float>(startY + offsetY);
-    float Z0 = static_cast<float>(startZ + offsetZ);
-    float Y1 = static_cast<float>(startY + height + offsetY);
-    float Z1 = static_cast<float>(startZ + depth + offsetZ);
+    float Xpos = float(x + offsetX);
+    float Y0 = float(startY + offsetY);
+    float Z0 = float(startZ + offsetZ);
+    float Y1 = float(startY + height + offsetY);
+    float Z1 = float(startZ + depth + offsetZ);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    // Reverse winding for -X
-    outVertices.push_back(Vertex(xPos, Y0, Z1, packedColor));
-    outVertices.push_back(Vertex(xPos, Y0, Z0, packedColor));
-    outVertices.push_back(Vertex(xPos, Y1, Z0, packedColor));
-    outVertices.push_back(Vertex(xPos, Y1, Z1, packedColor));
+    int baseIdx = (int)outVertices.size();
+    // reversed winding for -X
+    outVertices.emplace_back(Xpos, Y0, Z1, col);
+    outVertices.emplace_back(Xpos, Y0, Z0, col);
+    outVertices.emplace_back(Xpos, Y1, Z0, col);
+    outVertices.emplace_back(Xpos, Y1, Z1, col);
 
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-// +Y face
 static void buildQuadPosY(
     int startX, int startZ, int width, int depth, int y,
     int offsetX, int offsetY, int offsetZ,
@@ -173,30 +159,28 @@ static void buildQuadPosY(
     std::vector<uint32_t>& outIndices)
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float yPos = static_cast<float>(y + 1 + offsetY);
-    float X0 = static_cast<float>(startX + offsetX);
-    float Z0 = static_cast<float>(startZ + offsetZ);
-    float X1 = static_cast<float>(startX + width + offsetX);
-    float Z1 = static_cast<float>(startZ + depth + offsetZ);
+    float Ypos = float(y + 1 + offsetY);
+    float X0 = float(startX + offsetX);
+    float Z0 = float(startZ + offsetZ);
+    float X1 = float(startX + width + offsetX);
+    float Z1 = float(startZ + depth + offsetZ);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    outVertices.push_back(Vertex(X0, yPos, Z0, packedColor));
-    outVertices.push_back(Vertex(X1, yPos, Z0, packedColor));
-    outVertices.push_back(Vertex(X1, yPos, Z1, packedColor));
-    outVertices.push_back(Vertex(X0, yPos, Z1, packedColor));
+    int baseIdx = (int)outVertices.size();
+    outVertices.emplace_back(X0, Ypos, Z0, col);
+    outVertices.emplace_back(X1, Ypos, Z0, col);
+    outVertices.emplace_back(X1, Ypos, Z1, col);
+    outVertices.emplace_back(X0, Ypos, Z1, col);
 
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-// -Y face
 static void buildQuadNegY(
     int startX, int startZ, int width, int depth, int y,
     int offsetX, int offsetY, int offsetZ,
@@ -205,31 +189,32 @@ static void buildQuadNegY(
     std::vector<uint32_t>& outIndices)
 {
     const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(blockID);
-    float r = vt.color.r, g = vt.color.g, b = vt.color.b;
-    uint32_t packedColor = packColor(r, g, b);
+    uint32_t col = packColor(vt.color.r, vt.color.g, vt.color.b);
 
-    float yPos = static_cast<float>(y + offsetY);
-    float X0 = static_cast<float>(startX + offsetX);
-    float Z0 = static_cast<float>(startZ + offsetZ);
-    float X1 = static_cast<float>(startX + width + offsetX);
-    float Z1 = static_cast<float>(startZ + depth + offsetZ);
+    float Ypos = float(y + offsetY);
+    float X0 = float(startX + offsetX);
+    float Z0 = float(startZ + offsetZ);
+    float X1 = float(startX + width + offsetX);
+    float Z1 = float(startZ + depth + offsetZ);
 
-    int startIndex = static_cast<int>(outVertices.size());
-    // Reverse winding for -Y
-    outVertices.push_back(Vertex(X1, yPos, Z0, packedColor));
-    outVertices.push_back(Vertex(X0, yPos, Z0, packedColor));
-    outVertices.push_back(Vertex(X0, yPos, Z1, packedColor));
-    outVertices.push_back(Vertex(X1, yPos, Z1, packedColor));
+    int baseIdx = (int)outVertices.size();
+    // reversed winding for -Y
+    outVertices.emplace_back(X1, Ypos, Z0, col);
+    outVertices.emplace_back(X0, Ypos, Z0, col);
+    outVertices.emplace_back(X0, Ypos, Z1, col);
+    outVertices.emplace_back(X1, Ypos, Z1, col);
 
-    outIndices.push_back(startIndex + 0);
-    outIndices.push_back(startIndex + 1);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 2);
-    outIndices.push_back(startIndex + 3);
-    outIndices.push_back(startIndex + 0);
+    outIndices.push_back(baseIdx + 0);
+    outIndices.push_back(baseIdx + 1);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 2);
+    outIndices.push_back(baseIdx + 3);
+    outIndices.push_back(baseIdx + 0);
 }
 
-//-------------------- Implementation of generateMesh --------------------
+// -----------------------------------------------------------------------------
+// GreedyMesher Implementation
+// -----------------------------------------------------------------------------
 
 bool GreedyMesher::generateMesh(
     Chunk& chunk,
@@ -237,71 +222,73 @@ bool GreedyMesher::generateMesh(
     std::vector<Vertex>& outVertices,
     std::vector<uint32_t>& outIndices,
     int offsetX, int offsetY, int offsetZ,
-    const ChunkManager& manager) const
+    const ChunkManager& manager
+) const
 {
-    // 1) Clear existing geometry
+    // 1) Because Chunk implements IBlockProvider, we just cast and call 
+    //    the new version that works for any IBlockProvider.
+    return generateMesh(
+        static_cast<const IBlockProvider&>(chunk),
+        cx, cy, cz,
+        outVertices, outIndices,
+        offsetX, offsetY, offsetZ,
+        manager
+    );
+}
+
+bool GreedyMesher::generateMesh(
+    const IBlockProvider& blockData,
+    int cx, int cy, int cz,
+    std::vector<Vertex>& outVertices,
+    std::vector<uint32_t>& outIndices,
+    int offsetX, int offsetY, int offsetZ,
+    const ChunkManager& manager
+) const
+{
+    // 2) Clear outputs
     outVertices.clear();
     outIndices.clear();
 
-    // 2) Reserve some capacity to reduce dynamic allocations
+    // 3) Reserve some capacity
     outVertices.reserve(4096);
     outIndices.reserve(6144);
 
-    // 3) Cache chunk's voxel data in a local array
-    const int sizeX = Chunk::SIZE_X;
-    const int sizeY = Chunk::SIZE_Y;
-    const int sizeZ = Chunk::SIZE_Z;
-    std::vector<int> localVoxels;
-    localVoxels.resize(sizeX * sizeY * sizeZ, 0);
+    // 4) Basic dimensions
+    const int sizeX = blockData.getSizeX();
+    const int sizeY = blockData.getSizeY();
+    const int sizeZ = blockData.getSizeZ();
 
-    for (int z = 0; z < sizeZ; z++) {
-        for (int y = 0; y < sizeY; y++) {
-            for (int x = 0; x < sizeX; x++) {
-                localVoxels[z * sizeY * sizeX + y * sizeX + x] = chunk.getBlock(x, y, z);
-            }
-        }
-    }
-
-    // isSolidID checks if a block ID is a solid voxel
-    auto isSolidID = [](int voxelID) -> bool {
-        if (voxelID < 0) return false;
+    // Provide a quick "isSolidID" by checking VoxelType
+    auto isSolidID = [&](int voxelID) -> bool {
+        if (voxelID < 0) return false; // treat negative => air
         const VoxelType& vt = VoxelTypeRegistry::get().getVoxel(voxelID);
         return vt.isSolid;
         };
 
-    // Quick local accessor
+    // local accessor
     auto getLocalVoxel = [&](int x, int y, int z) -> int {
-        return localVoxels[z * sizeY * sizeX + y * sizeX + x];
+        return blockData.getBlock(x, y, z);
         };
 
-    // For out-of-bounds => check neighbor chunk
-    auto isSolidGlobal = [&](int x, int y, int z) -> bool {
-        if (x >= 0 && x < sizeX && y >= 0 && y < sizeY && z >= 0 && z < sizeZ)
+    // For neighbor logic, we can do manager lookups if we want, 
+    // or treat out-of-range as empty for LOD. We'll do a minimal approach:
+    auto isSolidGlobal = [&](int x, int y, int z) -> bool
         {
-            int nid = getLocalVoxel(x, y, z);
-            return (nid > 0) ? isSolidID(nid) : false;
-        }
-        else {
-            int nx = cx, ny = cy, nz = cz;
-            int localX = x, localY = y, localZ = z;
-
-            if (x < 0) { nx -= 1; localX += sizeX; }
-            else if (x >= sizeX) { nx += 1; localX -= sizeX; }
-
-            if (y < 0) { ny -= 1; localY += sizeY; }
-            else if (y >= sizeY) { ny += 1; localY -= sizeY; }
-
-            if (z < 0) { nz -= 1; localZ += sizeZ; }
-            else if (z >= sizeZ) { nz += 1; localZ -= sizeZ; }
-
-            const Chunk* neighbor = manager.getChunk(nx, ny, nz);
-            if (!neighbor) return false;
-            int nid = neighbor->getBlock(localX, localY, localZ);
-            return (nid > 0) ? isSolidID(nid) : false;
-        }
+            if (x >= 0 && x < sizeX &&
+                y >= 0 && y < sizeY &&
+                z >= 0 && z < sizeZ)
+            {
+                int id = getLocalVoxel(x, y, z);
+                return (id > 0) ? isSolidID(id) : false;
+            }
+            else {
+                // If you want chunk neighbors, you'd do manager.getChunk(...) etc. 
+                // For LOD or mini-chunk, we’ll treat out-of-range as empty.
+                return false;
+            }
         };
 
-    // ---------- +Z Faces ----------
+    // =========== +Z Faces ===========
     for (int z = 0; z < sizeZ; z++) {
         std::vector<int> mask(sizeX * sizeY, -1);
         for (int y = 0; y < sizeY; y++) {
@@ -309,39 +296,51 @@ bool GreedyMesher::generateMesh(
                 int id = getLocalVoxel(x, y, z);
                 if (id <= 0) continue;
                 bool exposed = !isSolidGlobal(x, y, z + 1);
-                size_t idx = static_cast<size_t>(y) * sizeX + x;
+                size_t idx = (size_t)y * sizeX + x;
                 mask[idx] = exposed ? id : -1;
             }
         }
         for (int row = 0; row < sizeY; row++) {
             int col = 0;
             while (col < sizeX) {
-                size_t idx = static_cast<size_t>(row) * sizeX + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
+                size_t m = (size_t)row * sizeX + col;
+                int currentID = mask[m];
+                if (currentID < 0) {
+                    col++;
+                    continue;
+                }
+                // find width
                 int width = 1;
                 while (col + width < sizeX) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeX + (col + width);
-                    if (mask[idx2] == currentID) width++;
+                    size_t m2 = (size_t)row * sizeX + (col + width);
+                    if (mask[m2] == currentID) width++;
                     else break;
                 }
+                // find height
                 int height = 1;
                 bool done = false;
-                while (!done && row + height < sizeY) {
+                while (!done && (row + height) < sizeY) {
                     for (int k = 0; k < width; k++) {
-                        size_t idx3 = static_cast<size_t>(row + height) * sizeX + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
+                        size_t m3 = (size_t)(row + height) * sizeX + (col + k);
+                        if (mask[m3] != currentID) {
+                            done = true;
+                            break;
+                        }
                     }
                     if (!done) height++;
                 }
-                buildQuadPosZ(col, row, width, height, z,
+                // build quad
+                buildQuadPosZ(
+                    col, row, width, height, z,
                     offsetX, offsetY, offsetZ,
                     currentID,
-                    outVertices, outIndices);
+                    outVertices, outIndices
+                );
+                // clear
                 for (int dy = 0; dy < height; dy++) {
                     for (int dx = 0; dx < width; dx++) {
-                        size_t idx4 = static_cast<size_t>(row + dy) * sizeX + (col + dx);
-                        mask[idx4] = -1;
+                        size_t m4 = (size_t)(row + dy) * sizeX + (col + dx);
+                        mask[m4] = -1;
                     }
                 }
                 col += width;
@@ -349,246 +348,298 @@ bool GreedyMesher::generateMesh(
         }
     }
 
-    // ---------- -Z Faces ----------
-    for (int z = 0; z < sizeZ; z++) {
-        std::vector<int> mask(sizeX * sizeY, -1);
+    // =========== -Z Faces ===========
+    {
+        for (int z = 0; z < sizeZ; z++) {
+            std::vector<int> mask(sizeX * sizeY, -1);
+            for (int y = 0; y < sizeY; y++) {
+                for (int x = 0; x < sizeX; x++) {
+                    int id = getLocalVoxel(x, y, z);
+                    if (id <= 0) continue;
+                    bool exposed = !isSolidGlobal(x, y, z - 1);
+                    size_t idx = (size_t)y * sizeX + x;
+                    mask[idx] = exposed ? id : -1;
+                }
+            }
+            for (int row = 0; row < sizeY; row++) {
+                int col = 0;
+                while (col < sizeX) {
+                    size_t m = (size_t)row * sizeX + col;
+                    int currentID = mask[m];
+                    if (currentID < 0) {
+                        col++;
+                        continue;
+                    }
+                    // find width
+                    int width = 1;
+                    while (col + width < sizeX) {
+                        size_t m2 = (size_t)row * sizeX + (col + width);
+                        if (mask[m2] == currentID) width++;
+                        else break;
+                    }
+                    // find height
+                    int height = 1;
+                    bool done = false;
+                    while (!done && (row + height) < sizeY) {
+                        for (int k = 0; k < width; k++) {
+                            size_t m3 = (size_t)(row + height) * sizeX + (col + k);
+                            if (mask[m3] != currentID) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) height++;
+                    }
+                    buildQuadNegZ(
+                        col, row, width, height, z,
+                        offsetX, offsetY, offsetZ,
+                        currentID,
+                        outVertices, outIndices
+                    );
+                    for (int dy = 0; dy < height; dy++) {
+                        for (int dx = 0; dx < width; dx++) {
+                            size_t m4 = (size_t)(row + dy) * sizeX + (col + dx);
+                            mask[m4] = -1;
+                        }
+                    }
+                    col += width;
+                }
+            }
+        }
+    }
+
+    // =========== +X Faces ===========
+    {
+        for (int x = 0; x < sizeX; x++) {
+            std::vector<int> mask(sizeY * sizeZ, -1);
+            for (int z = 0; z < sizeZ; z++) {
+                for (int y = 0; y < sizeY; y++) {
+                    int id = getLocalVoxel(x, y, z);
+                    if (id <= 0) continue;
+                    bool exposed = !isSolidGlobal(x + 1, y, z);
+                    size_t idx = (size_t)z * sizeY + y;
+                    mask[idx] = exposed ? id : -1;
+                }
+            }
+            for (int row = 0; row < sizeZ; row++) {
+                int col = 0;
+                while (col < sizeY) {
+                    size_t m = (size_t)row * sizeY + col;
+                    int currentID = mask[m];
+                    if (currentID < 0) {
+                        col++;
+                        continue;
+                    }
+                    int height = 1;
+                    while (col + height < sizeY) {
+                        size_t m2 = (size_t)row * sizeY + (col + height);
+                        if (mask[m2] == currentID) height++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done && row + depth < sizeZ) {
+                        for (int k = 0; k < height; k++) {
+                            size_t m3 = (size_t)(row + depth) * sizeY + (col + k);
+                            if (mask[m3] != currentID) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+                    buildQuadPosX(
+                        col, row, height, depth, x,
+                        offsetX, offsetY, offsetZ,
+                        currentID,
+                        outVertices, outIndices
+                    );
+                    for (int d = 0; d < depth; d++) {
+                        for (int h = 0; h < height; h++) {
+                            size_t m4 = (size_t)(row + d) * sizeY + (col + h);
+                            mask[m4] = -1;
+                        }
+                    }
+                    col += height;
+                }
+            }
+        }
+    }
+
+    // =========== -X Faces ===========
+    {
+        for (int x = 0; x < sizeX; x++) {
+            std::vector<int> mask(sizeY * sizeZ, -1);
+            for (int z = 0; z < sizeZ; z++) {
+                for (int y = 0; y < sizeY; y++) {
+                    int id = getLocalVoxel(x, y, z);
+                    if (id <= 0) continue;
+                    bool exposed = !isSolidGlobal(x - 1, y, z);
+                    size_t idx = (size_t)z * sizeY + y;
+                    mask[idx] = exposed ? id : -1;
+                }
+            }
+            for (int row = 0; row < sizeZ; row++) {
+                int col = 0;
+                while (col < sizeY) {
+                    size_t m = (size_t)row * sizeY + col;
+                    int currentID = mask[m];
+                    if (currentID < 0) {
+                        col++;
+                        continue;
+                    }
+                    int height = 1;
+                    while (col + height < sizeY) {
+                        size_t m2 = (size_t)row * sizeY + (col + height);
+                        if (mask[m2] == currentID) height++;
+                        else break;
+                    }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done && row + depth < sizeZ) {
+                        for (int k = 0; k < height; k++) {
+                            size_t m3 = (size_t)(row + depth) * sizeY + (col + k);
+                            if (mask[m3] != currentID) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
+                    }
+                    buildQuadNegX(
+                        col, row, height, depth, x,
+                        offsetX, offsetY, offsetZ,
+                        currentID,
+                        outVertices, outIndices
+                    );
+                    for (int d = 0; d < depth; d++) {
+                        for (int h = 0; h < height; h++) {
+                            size_t m4 = (size_t)(row + d) * sizeY + (col + h);
+                            mask[m4] = -1;
+                        }
+                    }
+                    col += height;
+                }
+            }
+        }
+    }
+
+    // =========== +Y Faces ===========
+    {
         for (int y = 0; y < sizeY; y++) {
-            for (int x = 0; x < sizeX; x++) {
-                int id = getLocalVoxel(x, y, z);
-                if (id <= 0) continue;
-                bool exposed = !isSolidGlobal(x, y, z - 1);
-                size_t idx = static_cast<size_t>(y) * sizeX + x;
-                mask[idx] = exposed ? id : -1;
+            std::vector<int> mask(sizeX * sizeZ, -1);
+            for (int z = 0; z < sizeZ; z++) {
+                for (int x = 0; x < sizeX; x++) {
+                    int id = getLocalVoxel(x, y, z);
+                    if (id <= 0) continue;
+                    bool exposed = !isSolidGlobal(x, y + 1, z);
+                    size_t idx = (size_t)z * sizeX + x;
+                    mask[idx] = exposed ? id : -1;
+                }
             }
-        }
-        for (int row = 0; row < sizeY; row++) {
-            int col = 0;
-            while (col < sizeX) {
-                size_t idx = static_cast<size_t>(row) * sizeX + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
-                int width = 1;
-                while (col + width < sizeX) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeX + (col + width);
-                    if (mask[idx2] == currentID) width++;
-                    else break;
-                }
-                int height = 1;
-                bool done = false;
-                while (!done && row + height < sizeY) {
-                    for (int k = 0; k < width; k++) {
-                        size_t idx3 = static_cast<size_t>(row + height) * sizeX + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
+            for (int row = 0; row < sizeZ; row++) {
+                int col = 0;
+                while (col < sizeX) {
+                    size_t m = (size_t)row * sizeX + col;
+                    int currentID = mask[m];
+                    if (currentID < 0) {
+                        col++;
+                        continue;
                     }
-                    if (!done) height++;
-                }
-                buildQuadNegZ(col, row, width, height, z,
-                    offsetX, offsetY, offsetZ,
-                    currentID,
-                    outVertices, outIndices);
-                for (int dy = 0; dy < height; dy++) {
-                    for (int dx = 0; dx < width; dx++) {
-                        size_t idx4 = static_cast<size_t>(row + dy) * sizeX + (col + dx);
-                        mask[idx4] = -1;
+                    int width = 1;
+                    while (col + width < sizeX) {
+                        size_t m2 = (size_t)row * sizeX + (col + width);
+                        if (mask[m2] == currentID) width++;
+                        else break;
                     }
-                }
-                col += width;
-            }
-        }
-    }
-
-    // ---------- +X Faces ----------
-    for (int x = 0; x < sizeX; x++) {
-        std::vector<int> mask(sizeY * sizeZ, -1);
-        for (int z = 0; z < sizeZ; z++) {
-            for (int y = 0; y < sizeY; y++) {
-                int id = getLocalVoxel(x, y, z);
-                if (id <= 0) continue;
-                bool exposed = !isSolidGlobal(x + 1, y, z);
-                size_t idx = static_cast<size_t>(z) * sizeY + y;
-                mask[idx] = exposed ? id : -1;
-            }
-        }
-        for (int row = 0; row < sizeZ; row++) {
-            int col = 0;
-            while (col < sizeY) {
-                size_t idx = static_cast<size_t>(row) * sizeY + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
-                int height = 1;
-                while (col + height < sizeY) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeY + (col + height);
-                    if (mask[idx2] == currentID) height++;
-                    else break;
-                }
-                int depth = 1;
-                bool done = false;
-                while (!done && row + depth < sizeZ) {
-                    for (int k = 0; k < height; k++) {
-                        size_t idx3 = static_cast<size_t>(row + depth) * sizeY + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done && (row + depth) < sizeZ) {
+                        for (int k = 0; k < width; k++) {
+                            size_t m3 = (size_t)(row + depth) * sizeX + (col + k);
+                            if (mask[m3] != currentID) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
                     }
-                    if (!done) depth++;
-                }
-                buildQuadPosX(col, row, height, depth, x,
-                    offsetX, offsetY, offsetZ,
-                    currentID,
-                    outVertices, outIndices);
-                for (int d = 0; d < depth; d++) {
-                    for (int h = 0; h < height; h++) {
-                        size_t idx4 = static_cast<size_t>(row + d) * sizeY + (col + h);
-                        mask[idx4] = -1;
+                    buildQuadPosY(
+                        col, row, width, depth, y,
+                        offsetX, offsetY, offsetZ,
+                        currentID,
+                        outVertices, outIndices
+                    );
+                    for (int d = 0; d < depth; d++) {
+                        for (int w = 0; w < width; w++) {
+                            size_t m4 = (size_t)(row + d) * sizeX + (col + w);
+                            mask[m4] = -1;
+                        }
                     }
+                    col += width;
                 }
-                col += height;
             }
         }
     }
 
-    // ---------- -X Faces ----------
-    for (int x = 0; x < sizeX; x++) {
-        std::vector<int> mask(sizeY * sizeZ, -1);
-        for (int z = 0; z < sizeZ; z++) {
-            for (int y = 0; y < sizeY; y++) {
-                int id = getLocalVoxel(x, y, z);
-                if (id <= 0) continue;
-                bool exposed = !isSolidGlobal(x - 1, y, z);
-                size_t idx = static_cast<size_t>(z) * sizeY + y;
-                mask[idx] = exposed ? id : -1;
+    // =========== -Y Faces ===========
+    {
+        for (int y = 0; y < sizeY; y++) {
+            std::vector<int> mask(sizeX * sizeZ, -1);
+            for (int z = 0; z < sizeZ; z++) {
+                for (int x = 0; x < sizeX; x++) {
+                    int id = getLocalVoxel(x, y, z);
+                    if (id <= 0) continue;
+                    bool exposed = !isSolidGlobal(x, y - 1, z);
+                    size_t idx = (size_t)z * sizeX + x;
+                    mask[idx] = exposed ? id : -1;
+                }
             }
-        }
-        for (int row = 0; row < sizeZ; row++) {
-            int col = 0;
-            while (col < sizeY) {
-                size_t idx = static_cast<size_t>(row) * sizeY + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
-                int height = 1;
-                while (col + height < sizeY) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeY + (col + height);
-                    if (mask[idx2] == currentID) height++;
-                    else break;
-                }
-                int depth = 1;
-                bool done = false;
-                while (!done && row + depth < sizeZ) {
-                    for (int k = 0; k < height; k++) {
-                        size_t idx3 = static_cast<size_t>(row + depth) * sizeY + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
+            for (int row = 0; row < sizeZ; row++) {
+                int col = 0;
+                while (col < sizeX) {
+                    size_t m = (size_t)row * sizeX + col;
+                    int currentID = mask[m];
+                    if (currentID < 0) {
+                        col++;
+                        continue;
                     }
-                    if (!done) depth++;
-                }
-                buildQuadNegX(col, row, height, depth, x,
-                    offsetX, offsetY, offsetZ,
-                    currentID,
-                    outVertices, outIndices);
-                for (int d = 0; d < depth; d++) {
-                    for (int h = 0; h < height; h++) {
-                        size_t idx4 = static_cast<size_t>(row + d) * sizeY + (col + h);
-                        mask[idx4] = -1;
+                    int width = 1;
+                    while (col + width < sizeX) {
+                        size_t m2 = (size_t)row * sizeX + (col + width);
+                        if (mask[m2] == currentID) width++;
+                        else break;
                     }
-                }
-                col += height;
-            }
-        }
-    }
-
-    // ---------- +Y Faces ----------
-    for (int y = 0; y < sizeY; y++) {
-        std::vector<int> mask(sizeX * sizeZ, -1);
-        for (int z = 0; z < sizeZ; z++) {
-            for (int x = 0; x < sizeX; x++) {
-                int id = getLocalVoxel(x, y, z);
-                if (id <= 0) continue;
-                bool exposed = !isSolidGlobal(x, y + 1, z);
-                size_t idx = static_cast<size_t>(z) * sizeX + x;
-                mask[idx] = exposed ? id : -1;
-            }
-        }
-        for (int row = 0; row < sizeZ; row++) {
-            int col = 0;
-            while (col < sizeX) {
-                size_t idx = static_cast<size_t>(row) * sizeX + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
-                int width = 1;
-                while (col + width < sizeX) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeX + (col + width);
-                    if (mask[idx2] == currentID) width++;
-                    else break;
-                }
-                int depth = 1;
-                bool done = false;
-                while (!done && row + depth < sizeZ) {
-                    for (int k = 0; k < width; k++) {
-                        size_t idx3 = static_cast<size_t>(row + depth) * sizeX + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
+                    int depth = 1;
+                    bool done = false;
+                    while (!done && (row + depth) < sizeZ) {
+                        for (int k = 0; k < width; k++) {
+                            size_t m3 = (size_t)(row + depth) * sizeX + (col + k);
+                            if (mask[m3] != currentID) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) depth++;
                     }
-                    if (!done) depth++;
-                }
-                buildQuadPosY(col, row, width, depth, y,
-                    offsetX, offsetY, offsetZ,
-                    currentID,
-                    outVertices, outIndices);
-                for (int d = 0; d < depth; d++) {
-                    for (int w = 0; w < width; w++) {
-                        size_t idx4 = static_cast<size_t>(row + d) * sizeX + (col + w);
-                        mask[idx4] = -1;
+                    buildQuadNegY(
+                        col, row, width, depth, y,
+                        offsetX, offsetY, offsetZ,
+                        currentID,
+                        outVertices, outIndices
+                    );
+                    for (int d = 0; d < depth; d++) {
+                        for (int w = 0; w < width; w++) {
+                            size_t m4 = (size_t)(row + d) * sizeX + (col + w);
+                            mask[m4] = -1;
+                        }
                     }
+                    col += width;
                 }
-                col += width;
             }
         }
     }
 
-    // ---------- -Y Faces ----------
-    for (int y = 0; y < sizeY; y++) {
-        std::vector<int> mask(sizeX * sizeZ, -1);
-        for (int z = 0; z < sizeZ; z++) {
-            for (int x = 0; x < sizeX; x++) {
-                int id = getLocalVoxel(x, y, z);
-                if (id <= 0) continue;
-                bool exposed = !isSolidGlobal(x, y - 1, z);
-                size_t idx = static_cast<size_t>(z) * sizeX + x;
-                mask[idx] = exposed ? id : -1;
-            }
-        }
-        for (int row = 0; row < sizeZ; row++) {
-            int col = 0;
-            while (col < sizeX) {
-                size_t idx = static_cast<size_t>(row) * sizeX + col;
-                int currentID = mask[idx];
-                if (currentID < 0) { col++; continue; }
-                int width = 1;
-                while (col + width < sizeX) {
-                    size_t idx2 = static_cast<size_t>(row) * sizeX + (col + width);
-                    if (mask[idx2] == currentID) width++;
-                    else break;
-                }
-                int depth = 1;
-                bool done = false;
-                while (!done && row + depth < sizeZ) {
-                    for (int k = 0; k < width; k++) {
-                        size_t idx3 = static_cast<size_t>(row + depth) * sizeX + (col + k);
-                        if (mask[idx3] != currentID) { done = true; break; }
-                    }
-                    if (!done) depth++;
-                }
-                buildQuadNegY(col, row, width, depth, y,
-                    offsetX, offsetY, offsetZ,
-                    currentID,
-                    outVertices, outIndices);
-                for (int d = 0; d < depth; d++) {
-                    for (int w = 0; w < width; w++) {
-                        size_t idx4 = static_cast<size_t>(row + d) * sizeX + (col + w);
-                        mask[idx4] = -1;
-                    }
-                }
-                col += width;
-            }
-        }
-    }
-
-    // Return whether we generated any geometry
+    // Return whether we generated geometry
     return !outVertices.empty();
 }

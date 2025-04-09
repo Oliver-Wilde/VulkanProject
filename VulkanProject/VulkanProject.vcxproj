@@ -157,7 +157,7 @@
     <ClCompile Include="External Libraries\imgui\imgui_draw.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_tables.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="src\Engine\Graphics\Frustum.cpp" />
+    <ClCompile Include="src\Engine\Graphics\Frustrum.cpp" />
     <ClCompile Include="src\Engine\Core\Application.cpp" />
     <ClCompile Include="src\Engine\Core\Time.cpp" />
     <ClCompile Include="src\Engine\Core\Window.cpp" />
@@ -180,6 +180,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
+    <ClInclude Include="src\Engine\Voxels\IBlockProvider.h" />
     <ClInclude Include="src\Engine\Voxels\Meshing\LODMesher.h" />
     <ClInclude Include="src\Engine\Graphics\UIRenderer.h" />
     <ClInclude Include="src\Engine\Voxels\Meshing\GreedyMesher.h" />
@@ -499,6 +500,7 @@
     <ClInclude Include="src\Engine\Voxels\ChunkManager.h" />
     <ClInclude Include="src\Engine\Voxels\Generation\FastNoiseLite.h" />
     <ClInclude Include="src\Engine\Voxels\Generation\TerrainGenerator.h" />
+    <ClInclude Include="src\Engine\Voxels\MiniChunk.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelSetup.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelType.h" />
     <ClInclude Include="src\Engine\Voxels\VoxelTypeRegistry.h" />

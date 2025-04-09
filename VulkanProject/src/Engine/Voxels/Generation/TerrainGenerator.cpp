@@ -38,7 +38,7 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 
     // Example: Larger base + amplitude for massive mountains
     int baseLevel = 8;
-    int mountainAmp = 128;
+    int mountainAmp = 64;
 
     // Use a lower frequency => large horizontal features
     m_noise.SetFrequency(0.001f);
