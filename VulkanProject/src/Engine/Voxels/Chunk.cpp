@@ -4,6 +4,8 @@
 #include <utility>     // for std::pair
 #include <algorithm>   // for std::fill
 #include <glm/vec3.hpp>
+#include <atomic>
+#include <limits>      // [NEW: for std::numeric_limits]
 
 // -----------------------------------------------------------------------------
 // STATIC: track total CPU usage across all chunks
@@ -33,6 +35,12 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
         m_lodGenerated[i] = false;
         m_lodGeomError[i] = 0.0f;
     }
+
+    // [NEW: Initialize bounding box fields]
+    // We'll consider it invalid until we recalc
+    m_hasValidBounds = false;
+    m_localMinFilled = glm::ivec3(0, 0, 0);
+    m_localMaxFilled = glm::ivec3(SIZE_X - 1, SIZE_Y - 1, SIZE_Z - 1);
 }
 
 // -----------------------------------------------------------------------------
@@ -66,6 +74,9 @@ void Chunk::makeUniform(uint8_t uniformID)
 
     // Set our uniform block ID
     m_uniformBlockID = uniformID;
+
+    // [NEW: Not valid if it's uniform, so no bounding box needed]
+    m_hasValidBounds = false;
 }
 
 // -----------------------------------------------------------------------------
@@ -88,6 +99,9 @@ void Chunk::makeNormal(uint8_t oldUniformID)
 
     // Add to global CPU usage
     s_totalCPUBytes.fetch_add(totalVoxels * sizeof(uint8_t), std::memory_order_relaxed);
+
+    // [NEW: bounding box will be computed once we actually fill real data]
+    m_hasValidBounds = false;
 }
 
 // -----------------------------------------------------------------------------
@@ -100,7 +114,7 @@ int Chunk::getBlock(int x, int y, int z) const
         y < 0 || y >= SIZE_Y ||
         z < 0 || z >= SIZE_Z)
     {
-        return -1; // The mesher will interpret -1 as air
+        return -1; // mesher treats -1 as air
     }
 
     switch (m_state)
@@ -170,7 +184,7 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
     }
     // else if NORMAL => we already have the array
 
-    // Now we definitely have m_blocks allocated if we’re NORMAL
+    // Now we definitely have m_blocks if we’re NORMAL
     size_t idx = static_cast<size_t>(x)
         + static_cast<size_t>(SIZE_X) *
         (static_cast<size_t>(y)
@@ -189,20 +203,138 @@ void Chunk::setBlock(int x, int y, int z, int voxelID)
             m_lodGenerated[lod] = false;
             m_lodGeomError[lod] = 0.0f;
         }
+
+        // [NEW: bounding box might be bigger or smaller, so just mark invalid for now.
+        // We'll do a full recalc later. For big dynamic worlds, you might want a more
+        // incremental approach, but let's keep it simple:
+        m_hasValidBounds = false;
     }
 }
 
 // -----------------------------------------------------------------------------
-// getBoundingBox => min/max in world space
+// getBoundingBox => min/max in world coords
 // -----------------------------------------------------------------------------
 void Chunk::getBoundingBox(glm::vec3& outMin, glm::vec3& outMax) const
 {
-    float baseX = static_cast<float>(m_worldX * SIZE_X);
-    float baseY = static_cast<float>(m_worldY * SIZE_Y);
-    float baseZ = static_cast<float>(m_worldZ * SIZE_Z);
+    // If chunk is empty => bounding box is degenerate => no geometry
+    if (m_state == ChunkState::EMPTY)
+    {
+        outMin = glm::vec3(0, 0, 0);
+        outMax = glm::vec3(0, 0, 0);
+        return;
+    }
+    // If chunk is SOLID => entire region
+    if (m_state == ChunkState::SOLID)
+    {
+        float baseX = static_cast<float>(m_worldX * SIZE_X);
+        float baseY = static_cast<float>(m_worldY * SIZE_Y);
+        float baseZ = static_cast<float>(m_worldZ * SIZE_Z);
 
-    outMin = glm::vec3(baseX, baseY, baseZ);
-    outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
+        outMin = glm::vec3(baseX, baseY, baseZ);
+        outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
+        return;
+    }
+
+    // For NORMAL:
+    if (!m_hasValidBounds)
+    {
+        // If we haven't recalculated bounds yet, fallback to the entire chunk
+        float baseX = static_cast<float>(m_worldX * SIZE_X);
+        float baseY = static_cast<float>(m_worldY * SIZE_Y);
+        float baseZ = static_cast<float>(m_worldZ * SIZE_Z);
+
+        outMin = glm::vec3(baseX, baseY, baseZ);
+        outMax = outMin + glm::vec3(SIZE_X, SIZE_Y, SIZE_Z);
+        return;
+    }
+
+    // else we have valid bounds
+    glm::ivec3 lmin = m_localMinFilled;
+    glm::ivec3 lmax = m_localMaxFilled;
+    float bx = static_cast<float>(m_worldX * SIZE_X);
+    float by = static_cast<float>(m_worldY * SIZE_Y);
+    float bz = static_cast<float>(m_worldZ * SIZE_Z);
+
+    outMin = glm::vec3(bx + lmin.x, by + lmin.y, bz + lmin.z);
+    // +1 because we treat lmax as inclusive in local space
+    outMax = glm::vec3(bx + lmax.x + 1.0f,
+        by + lmax.y + 1.0f,
+        bz + lmax.z + 1.0f);
+}
+
+// -----------------------------------------------------------------------------
+// recalcFilledBounds => scans all voxels to find the min/max of non-air blocks
+// [NEW FUNCTION]
+// -----------------------------------------------------------------------------
+void Chunk::recalcFilledBounds()
+{
+    // For NON-NORMAL states, no bounding box to compute
+    if (m_state == ChunkState::EMPTY)
+    {
+        m_hasValidBounds = false;
+        return;
+    }
+    if (m_state == ChunkState::SOLID)
+    {
+        // It's completely filled
+        m_hasValidBounds = true;
+        m_localMinFilled = glm::ivec3(0, 0, 0);
+        m_localMaxFilled = glm::ivec3(SIZE_X - 1, SIZE_Y - 1, SIZE_Z - 1);
+        return;
+    }
+
+    // So we're NORMAL => we must have m_blocks
+    if (m_blocks.empty())
+    {
+        // Something odd => treat as empty
+        m_hasValidBounds = false;
+        return;
+    }
+
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int minZ = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    int maxZ = std::numeric_limits<int>::min();
+
+    // Loop over entire chunk
+    for (int z = 0; z < SIZE_Z; z++)
+    {
+        for (int y = 0; y < SIZE_Y; y++)
+        {
+            for (int x = 0; x < SIZE_X; x++)
+            {
+                size_t idx = static_cast<size_t>(x)
+                    + static_cast<size_t>(SIZE_X) *
+                    (static_cast<size_t>(y)
+                        + static_cast<size_t>(SIZE_Y) * static_cast<size_t>(z));
+
+                uint8_t blockID = m_blocks[idx];
+                if (blockID != 0) // non-air
+                {
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (z < minZ) minZ = z;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                    if (z > maxZ) maxZ = z;
+                }
+            }
+        }
+    }
+
+    if (maxX < minX)
+    {
+        // Means no non-air found
+        m_hasValidBounds = false;
+    }
+    else
+    {
+        m_hasValidBounds = true;
+        m_localMinFilled = glm::ivec3(minX, minY, minZ);
+        m_localMaxFilled = glm::ivec3(maxX, maxY, maxZ);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -234,7 +366,7 @@ std::pair<size_t, size_t> Chunk::getVoxelUsage() const
         }
     }
 
-    // else NORMAL => we must examine m_blocks
+    // else NORMAL => examine m_blocks
     size_t activeCount = 0;
     size_t emptyCount = 0;
 

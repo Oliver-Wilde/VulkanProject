@@ -364,10 +364,10 @@ void Renderer::renderFrame()
                 float dist = glm::distance(m_camera.position, glm::vec3(cx, cy, cz));
 
                 int lodIndex = 0;
-                if (dist > 500.f)   lodIndex = 1;
-                if (dist > 1000.f)   lodIndex = 2;
-                if (dist > 2000.f)  lodIndex = 3;
-                if (dist > 4000.f)  lodIndex = 4;
+                if (dist > 250.f)   lodIndex = 1;
+                if (dist > 500.f)   lodIndex = 2;
+                if (dist > 750.f)  lodIndex = 3;
+                if (dist > 6000.f)  lodIndex = 4;
                 if (dist > 8000.f)  lodIndex = 5;
                 if (dist > 16000.f) lodIndex = 6;
                 if (dist > 32000.f) {
