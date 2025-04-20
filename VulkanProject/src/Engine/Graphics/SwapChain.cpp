@@ -1,114 +1,170 @@
-// -----------------------------------------------------------------------------
-// Includes
-// -----------------------------------------------------------------------------
+﻿// ============================================================================
+// SwapChain.cpp  – C++14‑friendly version
+//   • Replaces std::clamp with manual min/max logic
+//   • Removes the unused getGraphicsFamilyIndex() call
+//   • **2025‑04‑20:** Default surface format changed to *UNORM*
+// ============================================================================
+
 #include "SwapChain.h"
 #include "VulkanContext.h"
-#include "Engine/Core/Window.h"  // So we can get the framebuffer size
-#include <stdexcept>
+#include "Engine/Core/Window.h"
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
 #include <vector>
-#include <GLFW/glfw3.h>         // For glfwGetFramebufferSize
+#include <algorithm>
+#include <stdexcept>
 
-void SwapChain::init(VulkanContext* context, Window* window)
+// ─────────────────────────────────────────────────────────────────────────────
+static VkPresentModeKHR chooseBestPresentMode(
+    const std::vector<VkPresentModeKHR>& modes)
 {
-    m_context = context;
+    for (VkPresentModeKHR m : modes)
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR)
+            return m;
+    return VK_PRESENT_MODE_FIFO_KHR;   // always supported
+}
 
-    // -------------------------------------------------------------------------
-    // 1) Query the actual framebuffer size from the GLFW window
-    // -------------------------------------------------------------------------
-    int width = 0, height = 0;
-    glfwGetFramebufferSize(window->getGLFWwindow(), &width, &height);
-
-    // If the user has the window minimized, width/height can be 0,
-    // so we clamp them to at least 1 to avoid errors.
-    if (width <= 0) width = 1;
-    if (height <= 0) height = 1;
-
-    // -------------------------------------------------------------------------
-    // 2) Choose color format (in real code, you'd query surface formats)
-    // -------------------------------------------------------------------------
-    m_colorFormat = VK_FORMAT_B8G8R8A8_UNORM;
-    m_extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
-
-    // -------------------------------------------------------------------------
-    // 3) Create the swapchain
-    //    (This is placeholder code; in production you'd query for support,
-    //     pick minImageCount, presentMode, etc. more dynamically.)
-    // -------------------------------------------------------------------------
-    VkSwapchainCreateInfoKHR createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    createInfo.surface = m_context->getSurface();
-    createInfo.minImageCount = 2; // double-buffering
-    createInfo.imageFormat = m_colorFormat;
-    createInfo.imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
-    createInfo.imageExtent = m_extent;
-    createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    createInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR; // always supported
-    createInfo.clipped = VK_TRUE;
-    createInfo.oldSwapchain = VK_NULL_HANDLE;
-
-    // If your graphics & present queue families differ, set imageSharingMode = VK_SHARING_MODE_CONCURRENT
-    // but for now we assume they are the same => VK_SHARING_MODE_EXCLUSIVE
-    createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    createInfo.queueFamilyIndexCount = 0;
-    createInfo.pQueueFamilyIndices = nullptr;
-
-    if (vkCreateSwapchainKHR(m_context->getDevice(), &createInfo, nullptr, &m_swapChain) != VK_SUCCESS)
-    {
-        throw std::runtime_error("Failed to create swapchain!");
-    }
-
-    // -------------------------------------------------------------------------
-    // 4) Retrieve the swapchain images
-    // -------------------------------------------------------------------------
-    uint32_t imageCount = 0;
-    vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapChain, &imageCount, nullptr);
-    std::vector<VkImage> swapChainImages(imageCount);
-    vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapChain, &imageCount, swapChainImages.data());
-
-    // -------------------------------------------------------------------------
-    // 5) Create image views for each swapchain image
-    // -------------------------------------------------------------------------
-    m_imageViews.resize(imageCount);
-
-    for (uint32_t i = 0; i < imageCount; i++)
-    {
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = swapChainImages[i];
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = m_colorFormat;
-        viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
-
-        if (vkCreateImageView(m_context->getDevice(), &viewInfo, nullptr, &m_imageViews[i]) != VK_SUCCESS)
-        {
-            throw std::runtime_error("Failed to create image view for swapchain image!");
-        }
-    }
+// ============================================================================
+// public
+// ============================================================================
+void SwapChain::init(VulkanContext* ctx, Window* window)
+{
+    m_context = ctx;
+    createSwapChain(window);
+    createImageViews();
 }
 
 void SwapChain::cleanup()
 {
-    // Destroy image views
+    VkDevice dev = m_context->getDevice();
     for (auto view : m_imageViews)
-    {
-        vkDestroyImageView(m_context->getDevice(), view, nullptr);
-    }
+        vkDestroyImageView(dev, view, nullptr);
     m_imageViews.clear();
 
-    // Destroy swapchain
-    if (m_swapChain) {
-        vkDestroySwapchainKHR(m_context->getDevice(), m_swapChain, nullptr);
-        m_swapChain = VK_NULL_HANDLE;
+    if (m_swapChain)
+        vkDestroySwapchainKHR(dev, m_swapChain, nullptr);
+    m_swapChain = VK_NULL_HANDLE;
+}
+
+// ============================================================================
+// createSwapChain
+// ============================================================================
+void SwapChain::createSwapChain(Window* window)
+{
+    VkPhysicalDevice gpu = m_context->getPhysicalDevice();
+    VkSurfaceKHR     surf = m_context->getSurface();
+
+    // Query caps / formats / present modes ----------------------------------
+    VkSurfaceCapabilitiesKHR caps{};
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surf, &caps);
+
+    uint32_t fmtCount = 0, pmCount = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surf, &fmtCount, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(fmtCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surf, &fmtCount, formats.data());
+
+    vkGetPhysicalDeviceSurfacePresentModesKHR(gpu, surf, &pmCount, nullptr);
+    std::vector<VkPresentModeKHR> presentModes(pmCount);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(gpu, surf,
+        &pmCount, presentModes.data());
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Choose surface format  – **Prefer linear UNORM, NOT sRGB** (gamma will
+    // be applied elsewhere).  Fallback to whatever the driver gave us.
+    // ───────────────────────────────────────────────────────────────────────
+    VkSurfaceFormatKHR surfaceFmt = formats[0];
+    for (const auto& f : formats)
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
+            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            surfaceFmt = f;
+            break;
+        }
+
+    // Present mode -----------------------------------------------------------
+    VkPresentModeKHR present = chooseBestPresentMode(presentModes);
+
+    // Extent (window size clamped to caps) -----------------------------------
+    VkExtent2D extent;
+    if (caps.currentExtent.width != UINT32_MAX)
+    {
+        extent = caps.currentExtent;
+    }
+    else
+    {
+        int w, h;  glfwGetFramebufferSize(window->getGLFWwindow(), &w, &h);
+        extent.width = std::max(caps.minImageExtent.width,
+            std::min<uint32_t>(w, caps.maxImageExtent.width));
+        extent.height = std::max(caps.minImageExtent.height,
+            std::min<uint32_t>(h, caps.maxImageExtent.height));
+    }
+
+    // Image count ------------------------------------------------------------
+    uint32_t imgCount = caps.minImageCount + 1;
+    if (caps.maxImageCount && imgCount > caps.maxImageCount)
+        imgCount = caps.maxImageCount;
+
+    // Swap‑chain create info --------------------------------------------------
+    VkSwapchainCreateInfoKHR ci{};
+    ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    ci.surface = surf;
+    ci.minImageCount = imgCount;
+    ci.imageFormat = surfaceFmt.format;
+    ci.imageColorSpace = surfaceFmt.colorSpace;
+    ci.imageExtent = extent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;   // fastest
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    ci.presentMode = present;
+    ci.clipped = VK_TRUE;
+
+    if (vkCreateSwapchainKHR(m_context->getDevice(), &ci, nullptr,
+        &m_swapChain) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create swap chain!");
+
+    // Retrieve images --------------------------------------------------------
+    vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapChain,
+        &imgCount, nullptr);
+    m_images.resize(imgCount);
+    vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapChain,
+        &imgCount, m_images.data());
+
+    m_colorFormat = surfaceFmt.format;
+    m_extent = extent;
+}
+
+// ============================================================================
+// createImageViews
+// ============================================================================
+void SwapChain::createImageViews()
+{
+    m_imageViews.resize(m_images.size());
+
+    for (size_t i = 0; i < m_images.size(); ++i)
+    {
+        VkImageViewCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ci.image = m_images[i];
+        ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ci.format = m_colorFormat;
+        ci.components = {
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+        ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ci.subresourceRange.baseMipLevel = 0;
+        ci.subresourceRange.levelCount = 1;
+        ci.subresourceRange.baseArrayLayer = 0;
+        ci.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(m_context->getDevice(), &ci, nullptr,
+            &m_imageViews[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create swap‑chain image view!");
     }
 }
+// ============================================================================
+// end of file
+// ============================================================================

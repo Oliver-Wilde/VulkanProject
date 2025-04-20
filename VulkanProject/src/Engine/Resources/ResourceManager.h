@@ -23,106 +23,71 @@ public:
     // --------------------------------------------------------------------------
     // Shader Modules
     // --------------------------------------------------------------------------
-    /**
-     * Loads a SPIR-V shader module from file if not already loaded.
-     * Returns the VkShaderModule handle.
-     */
+    /** Loads (or retrieves) a SPIR?V shader module. */
     VkShaderModule loadShaderModule(const std::string& filePath);
 
     // --------------------------------------------------------------------------
     // Chunk Buffer Creation & Destruction
     // --------------------------------------------------------------------------
-    /**
-     * Allocates device-local buffers for vertices and indices, then
-     * copies data into them using a staging buffer. The resulting
-     * buffers and memory handles are returned in outVertexBuffer, outVertexMemory,
-     * outIndexBuffer, outIndexMemory.
-     */
+    /** Creates device?local buffers and uploads vertex/index data. */
     void createChunkBuffers(
         const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVertexBuffer,
         VkDeviceMemory& outVertexMemory,
         VkBuffer& outIndexBuffer,
-        VkDeviceMemory& outIndexMemory
-    );
+        VkDeviceMemory& outIndexMemory);
 
-    /**
-     * Frees the specified vertex and index buffers, along with their memory.
-     * If the handles are VK_NULL_HANDLE, does nothing.
-     */
+    /** Destroys the specified vertex/index buffers and frees their memory. */
     void destroyChunkBuffers(
         VkBuffer vb,
         VkDeviceMemory vbMem,
         VkBuffer ib,
-        VkDeviceMemory ibMem
-    );
+        VkDeviceMemory ibMem);
 
+    /** Returns total GPU bytes currently allocated for buffers (debug info). */
     size_t GetTotalGPUBufferBytes() const;
+
+    // --------------------------------------------------------------------------
+    // Low?level copy helpers (now PUBLIC so Renderer can call them)
+    // --------------------------------------------------------------------------
+    /** Copy an entire range from src ? dst using a staging command buffer. */
+    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+
+    /** Copy multiple VkBufferCopy regions in one go (used by MeshBatch). */
+    void copyBufferRegions(
+        VkBuffer src,
+        VkBuffer dst,
+        const VkBufferCopy* regions,
+        uint32_t regionCount);
 
 private:
     // --------------------------------------------------------------------------
     // Internal Helpers
     // --------------------------------------------------------------------------
-    /**
-     * readFile: loads binary data from disk, used for loading SPIR-V.
-     */
     std::vector<char> readFile(const std::string& filePath);
 
-    /**
-     * createBuffer: wraps vkCreateBuffer + vkAllocateMemory + vkBindBufferMemory.
-     */
+    /** vkCreateBuffer + memory allocation + bind. */
     void createBuffer(
         VkDeviceSize size,
         VkBufferUsageFlags usage,
         VkMemoryPropertyFlags properties,
         VkBuffer& buffer,
-        VkDeviceMemory& bufferMemory
-    );
+        VkDeviceMemory& bufferMemory);
 
-    /**
-     * copyBuffer: does a single, direct copy from src to dst buffer of 'size' bytes,
-     * using a temporary command buffer and fence. One region only.
-     */
-    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
-
-    /**
-     * copyBufferRegions: same approach as copyBuffer but for multiple
-     * VkBufferCopy regions at once.
-     */
-    void copyBufferRegions(
-        VkBuffer src,
-        VkBuffer dst,
-        const VkBufferCopy* regions,
-        uint32_t regionCount
-    );
-
-    /**
-     * findMemoryType: picks an appropriate memory type index given
-     * memory requirements and desired properties.
-     */
+    /** Selects a suitable memory type index. */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
-    /**
-     * createStagingBuffer: creates or resizes (if needed) a single staging buffer
-     * of at least 'size' bytes, storing it in m_stagingBuffer / m_stagingMemory.
-     */
+    /** Creates or grows the reusable staging buffer. */
     void createStagingBuffer(VkDeviceSize size);
-
-    /**
-     * getOrCreateStagingBuffer: returns m_stagingBuffer / m_stagingMemory,
-     * ensuring it is large enough for 'size' bytes.
-     */
     std::pair<VkBuffer, VkDeviceMemory> getOrCreateStagingBuffer(VkDeviceSize size);
 
 private:
-    VulkanContext* m_context;
+    VulkanContext* m_context = nullptr;
     std::unordered_map<std::string, VkShaderModule> m_shaderModules;
 
-    // --------------------------------------------------------------------------
-    // Single Reusable Staging Buffer (Phase 4 enhancement)
-    // --------------------------------------------------------------------------
-    VkBuffer       m_stagingBuffer = VK_NULL_HANDLE; ///< Single staging buffer handle
-    VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE; ///< Memory for staging buffer
-    VkDeviceSize   m_stagingBufferSize = 0;             ///< Current capacity of staging buffer
+    // Single reusable staging buffer
+    VkBuffer       m_stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
+    VkDeviceSize   m_stagingBufferSize = 0;
 };

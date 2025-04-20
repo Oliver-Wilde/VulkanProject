@@ -115,8 +115,14 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
     }
 
     auto endTime = high_resolution_clock::now();
-    s_totalGenTime += duration<double>(endTime - startTime).count();
+    double genSec = duration<double>(endTime - startTime).count();
+
+    // Update local stats
+    s_totalGenTime += genSec;
     s_genCount++;
+
+    // NEW: Log chunk generation time to CSV
+    CpuProfiler::LogChunkGeneration(cx, cy, cz, genSec);
 }
 
 // -----------------------------------------------------------------------------

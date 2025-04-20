@@ -1,13 +1,14 @@
-#pragma once
+﻿#pragma once
 
 #include <deque>
-#include <vector>            // for std::vector
+#include <vector>
 #include <vulkan/vulkan.h>
-#include <glm/mat4x4.hpp>    // for MVPBlock
-#include "Engine/Scene/Camera.h"
-#include "Engine/Voxels/VoxelWorld.h"  // for QueuedChunkDestruction
+#include <glm/mat4x4.hpp>
 
-// Forward declarations
+#include "Engine/Scene/Camera.h"
+#include "Engine/Voxels/VoxelWorld.h"   // QueuedChunkDestruction
+
+// ───────────────────────── forward declarations ────────────────────────────
 class Window;
 class VulkanContext;
 class ResourceManager;
@@ -17,19 +18,13 @@ class Camera;
 class Time;
 class UIRenderer;
 
-/**
- * A simple struct holding our MVP matrix.
- * This is what's placed in a uniform buffer for shaders.
- */
+// ───────────────────────── MVP uniform payload ─────────────────────────────
 struct MVPBlock
 {
     glm::mat4 mvp;
 };
 
-/**
- * Holds resources for each "frame in flight" (2 or 3).
- * This includes command buffers, semaphores, and fences.
- */
+// ───────────────────────── per‑flight frame resources ──────────────────────
 struct FrameResources
 {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -38,149 +33,111 @@ struct FrameResources
     VkFence         inFlightFence = VK_NULL_HANDLE;
 };
 
-/// How many frames we keep in flight (e.g. double or triple buffering).
-static const int MAX_FRAMES_IN_FLIGHT = 2;
+static const int MAX_FRAMES_IN_FLIGHT = 2;   // double‑buffered
 
-/**
- * The Renderer class is responsible for:
- *   - Creating swap chain & related Vulkan resources
- *   - Managing pipelines, uniform buffers (MVP), etc.
- *   - Providing a renderFrame() function that draws the voxel world and the ImGui UI
- */
+// ═══════════════════════════   R E N D E R E R   ═══════════════════════════
 class Renderer
 {
 public:
-    /**
-     * Constructor
-     */
     Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld);
-
-    /**
-     * Destructor
-     */
     ~Renderer();
 
-    /**
-     * Render one frame:
-     *   - Acquire swap chain image
-     *   - Record command buffer
-     *   - Let UIRenderer handle ImGui UI
-     *   - Present the result
-     */
     void renderFrame();
-
-    /**
-     * Set the camera used for MVP calculations.
-     */
     void setCamera(const Camera& cam);
-
-    /**
-     * Toggle wireframe pipeline usage.
-     */
     void toggleWireframe();
-
-    /**
-     * Enable or disable frustum culling.
-     */
-    void enableFrustumCulling(bool enable); 
-
-    /**
-     * Provide a pointer to your Time object, if you want dt/fps in the renderer.
-     */
+    void enableFrustumCulling(bool enable);
     void setTime(Time* time);
-
-    /**
-     * Enqueue chunk buffers for deferred free on next use of this frame index.
-     */
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
 private:
-    /**
-     * Creates the uniform buffer for MVP (model-view-projection),
-     * plus its descriptor set/pool.
-     */
+    // ───────────────────────‑ big‑buffer “MeshBatch” ‑──────────────────────
+    struct MeshBatch
+    {
+        // GPU resources
+        VkBuffer       vbo = VK_NULL_HANDLE;
+        VkBuffer       ibo = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;   // vertex allocation
+
+        // total bytes currently allocated
+        VkDeviceSize   vboSize = 0;
+        VkDeviceSize   iboSize = 0;
+
+        // bytes consumed during *this* frame
+        VkDeviceSize   vboUsed = 0;
+        VkDeviceSize   iboUsed = 0;
+
+        /** Ensure the big buffers have at least the requested capacity.
+         *  May destroy & recreate buffers if they need to grow. */
+        void ensureCapacity(Renderer* owner,
+            VkDeviceSize wantVbo,
+            VkDeviceSize wantIbo);
+
+        /** Reset usage counters at frame start. */
+        inline void reset() { vboUsed = iboUsed = 0; }
+
+        /** Append one chunk’s geometry into the big VBO/IBO.
+         *  Returns the *first index* for that chunk. */
+        uint32_t appendChunk(Renderer* owner,
+            VkBuffer         srcVbo, VkDeviceSize srcVboBytes,
+            VkBuffer         srcIbo, VkDeviceSize srcIboBytes);
+    };
+
+    // helper that builds current frame’s batch & records one draw call
+    void buildAndRecordBatch(VkCommandBuffer cmdBuf);
+
+    // ───────────────────── internal helpers ────────────────────────────────
     void createMVPUniformBuffer();
-
-    /**
-     * Updates the MVP uniform buffer with the current camera view/projection.
-     */
     void updateMVP();
-
-    /**
-     * Recreates the swap chain (and relevant resources).
-     */
     void recreateSwapChain();
 
-    /**
-     * Helper for creating any Vulkan buffer.
-     */
-    void createBuffer(
-        VkDeviceSize size,
-        VkBufferUsageFlags usage,
-        VkMemoryPropertyFlags properties,
+    void createBuffer(VkDeviceSize         size,
+        VkBufferUsageFlags   usage,
+        VkMemoryPropertyFlags props,
         VkBuffer& buffer,
-        VkDeviceMemory& bufferMemory
-    );
+        VkDeviceMemory& bufferMemory);
 
-    /**
-     * Finds a memory type from the GPU that fits 'filter' and 'props'.
-     */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
+    void     addSample(std::deque<float>& buffer, float value);
+    float    computeAverage(const std::deque<float>& buffer);
+    void     freeDeferredResources();
 
-    /**
-     * Adds a new sample to a rolling-average buffer (for e.g. FPS or CPU usage).
-     */
-    void addSample(std::deque<float>& buffer, float value);
-
-    /**
-     * Computes the average of all samples in a deque.
-     */
-    float computeAverage(const std::deque<float>& buffer);
-
-    /**
-     * Called each frame at start to free chunk buffers queued from previous usage.
-     */
-    void freeDeferredResources();
-
-private:
-    // Core references
+    // ───────────────────── member variables ────────────────────────────────
     VulkanContext* m_context = nullptr;
     Window* m_window = nullptr;
     VoxelWorld* m_voxelWorld = nullptr;
 
-    // Manager objects
     ResourceManager* m_resourceMgr = nullptr;
     PipelineManager* m_pipelineMgr = nullptr;
     RenderPassManager* m_rpManager = nullptr;
     UIRenderer* m_uiRenderer = nullptr;
 
-    // Swap chain + MVP data
     class SwapChain* m_swapChain = nullptr;
+
+    // MVP uniform
     VkBuffer            m_mvpBuffer = VK_NULL_HANDLE;
     VkDeviceMemory      m_mvpMemory = VK_NULL_HANDLE;
     VkDescriptorPool    m_mvpDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
-    // For ring-buffer chunk destruction
+    // per‑frame chunk‑buffer destroy queue
     std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
-    // Per-frame resources
-    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
-    int            m_currentFrame = 0; // which frame in flight
+    // frame resources
+    FrameResources      m_frames[MAX_FRAMES_IN_FLIGHT];
+    int                 m_currentFrame = 0;
 
-    // If using Time for dt/fps
+    // per‑frame big‑buffer batches
+    MeshBatch           m_batches[MAX_FRAMES_IN_FLIGHT];
+
+    // timing & stats
     Time* m_time = nullptr;
+    bool                m_wireframeOn = false;
+    bool                m_enableFrustumCulling = false;
+    static const int    ROLLING_AVG_SAMPLES = 120;
+    std::deque<float>   m_fpsSamples;
+    std::deque<float>   m_cpuSamples;
 
-    // Toggles
-    bool m_wireframeOn = false;
-    bool m_enableFrustumCulling = false;
-
-    // Rolling-average data
-    static const int ROLLING_AVG_SAMPLES = 120;
-    std::deque<float> m_fpsSamples;
-    std::deque<float> m_cpuSamples;
-
-    // Current camera
-    Camera m_camera;
+    // camera
+    Camera              m_camera;
 };

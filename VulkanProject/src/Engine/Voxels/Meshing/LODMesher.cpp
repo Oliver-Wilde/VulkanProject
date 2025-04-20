@@ -50,128 +50,124 @@ LODMeshData LODMesher::buildLOD(
 {
     LODMeshData out;
 
-    // ----------------------------------------------------------------------------
-    // LOD=0 => use whichever mesher the user selected (Naive or Greedy)
-    // ----------------------------------------------------------------------------
-    if (lodLevel == 0)
-    {
+    // ─────────────────────────────────────────────────────────────────────────
+    // LOD‑0: original path (unchanged)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (lodLevel == 0) {
         std::vector<Vertex> fullVerts;
         std::vector<uint32_t> fullInds;
 
-        // World-space offset
         int offX = cx * Chunk::SIZE_X;
         int offY = cy * Chunk::SIZE_Y;
         int offZ = cz * Chunk::SIZE_Z;
 
-        mesher->generateMesh(
-            chunk,             // chunk data
-            cx, cy, cz,        // chunk coords (for neighbor logic if needed)
+        mesher->generateMesh(chunk, cx, cy, cz,
             fullVerts, fullInds,
             offX, offY, offZ,
-            manager
-        );
+            manager);
 
         out.verts = std::move(fullVerts);
         out.inds = std::move(fullInds);
-        out.geometricError = 0.0f; // no "error" at highest LOD
+        out.geometricError = 0.f;
         return out;
     }
 
-    // ----------------------------------------------------------------------------
-    // LOD≥1 => "majority block" approach in a smaller MiniChunk, then GreedyMesher
-    // ----------------------------------------------------------------------------
-    int stride = (1 << lodLevel);
-
-    // If stride is too large in any dimension, we skip
-    if (stride >= Chunk::SIZE_X ||
-        stride >= Chunk::SIZE_Y ||
-        stride >= Chunk::SIZE_Z)
-    {
-        out.geometricError = 0.0f;
+    // ─────────────────────────────────────────────────────────────────────────
+    // LOD ≥ 1  —  “solid‑any + dilate” coarse representation
+    // ─────────────────────────────────────────────────────────────────────────
+    const int stride = 1 << lodLevel;
+    if (stride >= Chunk::SIZE_X || stride >= Chunk::SIZE_Y || stride >= Chunk::SIZE_Z) {
+        out.geometricError = 0.f;
         return out;
     }
 
-    // Calculate the mini-chunk size in X, Y, Z
-    int miniX = std::max(1, Chunk::SIZE_X / stride);
-    int miniY = std::max(1, Chunk::SIZE_Y / stride);
-    int miniZ = std::max(1, Chunk::SIZE_Z / stride);
+    const int miniX = std::max(1, Chunk::SIZE_X / stride);
+    const int miniY = std::max(1, Chunk::SIZE_Y / stride);
+    const int miniZ = std::max(1, Chunk::SIZE_Z / stride);
 
-    // Base offset in world coords
-    int baseOffX = cx * Chunk::SIZE_X;
-    int baseOffY = cy * Chunk::SIZE_Y;
-    int baseOffZ = cz * Chunk::SIZE_Z;
+    const int baseOffX = cx * Chunk::SIZE_X;
+    const int baseOffY = cy * Chunk::SIZE_Y;
+    const int baseOffZ = cz * Chunk::SIZE_Z;
 
-    // Create our mini-chunk
     MiniChunk mini(miniX, miniY, miniZ, baseOffX, baseOffY, baseOffZ);
 
-    // For each cell in the mini-chunk, pick the most frequent non-air block
-    // from the corresponding stride×stride×stride region in the real chunk.
-    for (int z = 0; z < miniZ; z++)
-    {
-        for (int y = 0; y < miniY; y++)
-        {
-            for (int x = 0; x < miniX; x++)
-            {
-                int startX = x * stride;
-                int startY = y * stride; // crucial to downsample vertically
-                int startZ = z * stride;
+    // --- Pass 1 : height‑span sampling -----------------------------------------
+    for (int z = 0; z < miniZ; ++z)
+        for (int y = 0; y < miniY; ++y)
+            for (int x = 0; x < miniX; ++x) {
 
-                int endX = std::min(startX + stride, Chunk::SIZE_X);
-                int endY = std::min(startY + stride, Chunk::SIZE_Y);
-                int endZ = std::min(startZ + stride, Chunk::SIZE_Z);
+                const int sx = x * stride;
+                const int sy = y * stride;
+                const int sz = z * stride;
 
-                std::unordered_map<int, int> freq;
-                freq.reserve((endX - startX) * (endY - startY) * (endZ - startZ));
+                const int ex = std::min(sx + stride, Chunk::SIZE_X);
+                const int ey = std::min(sy + stride, Chunk::SIZE_Y);
+                const int ez = std::min(sz + stride, Chunk::SIZE_Z);
 
-                for (int zSub = startZ; zSub < endZ; zSub++)
-                {
-                    for (int ySub = startY; ySub < endY; ySub++)
-                    {
-                        for (int xSub = startX; xSub < endX; xSub++)
-                        {
-                            int blockID = chunk.getBlock(xSub, ySub, zSub);
-                            freq[blockID]++;
+                int minY = Chunk::SIZE_Y, maxY = -1;
+                std::array<int, 256> hist{};   // assumes ≤256 voxel types
+                for (int zz = sz; zz < ez; ++zz)
+                    for (int yy = sy; yy < ey; ++yy)
+                        for (int xx = sx; xx < ex; ++xx) {
+                            int id = chunk.getBlock(xx, yy, zz);
+                            if (id == 0) continue;
+                            hist[id]++;
+                            if (yy < minY) minY = yy;
+                            if (yy > maxY) maxY = yy;
                         }
-                    }
+
+                if (maxY < 0) {
+                    // all air
+                    continue;
                 }
 
-                // Highest frequency among non-air
-                int bestBlock = 0;
-                int bestCount = freq[0]; // freq of air
-                for (auto& kv : freq)
-                {
-                    int bID = kv.first;
-                    int count = kv.second;
-                    if (bID != 0 && count > bestCount)
-                    {
-                        bestBlock = bID;
-                        bestCount = count;
-                    }
-                }
+                // pick most common non‑air id
+                int bestID = 1;
+                for (int id = 2; id < (int)hist.size(); ++id)
+                    if (hist[id] > hist[bestID]) bestID = id;
 
-                mini.setBlock(x, y, z, bestBlock);
+                // fill vertical span in mini‑chunk space
+                for (int yy = minY; yy <= maxY; ++yy) {
+                    int localY = (yy - sy) / stride;      // 0..(miniY‑1) in this cell
+                    mini.setBlock(x, localY, z, bestID);
+                }
             }
-        }
-    }
 
-    // Now mesh the mini-chunk with a forced GreedyMesher
+    // no dilation needed now – cells touch vertically
+    // ---- HORIZONTAL dilation (one 6‑neighbour pass) ----
+    MiniChunk filled = mini;                // copy previous result
+    const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} }; // XZ only
+
+    for (int z = 0; z < miniZ; ++z)
+        for (int y = 0; y < miniY; ++y)
+            for (int x = 0; x < miniX; ++x) {
+                if (mini.getBlock(x, y, z) != 0) continue; // already solid
+
+                for (auto d : dirs) {
+                    int nx = x + d[0], nz = z + d[1];
+                    if (nx < 0 || nz < 0 || nx >= miniX || nz >= miniZ) continue;
+
+                    int nb = mini.getBlock(nx, y, nz);
+                    if (nb != 0) {               // neighbour solid → fill this cell
+                        filled.setBlock(x, y, z, nb);
+                        break;
+                    }
+                }
+            }
+
+    // from here on, use 'filled' instead of 'mini'
     std::vector<Vertex> lodVerts;
     std::vector<uint32_t> lodInds;
 
-    s_greedyMesherForLOD.generateMesh(
-        mini,    // IBlockProvider
-        0, 0, 0, // chunk coords not used in LOD≥1
+    s_greedyMesherForLOD.generateMesh(filled,    // <‑‑ use merged chunk
+        0, 0, 0,
         lodVerts, lodInds,
         baseOffX, baseOffY, baseOffZ,
-        manager
-    );
+        manager);
 
     out.verts = std::move(lodVerts);
     out.inds = std::move(lodInds);
-
-    // Optional "geometric error" estimate => 1 / (1 + triCount)
-    float triCount = float(out.inds.size()) / 3.0f;
-    out.geometricError = 1.0f / (1.0f + triCount);
-
+    out.geometricError = (out.inds.empty()) ? 0.f
+        : 1.f / (1.f + out.inds.size() / 3.f);
     return out;
 }

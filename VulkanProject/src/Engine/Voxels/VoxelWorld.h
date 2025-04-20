@@ -113,7 +113,7 @@ private:
 
     // If false => single-lod approach (old).
     // If true => multi-lod approach.
-    bool m_useMultiLOD = true;
+    bool m_useMultiLOD = false;
 
     // Chunk streaming distance
     static constexpr int VIEW_DISTANCE = 8;
@@ -130,3 +130,5 @@ private:
     std::mutex                 m_multiLODMutex;
     std::vector<MultiLODResult> m_pendingMultiLODResults;
 };
+
+

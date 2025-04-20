@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// We'll bind source at binding=0 (storage image), dest at binding=1 (storage image).
+// Or you might have them reversed – depends on your descriptor set layout.
+
+layout(binding = 0, r32f) readonly uniform image2D srcImage;
+layout(binding = 1, r32f) writeonly uniform image2D dstImage;
+
+void main()
+{
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+
+    // We do a quick 2×2 (or 4×4) min from srcImage
+    // For a 2×2 approach:
+    float minVal = 1.0e8; // some big number
+
+    for (int dy=0; dy<2; dy++) {
+        for (int dx=0; dx<2; dx++) {
+            ivec2 coord = gid*2 + ivec2(dx, dy);
+            float depthVal = imageLoad(srcImage, coord).r;
+            minVal = min(minVal, depthVal);
+        }
+    }
+
+    // Then store into the destination
+    imageStore(dstImage, gid, vec4(minVal, 0, 0, 0));
+}
