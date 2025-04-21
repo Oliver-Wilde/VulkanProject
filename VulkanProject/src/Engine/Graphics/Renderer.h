@@ -1,16 +1,21 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// Renderer.h – batch‑rendering voxel renderer (no feature‑flags)
+// Renderer.h – batch‑rendering voxel renderer with background CB builder
 // ───────────────────────────────────────────────────────────────────────────
-#include <deque>
+#include <deque>            // ← switched container type for async queues
 #include <vector>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 #include <cstdint>
 #include <vulkan/vulkan.h>
 #include <glm/mat4x4.hpp>
 
+#include "Engine/Graphics/Frustum.h"
 #include "Engine/Scene/Camera.h"
-#include "Engine/Voxels/VoxelWorld.h"   // for QueuedChunkDestruction
-#include <numeric>
+#include "Engine/Voxels/VoxelWorld.h"
 
 // ─── forward declarations ─────────────────────────────────────────────────
 class Window;
@@ -20,7 +25,6 @@ class PipelineManager;
 class RenderPassManager;
 class Time;
 class UIRenderer;
-class Frustum;
 class SwapChain;
 
 // ─── uniform payload ──────────────────────────────────────────────────────
@@ -34,7 +38,6 @@ struct FrameResources
     VkSemaphore     renderFinishedSemaphore = VK_NULL_HANDLE;
     VkFence         inFlightFence = VK_NULL_HANDLE;
 };
-
 static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
 // ═══════════════════════════   R E N D E R E R   ═══════════════════════════
@@ -57,11 +60,13 @@ private:
     {
         VkBuffer       vbo = VK_NULL_HANDLE;
         VkBuffer       ibo = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;           // vertex alloc
-        VkDeviceSize   vboSize = 0, iboSize = 0;
-        VkDeviceSize   vboUsed = 0, iboUsed = 0;
+        VkDeviceMemory vboMemory = VK_NULL_HANDLE;
+        VkDeviceMemory iboMemory = VK_NULL_HANDLE;
 
-        void     ensureCapacity(Renderer* owner,
+        VkDeviceSize   vboSize = 0, iboSize = 0;   // total bytes allocated
+        VkDeviceSize   vboUsed = 0, iboUsed = 0;   // bytes used this build
+
+        void ensureCapacity(Renderer* owner,
             VkDeviceSize wantVbo,
             VkDeviceSize wantIbo);
         inline void reset() { vboUsed = iboUsed = 0; }
@@ -71,14 +76,63 @@ private:
             VkBuffer srcIbo, VkDeviceSize srcIboBytes);
     };
 
-    // ─── secondary geometry CB builder ────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────
+    // Background geometry builder (records secondary CBs off‑thread)
+    // ──────────────────────────────────────────────────────────────────────
+    struct GeometryJob
+    {
+        Frustum   frustum;
+        bool      useCulling = true;
+        uint32_t  imgIdx = 0;     // swap‑chain image this CB targets
+        bool      wantWire = false;
+    };
+
+    class GeometryBuilder
+    {
+    public:
+        explicit GeometryBuilder(Renderer* owner);
+        ~GeometryBuilder();
+
+        void submit(const GeometryJob& job);          // non‑blocking
+        VkCommandBuffer fetchFinished(uint32_t imgIdx,
+            uint32_t& outVerts,
+            uint32_t& outCalls,
+            uint64_t& outHash);
+
+    private:
+        void threadMain();
+
+        Renderer* m_owner;
+        std::thread                   m_thread;
+        std::mutex                    m_mutex;
+        std::condition_variable       m_cv;
+
+        /* switched to deque so we can push_back / pop_front & iterate */
+        std::deque<GeometryJob>       m_jobs;
+        bool                          m_exit = false;
+
+        struct FinishedCB
+        {
+            VkCommandBuffer cmd;
+            uint32_t verts, calls;
+            uint32_t imgIdx;
+            uint64_t hash;
+            bool     wire;
+        };
+        std::deque<FinishedCB>        m_done;         // likewise, deque
+
+        /* handy cache of the owner’s command pool (fixes m_cmdPool errors) */
+        VkCommandPool                 m_cmdPool = VK_NULL_HANDLE;
+    };
+
+    // ─── existing synchronous CB builder (kept for fallback) ──────────────
     uint64_t buildGeometryCB(uint32_t imgIdx,
         const Frustum& fr,
         bool useCull,
         uint32_t& outVerts,
         uint32_t& outCalls);
 
-    // ─── internal helpers (implemented in .cpp) ────────────────────────────
+    // ─── internal helpers ────────────────────────────────────────────────
     void freeDeferredResources();
     void addSample(std::deque<float>& buf, float v);
     float computeAverage(const std::deque<float>& buf);
@@ -87,13 +141,12 @@ private:
     void updateMVP();
     void recreateSwapChain();
 
-    void createBuffer(VkDeviceSize size,
-        VkBufferUsageFlags usage,
-        VkMemoryPropertyFlags props,
-        VkBuffer& buffer,
-        VkDeviceMemory& memory);
+    void createBuffer(VkDeviceSize,
+        VkBufferUsageFlags,
+        VkMemoryPropertyFlags,
+        VkBuffer&, VkDeviceMemory&);
 
-    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
+    uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
 
     // ─── members ──────────────────────────────────────────────────────────
     VulkanContext* m_context = nullptr;
@@ -106,40 +159,40 @@ private:
     UIRenderer* m_uiRenderer = nullptr;
     SwapChain* m_swapChain = nullptr;
 
-    // MVP uniform
-    VkBuffer               m_mvpBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory         m_mvpMemory = VK_NULL_HANDLE;
-    VkDescriptorPool       m_mvpDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet        m_mvpDescriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSetLayout  m_mvpLayout = VK_NULL_HANDLE;
+    // uniform resources …
+    VkBuffer            m_mvpBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory      m_mvpMemory = VK_NULL_HANDLE;
+    VkDescriptorPool    m_mvpDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
-    // deferred GPU frees
+    // per‑flight & deferred frees
+    FrameResources      m_frames[MAX_FRAMES_IN_FLIGHT];
+    int                 m_currentFrame = 0;
     std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
 
-    // per‑flight primary resources
-    FrameResources m_frames[MAX_FRAMES_IN_FLIGHT];
-    int            m_currentFrame = 0;
+    // mesh‑batches per‑flight
+    MeshBatch           m_batches[MAX_FRAMES_IN_FLIGHT];
 
-    // mesh‑batch (one per flight frame)
-    MeshBatch      m_batches[MAX_FRAMES_IN_FLIGHT];
-
-    // secondary CB cache
+    // secondary CB caches (output from GeometryBuilder)
     std::vector<VkCommandBuffer> m_geomCmd;
     std::vector<uint64_t>        m_geomHash;
     std::vector<uint32_t>        m_cachedVerts;
     std::vector<uint32_t>        m_cachedCalls;
     std::vector<bool>            m_cachedWireframe;
 
-    bool           m_useMeshBatch = true;
+    // async builder instance
+    std::unique_ptr<GeometryBuilder> m_geoBuilder;
 
-    // timing & stats
+    bool                m_useMeshBatch = true;
+
+    // timing & UI stats
     Time* m_time = nullptr;
-    bool                  m_wireframeOn = false;
-    bool                  m_enableFrustumCulling = false;
-    static constexpr int  ROLLING_AVG_SAMPLES = 120;
-    std::deque<float>     m_fpsSamples;
-    std::deque<float>     m_cpuSamples;
+    bool                m_wireframeOn = false;
+    bool                m_enableFrustumCulling = false;
+    static constexpr int ROLLING_AVG_SAMPLES = 120;
+    std::deque<float>   m_fpsSamples;
+    std::deque<float>   m_cpuSamples;
 
-    // camera
-    Camera        m_camera;
+    Camera              m_camera;
 };

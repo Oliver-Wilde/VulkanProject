@@ -1,24 +1,30 @@
-#pragma once
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
+
 #include <vector>
 #include <deque>
+#include <array>
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
+#include <list>
 
 #include "ChunkManager.h"
 #include "Meshing/NaiveMesher.h"
 #include "Meshing/GreedyMesher.h"
 #include "Meshing/IMesher.h"
 #include "Generation/TerrainGenerator.h"
-#include "Meshing/LODMesher.h"      // For multi-LOD builds
+#include "Meshing/LODMesher.h"
 
-// Forward declarations
+// ── forward declarations ───────────────────────────────────────────────────
 class VulkanContext;
 class ResourceManager;
 class Renderer;
 
-// If ring-buffer chunk destruction is used:
+/*─────────────────────────────────────────────────────────────────────────────
+  QueuedChunkDestruction  (unchanged, for ring‑buffer frees)
+ ────────────────────────────────────────────────────────────────────────────*/
 struct QueuedChunkDestruction
 {
     VkBuffer       vb = VK_NULL_HANDLE;
@@ -27,20 +33,20 @@ struct QueuedChunkDestruction
     VkDeviceMemory ibMem = VK_NULL_HANDLE;
 };
 
-// -----------------------------------------------------------------------------
-// Single-lod struct for compatibility with your old code
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────
+  Compatibility struct for single‑LOD path (kept for reference)
+ ────────────────────────────────────────────────────────────────────────────*/
 struct MeshBuildResult
 {
-    class Chunk* chunkPtr = nullptr;
-    std::vector<Vertex>   verts;
+    Chunk* chunkPtr = nullptr;
+    std::vector<Vertex>  verts;
     std::vector<uint32_t> inds;
     int cx = 0, cy = 0, cz = 0;
 };
 
-// -----------------------------------------------------------------------------
-// VoxelWorld
-// -----------------------------------------------------------------------------
+/*=============================================================================
+  VoxelWorld
+=============================================================================*/
 class VoxelWorld
 {
 public:
@@ -49,86 +55,105 @@ public:
     VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr);
     ~VoxelWorld();
 
-    // Optionally attach a Renderer for ring-buffer destruction or any GPU ops
+    // ── setup / per‑frame update ───────────────────────────────────────────
     void setRenderer(Renderer* renderer);
-
-    // Basic world init
     void initWorld();
-
-    // Called each frame to load/unload and handle (re)meshing
     void updateChunksAroundPlayer(float playerPosX, float playerPosZ);
 
-    // Access the chunk manager
+    // ── public accessors / toggles ─────────────────────────────────────────
     ChunkManager& getChunkManager() { return m_chunkManager; }
-
-    // For debugging or performance stats
     static double getAvgMeshTime();
 
-    // Choose which mesher to use
-    void setMesherType(MesherType type) { m_currentMesherType = type; }
+    void setMesherType(MesherType t) { m_currentMesherType = t; }
     MesherType getMesherType() const { return m_currentMesherType; }
 
-    // Toggle multi-lod usage
     void setUseMultiLOD(bool use) { m_useMultiLOD = use; }
     bool isUsingMultiLOD() const { return m_useMultiLOD; }
 
+    // ── NEW: upload budget control ─────────────────────────────────────────
+    /** Set per‑frame GPU upload budget (bytes + chunk count). */
+    void setUploadBudget(size_t bytes, int chunks = 5) { m_uploadBudgetBytes = bytes; m_uploadBudgetChunks = chunks; }
+    size_t getUploadBudgetBytes() const { return m_uploadBudgetBytes; }
+    int    getUploadBudgetChunks() const { return m_uploadBudgetChunks; }
+
+    /** Current length of the pending‑GPU queue (for ImGui stats). */
+    size_t getPendingUploadCount() const { return m_uploadQueue.size(); }
+
 private:
-    // Helper methods
+    /*──────── internal helpers ───────────────────────────────────────────*/
     void loadOneChunk(const ChunkCoord& c);
     void unloadOneChunk(const ChunkCoord& c);
 
     void scheduleMeshingForDirtyChunks();
-    void pollMeshBuildResults();
+    void gatherMesherResults();      // fills upload queue
+    void drainUploadQueue();         // obeys token bucket
 
-    // For single-lod uploads
-    void uploadMeshToChunkSingleLOD(class Chunk& chunk,
-        const std::vector<Vertex>& verts,
-        const std::vector<uint32_t>& inds);
-    void destroyChunkBuffersSingleLOD(class Chunk& chunk);
+    // single‑LOD fallback
+    void uploadMeshToChunkSingleLOD(Chunk&,
+        const std::vector<Vertex>&,
+        const std::vector<uint32_t>&);
+    void destroyChunkBuffersSingleLOD(Chunk&);
 
-    // For multi-lod finalization
-    void finalizeMultiLOD(MultiLODResult& lodResult);
+    // multi‑LOD finalize
+    void finalizeMultiLOD(MultiLODResult&);
 
-    // Unused stubs (kept for reference)
+    // misc VK helpers (left unchanged)
     void createBuffer(VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags,
         VkBuffer&, VkDeviceMemory&);
     void copyBuffer(VkBuffer, VkBuffer, VkDeviceSize);
     uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
 
+    /*──────── new mesh‑cache structures ──────────────────────────────────*/
+    struct CachedMesh
+    {
+        // CPU‑side geometry (multi‑LOD)
+        std::array<std::vector<Vertex>, MultiLODResult::MAX_LODS> verts;
+        std::array<std::vector<uint32_t>, MultiLODResult::MAX_LODS> inds;
+    };
+
+    struct PendingUpload
+    {
+        MultiLODResult mlr;   // ready CPU geometry
+        size_t         bytes; // total VB+IB size
+        uint64_t       hash;  // content hash for cache insertion
+    };
+
 private:
-    // Basic references
+    // ── core refs ─────────────────────────────────────────────────────────
     VulkanContext* m_context = nullptr;
     ResourceManager* m_resourceManager = nullptr;
-    Renderer* m_renderer = nullptr; // optional
+    Renderer* m_renderer = nullptr;
 
-    // Manages all active chunks
+    // ── chunk data & generation ───────────────────────────────────────────
     ChunkManager     m_chunkManager;
-    // Generates chunk terrain data
     TerrainGenerator m_terrainGenerator;
 
-    // Mesher selection
     GreedyMesher     m_greedyMesher;
     NaiveMesher      m_naiveMesher;
     MesherType       m_currentMesherType = MesherType::GREEDY;
+    bool             m_useMultiLOD = false;
 
-    // If false => single-lod approach (old).
-    // If true => multi-lod approach.
-    bool m_useMultiLOD = false;
+    // ── streaming distance ───────────────────────────────────────────────
+    static constexpr int VIEW_DISTANCE = 16;
 
-    // Chunk streaming distance
-    static constexpr int VIEW_DISTANCE = 8;
-
-    // Queues to handle loading/unloading
     std::deque<ChunkCoord> m_chunksToLoad;
     std::deque<ChunkCoord> m_chunksToUnload;
 
-    // Single-lod pending build results (unused in new approach)
-    std::mutex                 m_singleLodMutex;
-    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD;
+    /*──────── legacy single‑LOD buffers (unused in new path) ──────────────*/
+    std::mutex                     m_singleLodMutex;
+    std::vector<MeshBuildResult>   m_pendingMeshResultsSingleLOD;
 
-    // For multi-lod approach
-    std::mutex                 m_multiLODMutex;
-    std::vector<MultiLODResult> m_pendingMultiLODResults;
+    /*──────── NEW: async multi‑LOD queues ────────────────────────────────*/
+    std::mutex                     m_multiLODMutex;
+    std::vector<MultiLODResult>    m_pendingMultiLODResults; // freshly meshed
+
+    /*──────── NEW: token‑bucket upload queue ─────────────────────────────*/
+    std::deque<PendingUpload>      m_uploadQueue;
+    size_t                         m_uploadBudgetBytes = 2 * 1024 * 1024; // 2 MB/frame default
+    int                            m_uploadBudgetChunks = 5;               // 5 chunks/frame
+
+    /*──────── NEW: RAM mesh cache with simple LRU eviction ───────────────*/
+    std::unordered_map<uint64_t, CachedMesh> m_meshCache;   // hash → mesh
+    std::list<uint64_t>                      m_cacheLRU;    // most‑recent front
+    static constexpr size_t                  MAX_CACHE_SIZE = 256;
 };
-
-

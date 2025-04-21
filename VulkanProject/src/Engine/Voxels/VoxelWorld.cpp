@@ -42,82 +42,55 @@ VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
 
 VoxelWorld::~VoxelWorld()
 {
-    // Clean up GPU buffers for all chunks.
-    auto& allChunks = m_chunkManager.getAllChunks();
-    for (auto& kv : allChunks)
+    // ring‑buffer free of every chunk’s GPU buffers
+    const auto& all = m_chunkManager.getAllChunks();
+    for (auto& kv : all)
     {
-        if (Chunk* chunk = kv.second.get())
-        {
-            // For each LOD, queue ring-buffer destruction
-            for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; lod++)
-            {
-                auto& lodData = chunk->getLODData(lod);
-                if (lodData.vertexBuffer || lodData.indexBuffer)
-                {
-                    if (m_renderer)
-                    {
-                        QueuedChunkDestruction qcd;
-                        qcd.vb = lodData.vertexBuffer;
-                        qcd.vbMem = lodData.vertexMemory;
-                        qcd.ib = lodData.indexBuffer;
-                        qcd.ibMem = lodData.indexMemory;
-                        m_renderer->enqueueDeferredDestroy(qcd);
-                    }
+        if (!kv.second) continue;
+        Chunk* c = kv.second.get();
 
-                    lodData.vertexBuffer = VK_NULL_HANDLE;
-                    lodData.vertexMemory = VK_NULL_HANDLE;
-                    lodData.indexBuffer = VK_NULL_HANDLE;
-                    lodData.indexMemory = VK_NULL_HANDLE;
-                    lodData.vertexCount = 0;
-                    lodData.indexCount = 0;
-                }
+        for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; ++lod)
+        {
+            auto& ld = c->getLODData(lod);
+            if (!ld.vertexBuffer && !ld.indexBuffer) continue;
+
+            if (m_renderer)
+            {
+                QueuedChunkDestruction q;
+                q.vb = ld.vertexBuffer;  q.vbMem = ld.vertexMemory;
+                q.ib = ld.indexBuffer;   q.ibMem = ld.indexMemory;
+                m_renderer->enqueueDeferredDestroy(q);
             }
         }
     }
 }
 
+
 // ------------------------------------------------------------------------
 // setRenderer
 // ------------------------------------------------------------------------
-void VoxelWorld::setRenderer(Renderer* renderer)
-{
-    m_renderer = renderer;
-}
+void VoxelWorld::setRenderer(Renderer* r) { m_renderer = r; }
 
 // ------------------------------------------------------------------------
 // initWorld => generate initial region around (0,0,0) with multiple Y-layers
 // ------------------------------------------------------------------------
 void VoxelWorld::initWorld()
 {
-    Logger::Info("VoxelWorld::initWorld() => generating initial region (multiple Y).");
+    Logger::Info("VoxelWorld::initWorld – generating initial region.");
 
-    int centerY = 0;
-    int verticalRange = 0; // tweak as desired
-    int minCy = centerY - verticalRange;
-    int maxCy = centerY + verticalRange;
-
+    /* surrounding columns (single Y‑layer by default) */
+    int cyMin = 0, cyMax = 0;
     for (int cx = -VIEW_DISTANCE; cx <= VIEW_DISTANCE; ++cx)
-    {
         for (int cz = -VIEW_DISTANCE; cz <= VIEW_DISTANCE; ++cz)
-        {
-            for (int cy = minCy; cy <= maxCy; ++cy)
+            for (int cy = cyMin; cy <= cyMax; ++cy)
             {
-                Chunk* newChunk = m_chunkManager.createChunk(cx, cy, cz);
-
-                // Queue terrain generation
-                g_threadPool.enqueueTask(
-                    [this, newChunk, cx, cy, cz]()
+                Chunk* chk = m_chunkManager.createChunk(cx, cy, cz);
+                g_threadPool.enqueueTask([this, chk, cx, cy, cz]()
                     {
-                        m_terrainGenerator.generateChunk(*newChunk, cx, cy, cz);
-                        newChunk->markDirty();
-                    },
-                    TaskType::Generation,
-                    /*priority=*/100
-                );
+                        m_terrainGenerator.generateChunk(*chk, cx, cy, cz);
+                        chk->markDirty();
+                    }, TaskType::Generation, 100);
             }
-        }
-    }
-    Logger::Info("initWorld() => queued multiple y-layers around (y=0).");
 }
 
 // ------------------------------------------------------------------------
@@ -234,7 +207,8 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 
     // 5) schedule LOD building + poll results
     scheduleMeshingForDirtyChunks();
-    pollMeshBuildResults();
+    gatherMesherResults();
+    drainUploadQueue();
 }
 
 // ------------------------------------------------------------------------
@@ -325,111 +299,70 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
 // ------------------------------------------------------------------------
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
-    CpuProfiler::ScopedTimer timeSched("VoxelWorld::scheduleMeshing");
+    CpuProfiler::ScopedTimer t("VoxelWorld::scheduleMeshing");
 
     const auto& all = m_chunkManager.getAllChunks();
-
-    // Choose the mesher for LOD=0
-    const IMesher* baseMesher =
+    const IMesher* base =
         (m_currentMesherType == MesherType::GREEDY)
         ? static_cast<const IMesher*>(&m_greedyMesher)
         : static_cast<const IMesher*>(&m_naiveMesher);
 
     for (auto& kv : all)
     {
-        Chunk* chunk = kv.second.get();
-        if (!chunk) continue;
-        if (!chunk->isDirty()) continue;
+        Chunk* c = kv.second.get();
+        if (!c || !c->isDirty()) continue;
 
-        // [NEW] Recalc bounding box if chunk is NORMAL, so culling is always up-to-date
-        if (chunk->getState() == Chunk::ChunkState::NORMAL)
-        {
-            chunk->recalcFilledBounds();
-        }
+        if (c->getState() == Chunk::ChunkState::NORMAL)
+            c->recalcFilledBounds();
 
-        // If chunk is uniform empty or uniform solid => no geometry
-        if (chunk->getState() != Chunk::ChunkState::NORMAL)
+        if (c->getState() != Chunk::ChunkState::NORMAL)
         {
-            // It's either all empty or uniform => skip big geometry
-            chunk->clearDirty();
+            c->clearDirty();
             continue;
         }
 
-        chunk->clearDirty();
-        chunk->setIsUploading(true);
+        c->clearDirty();
+        c->setIsUploading(true);
 
-        // Kick off multi-LOD build on a worker thread
-        g_threadPool.enqueueTask(
-            [this, chunk, baseMesher]()
+        g_threadPool.enqueueTask([this, c, base]()
             {
-                CpuProfiler::ScopedTimer timeMeshing("VoxelWorld::buildAllLODs");
-                auto tBegin = std::chrono::high_resolution_clock::now();
+                CpuProfiler::ScopedTimer tm("LOD build");
 
-                // Build LOD 0..MAX_LOD
-                MultiLODResult mlr =
-                    LODMesher::buildAllLODs(
-                        *chunk,
-                        chunk->worldX(),
-                        chunk->worldY(),
-                        chunk->worldZ(),
-                        baseMesher,
-                        m_chunkManager
-                    );
-
-                auto tEnd = std::chrono::high_resolution_clock::now();
-                double sec = std::chrono::duration<double>(tEnd - tBegin).count();
-
-                s_totalMeshTime += sec;
-                s_meshCount++;
+                MultiLODResult mlr = LODMesher::buildAllLODs(
+                    *c, c->worldX(), c->worldY(), c->worldZ(),
+                    base, m_chunkManager);
 
                 {
                     std::lock_guard<std::mutex> lk(s_resultMutex);
-                    s_pendingLODResults.push_back(std::move(mlr));
+                    s_pendingLODResults.emplace_back(std::move(mlr));
                 }
-            },
-            TaskType::Meshing,
-            /*priority=*/50
-        );
+            }, TaskType::Meshing, 50);
     }
 }
 
 // ------------------------------------------------------------------------
 // pollMeshBuildResults => finalize LOD GPU uploads
 // ------------------------------------------------------------------------
-void VoxelWorld::pollMeshBuildResults()
+void VoxelWorld::gatherMesherResults()
 {
-    static std::deque<MultiLODResult> leftover;
-
-    // 1) Move fresh results into leftover
+    std::vector<MultiLODResult> local;
     {
-        std::vector<MultiLODResult> local;
+        std::lock_guard<std::mutex> lk(s_resultMutex);
+        if (!s_pendingLODResults.empty())
         {
-            std::lock_guard<std::mutex> lk(s_resultMutex);
-            if (!s_pendingLODResults.empty())
-            {
-                local.swap(s_pendingLODResults);
-            }
-        }
-        for (auto& r : local)
-        {
-            leftover.push_back(std::move(r));
+            local.swap(s_pendingLODResults);
         }
     }
-
-    // 2) Process a limited number each frame
-    static const int MAX_UPLOADS_PER_FRAME = 25;
-    int processed = 0;
-
-    while (!leftover.empty() && processed < MAX_UPLOADS_PER_FRAME)
+    for (auto& r : local)
     {
-        MultiLODResult mlr = std::move(leftover.front());
-        leftover.pop_front();
-        finalizeMultiLOD(mlr);
-        if (mlr.chunkPtr)
+        size_t bytes = 0;
+        for (int i = 0; i < MultiLODResult::MAX_LODS; ++i)
         {
-            mlr.chunkPtr->setIsUploading(false);
+            bytes += r.lods[i].verts.size() * sizeof(Vertex);
+            bytes += r.lods[i].inds.size() * sizeof(uint32_t);
         }
-        processed++;
+
+        m_uploadQueue.push_back({ std::move(r), bytes, 0 /*hash placeholder*/ });
     }
 }
 
@@ -502,6 +435,62 @@ void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
             c->setLODErrorValue(i, 0.f);
         }
     }
+}
+
+void VoxelWorld::drainUploadQueue()
+{
+    size_t bytesLeft = m_uploadBudgetBytes;
+    int    chunksLeft = m_uploadBudgetChunks;
+
+    while (!m_uploadQueue.empty() && bytesLeft > 0 && chunksLeft > 0)
+    {
+        PendingUpload pu = std::move(m_uploadQueue.front());
+        if (pu.bytes > bytesLeft) break;                 // stop, byte budget done
+
+        m_uploadQueue.pop_front();
+
+        finalizeMultiLOD(pu.mlr);                        // synchronous for now
+        if (pu.mlr.chunkPtr) pu.mlr.chunkPtr->setIsUploading(false);
+
+        bytesLeft -= pu.bytes;
+        --chunksLeft;
+    }
+}
+
+void VoxelWorld::uploadMeshToChunkSingleLOD(
+    Chunk& chunk,
+    const std::vector<Vertex>& verts,
+    const std::vector<uint32_t>& inds)
+{
+    // Mark busy so Renderer / unload logic knows to skip
+    chunk.setIsUploading(true);
+
+    /* placeholders that will receive GPU handles */
+    VkBuffer       vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+    VkDeviceMemory vbMem = VK_NULL_HANDLE, ibMem = VK_NULL_HANDLE;
+
+    /* capture counts for later */
+    uint32_t vCount = static_cast<uint32_t>(verts.size());
+    uint32_t iCount = static_cast<uint32_t>(inds.size());
+
+    /* schedule non‑blocking upload */
+    m_resourceManager->createChunkBuffersAsync(
+        verts, inds,
+        vb, vbMem, ib, ibMem,
+        /* onComplete = */ [c = &chunk, vb, vbMem, ib, ibMem, vCount, iCount]()
+        {
+            // IMPORTANT: guard against chunk being destroyed mid‑flight
+            if (!c || c->getState() == Chunk::ChunkState::EMPTY) return;
+
+            c->setVertexBuffer(vb);
+            c->setVertexMemory(vbMem);
+            c->setIndexBuffer(ib);
+            c->setIndexMemory(ibMem);
+            c->setVertexCount(vCount);
+            c->setIndexCount(iCount);
+
+            c->setIsUploading(false);
+        });
 }
 
 // ------------------------------------------------------------------------

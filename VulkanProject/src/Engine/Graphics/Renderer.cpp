@@ -1,5 +1,5 @@
 ﻿#include "Renderer.h"
-
+#include "Engine/Graphics/Frustum.h"
 #include "Engine/Core/Window.h"
 #include "Engine/Core/Time.h"
 #include "Engine/Graphics/VulkanContext.h"
@@ -7,7 +7,7 @@
 #include "Engine/Graphics/RenderPassManager.h"
 #include "Engine/Graphics/PipelineManager.h"
 #include "Engine/Resources/ResourceManager.h"
-#include "Engine/Graphics/Frustum.h"
+
 
 #include <cstring>
 #include "UIRenderer.h"
@@ -16,16 +16,19 @@
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Scene/Camera.h"
 
-#include "Frustum.h"
+
 #include "../Utils/CpuProfiler.h"
 #include <Engine/Utils/Logger.h>
 #include <Engine/Utils/ThreadPool.h>
-
+#include <numeric>   
 #include <stdexcept>
 #include <deque>
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+#undef  max
+#undef  min
 
 extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler;              // global CPU profiler
@@ -38,6 +41,175 @@ static uint64_t fnv1a64(const void* d, size_t n)
     while (n--) { h ^= *p++; h *= 1099511628211ULL; }
     return h;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GeometryBuilder  (private nested class)  IMPLEMENTATION
+// ─────────────────────────────────────────────────────────────────────────────
+Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
+    : m_owner(owner)
+{
+    // create a dedicated command pool for this thread (graphics family)
+    VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    pci.queueFamilyIndex = m_owner->m_context->getGraphicsQueueFamilyIndex();
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(m_owner->m_context->getDevice(), &pci, nullptr, &m_cmdPool) != VK_SUCCESS)
+        throw std::runtime_error("GeometryBuilder: command‑pool create failed");
+
+    m_thread = std::thread(&GeometryBuilder::threadMain, this);
+}
+
+Renderer::GeometryBuilder::~GeometryBuilder()
+{
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_exit = true;
+    }
+    m_cv.notify_all();
+    if (m_thread.joinable()) m_thread.join();
+
+    // free any leftover command buffers
+    while (!m_done.empty())
+    {
+        vkFreeCommandBuffers(m_owner->m_context->getDevice(), m_cmdPool, 1, &m_done.front().cmd);
+        m_done.pop_front();
+    }
+    while (!m_jobs.empty()) m_jobs.pop_front();                           // ◆ PATCH
+
+    vkDestroyCommandPool(m_owner->m_context->getDevice(), m_cmdPool, nullptr);
+}
+
+void Renderer::GeometryBuilder::submit(const GeometryJob& job)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_jobs.push_back(job);                                            // ◆ PATCH
+    }
+    m_cv.notify_one();
+}
+
+VkCommandBuffer Renderer::GeometryBuilder::fetchFinished(uint32_t imgIdx,
+    uint32_t& outVerts,
+    uint32_t& outCalls,
+    uint64_t& outHash)
+{
+    std::lock_guard<std::mutex> lk(m_mutex);
+    for (auto it = m_done.begin(); it != m_done.end(); ++it)
+    {
+        if (it->imgIdx == imgIdx)
+        {
+            FinishedCB res = *it;
+            m_done.erase(it);
+            outVerts = res.verts;
+            outCalls = res.calls;
+            outHash = res.hash;
+            return res.cmd;
+        }
+    }
+    return VK_NULL_HANDLE;
+}
+
+void Renderer::GeometryBuilder::threadMain()
+{
+    while (true)
+    {
+        GeometryJob job;
+        {
+            std::unique_lock<std::mutex> lk(m_mutex);
+            m_cv.wait(lk, [&]() { return m_exit || !m_jobs.empty(); });
+            if (m_exit && m_jobs.empty()) return;
+            job = m_jobs.front();
+            m_jobs.pop_front();
+        }
+
+        // allocate a secondary command buffer for this job
+        VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        ai.commandPool = m_cmdPool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+        ai.commandBufferCount = 1;
+        VkCommandBuffer gcb;
+        if (vkAllocateCommandBuffers(m_owner->m_context->getDevice(), &ai, &gcb) != VK_SUCCESS)
+        {
+            Logger::Error("GeometryBuilder: CMD alloc failed");
+            continue;
+        }
+
+        // gather visible chunks (same logic as main‑thread path)
+        std::vector<Chunk*> vis;
+        const auto& all = m_owner->m_voxelWorld->getChunkManager().getAllChunks();
+        vis.reserve(all.size());
+        for (auto& kv : all)
+        {
+            Chunk* c = kv.second.get();
+            if (!c) continue;
+            if (job.useCulling)
+            {
+                glm::vec3 mn, mx; c->getBoundingBox(mn, mx);
+                if (!job.frustum.intersectsAABB(mn, mx)) continue;
+            }
+            if (!c->getVertexBuffer() || !c->getIndexBuffer()) continue;
+            vis.push_back(c);
+        }
+        std::sort(vis.begin(), vis.end());
+
+        uint64_t hash = fnv1a64(vis.data(), vis.size() * sizeof(Chunk*));
+        hash ^= (job.wantWire ? 0x1 : 0x0);
+
+        // record CB
+        VkCommandBufferInheritanceInfo inh{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
+        inh.renderPass = m_owner->m_rpManager->getRenderPass();
+        inh.subpass = 0;
+        inh.framebuffer = m_owner->m_rpManager->getFramebuffers()[job.imgIdx];
+
+        VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        bi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+        bi.pInheritanceInfo = &inh;
+        vkBeginCommandBuffer(gcb, &bi);
+
+        const std::string pipeName = job.wantWire ? "voxel_wireframe" : "voxel_fill";
+        auto pInfo = m_owner->m_pipelineMgr->getPipeline(pipeName);
+        vkCmdBindPipeline(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS, pInfo.pipeline);
+        vkCmdBindDescriptorSets(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pInfo.pipelineLayout, 0, 1,
+            &m_owner->m_mvpDescriptorSet, 0, nullptr);
+
+        Renderer::MeshBatch batchTemp;                   // standalone batch (thread‑local)
+        uint32_t runningVert = 0, vertsTotal = 0;
+        std::vector<uint32_t> firstIndices;
+        std::vector<uint32_t> indexCounts;
+        firstIndices.reserve(vis.size());
+        indexCounts.reserve(vis.size());
+
+        for (Chunk* c : vis)
+        {
+            VkDeviceSize vbBytes = c->getVertexCount() * sizeof(Vertex);
+            VkDeviceSize ibBytes = c->getIndexCount() * sizeof(uint32_t);
+
+            batchTemp.ensureCapacity(m_owner, batchTemp.vboUsed + vbBytes, batchTemp.iboUsed + ibBytes);
+            uint32_t firstIdx = batchTemp.appendChunk(m_owner, c->getVertexBuffer(), vbBytes,
+                c->getIndexBuffer(), ibBytes);
+            firstIndices.push_back(firstIdx);
+            indexCounts.push_back(c->getIndexCount());
+            runningVert += c->getVertexCount();
+            vertsTotal += c->getVertexCount();
+        }
+
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(gcb, 0, 1, &batchTemp.vbo, &zero);
+        vkCmdBindIndexBuffer(gcb, batchTemp.ibo, 0, VK_INDEX_TYPE_UINT32);
+        for (size_t i = 0; i < firstIndices.size(); ++i)
+            vkCmdDrawIndexed(gcb, indexCounts[i], 1, firstIndices[i], 0, 0);
+
+        vkEndCommandBuffer(gcb);
+
+        // store result
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_done.push_back({ gcb, vertsTotal, static_cast<uint32_t>(firstIndices.size()), job.imgIdx, hash, job.wantWire });
+        }
+        m_cv.notify_one();
+    }
+}
+
 
 // ============================================================================
 // Constructor / Destructor
@@ -201,14 +373,12 @@ void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& q)
 {
     m_deferredFrees[m_currentFrame].push_back(q);
 }
-
-
 void Renderer::freeDeferredResources()
 {
-    auto& list = m_deferredFrees[m_currentFrame];
-    for (const auto& q : list)
+    auto& lst = m_deferredFrees[m_currentFrame];
+    for (auto& q : lst)
         m_resourceMgr->destroyChunkBuffers(q.vb, q.vbMem, q.ib, q.ibMem);
-    list.clear();
+    lst.clear();
 }
 
 // ============================================================================
@@ -351,6 +521,8 @@ void Renderer::renderFrame()
         &m_frames[m_currentFrame].inFlightFence);
 
     freeDeferredResources();
+
+    m_resourceMgr->flushUploads(false);
 
     // acquire next image
     uint32_t imgIdx;
@@ -607,51 +779,41 @@ void Renderer::MeshBatch::ensureCapacity(Renderer* owner,
     VkDeviceSize wantIbo)
 {
     VulkanContext* ctx = owner->m_context;
-    VkDevice        dev = ctx->getDevice();
+    VkDevice       dev = ctx->getDevice();
 
     auto destroyBuf = [&](VkBuffer& b)
         { if (b) { vkDestroyBuffer(dev, b, nullptr); b = VK_NULL_HANDLE; } };
-
     auto destroyMem = [&](VkDeviceMemory& m)
         { if (m) { vkFreeMemory(dev, m, nullptr); m = VK_NULL_HANDLE; } };
 
-    // 1) grow vertex buffer if needed
+    /* grow VBO if needed */
     if (wantVbo > vboSize)
     {
         destroyBuf(vbo);
-        destroyMem(memory);
+        destroyMem(vboMemory);
 
-        // vboSize = std::max(vboSize * 3 / 2 + 65536, wantVbo);
-        vboSize = ((vboSize * 3 / 2 + 65536) > wantVbo)
-            ? (vboSize * 3 / 2 + 65536)
-            : wantVbo;
-
+        vboSize = std::max(vboSize * 3 / 2 + 65536, wantVbo);
         owner->createBuffer(vboSize,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            vbo, memory);
+            vbo, vboMemory);
     }
 
-    // 2) grow index buffer if needed
+    /* grow IBO if needed */
     if (wantIbo > iboSize)
     {
         destroyBuf(ibo);
+        destroyMem(iboMemory);
 
-        // iboSize = std::max(iboSize * 3 / 2 + 65536, wantIbo);
-        iboSize = ((iboSize * 3 / 2 + 65536) > wantIbo)
-            ? (iboSize * 3 / 2 + 65536)
-            : wantIbo;
-
-        VkDeviceMemory dummy;
+        iboSize = std::max(iboSize * 3 / 2 + 65536, wantIbo);
         owner->createBuffer(iboSize,
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            ibo, dummy);
+            ibo, iboMemory);      // ← store allocation!
     }
 }
-
 uint32_t Renderer::MeshBatch::appendChunk(Renderer* owner,
     VkBuffer srcVbo, VkDeviceSize srcVboBytes,
     VkBuffer srcIbo, VkDeviceSize srcIboBytes)
@@ -661,13 +823,13 @@ uint32_t Renderer::MeshBatch::appendChunk(Renderer* owner,
     ResourceManager* rm = owner->m_resourceMgr;
 
     VkBufferCopy region{};
-    /* vertices */
+    // vertices
     region.srcOffset = 0;
     region.dstOffset = vboUsed;
     region.size = srcVboBytes;
-    rm->copyBufferRegions(srcVbo, vbo, &region, 1);
+    rm->copyBufferRegions(srcVbo, vbo, &region, 1);   // BLOCKING copy
 
-    /* indices */
+    // indices
     region.dstOffset = iboUsed;
     region.size = srcIboBytes;
     rm->copyBufferRegions(srcIbo, ibo, &region, 1);
@@ -677,5 +839,4 @@ uint32_t Renderer::MeshBatch::appendChunk(Renderer* owner,
     iboUsed += srcIboBytes;
     return firstIdx;
 }
-
 

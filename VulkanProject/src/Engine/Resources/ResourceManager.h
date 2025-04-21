@@ -1,92 +1,90 @@
-#pragma once
-
+﻿#pragma once
+// ───────────────────────────────────────────────────────────────────────────
+// ResourceManager.h   – GPU buffer + shader management with async uploads
+// ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
+
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <functional>   // std::function
 
-// Forward declarations
 class VulkanContext;
 struct Vertex;
 
-/**
- * ResourceManager manages Vulkan resources such as buffers, memory, and shaders.
- * It handles creating/destroying chunk vertex/index buffers, as well as staging
- * buffers for data uploads.
- */
+/*=============================================================================
+  ResourceManager
+    ‑ owns staging buffers, manages vkBuffer/vkMemory creation,
+      tracks total GPU bytes, loads SPIR‑V modules, and now supports
+      asynchronous chunk‑geometry uploads.
+=============================================================================*/
 class ResourceManager
 {
 public:
-    ResourceManager(VulkanContext* context);
+    explicit ResourceManager(VulkanContext* ctx);
     ~ResourceManager();
 
-    // --------------------------------------------------------------------------
-    // Shader Modules
-    // --------------------------------------------------------------------------
-    /** Loads (or retrieves) a SPIR?V shader module. */
-    VkShaderModule loadShaderModule(const std::string& filePath);
+    // ── Shader modules ────────────────────────────────────────────────────
+    VkShaderModule loadShaderModule(const std::string& spirvPath);
 
-    // --------------------------------------------------------------------------
-    // Chunk Buffer Creation & Destruction
-    // --------------------------------------------------------------------------
-    /** Creates device?local buffers and uploads vertex/index data. */
-    void createChunkBuffers(
-        const std::vector<Vertex>& verts,
+    // ── Chunk vertex / index buffers  (synchronous & asynchronous) ───────
+    /** Traditional blocking upload: returns only when data is on the GPU. */
+    void createChunkBuffers(const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
-        VkBuffer& outVertexBuffer,
-        VkDeviceMemory& outVertexMemory,
-        VkBuffer& outIndexBuffer,
-        VkDeviceMemory& outIndexMemory);
+        VkBuffer& outVB, VkDeviceMemory& outVBmem,
+        VkBuffer& outIB, VkDeviceMemory& outIBmem);
 
-    /** Destroys the specified vertex/index buffers and frees their memory. */
-    void destroyChunkBuffers(
-        VkBuffer vb,
-        VkDeviceMemory vbMem,
-        VkBuffer ib,
-        VkDeviceMemory ibMem);
+    /** NEW: Non‑blocking variant.
+        Copies to a staging buffer and schedules an async transfer.
+        When the copy finishes, `onComplete()` is invoked on the main thread
+        (via flushUploads()). */
+    void createChunkBuffersAsync(const std::vector<Vertex>& verts,
+        const std::vector<uint32_t>& inds,
+        VkBuffer& outVB, VkDeviceMemory& outVBmem,
+        VkBuffer& outIB, VkDeviceMemory& outIBmem,
+        std::function<void()> onComplete = {});
 
-    /** Returns total GPU bytes currently allocated for buffers (debug info). */
+    /** Frees both VB/IB and their device memory, tracking global byte usage. */
+    void destroyChunkBuffers(VkBuffer vb, VkDeviceMemory vbMem,
+        VkBuffer ib, VkDeviceMemory ibMem);
+
+    /** Debug info: total bytes of GPU memory currently allocated for buffers. */
     size_t GetTotalGPUBufferBytes() const;
 
-    // --------------------------------------------------------------------------
-    // Low?level copy helpers (now PUBLIC so Renderer can call them)
-    // --------------------------------------------------------------------------
-    /** Copy an entire range from src ? dst using a staging command buffer. */
+    // ── Raw copy helpers (sync & async) ───────────────────────────────────
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+    void copyBufferRegions(VkBuffer src, VkBuffer dst,
+        const VkBufferCopy* regions, uint32_t regionCount);
 
-    /** Copy multiple VkBufferCopy regions in one go (used by MeshBatch). */
-    void copyBufferRegions(
-        VkBuffer src,
-        VkBuffer dst,
-        const VkBufferCopy* regions,
-        uint32_t regionCount);
+    void copyBufferAsync(VkBuffer src, VkBuffer dst, VkDeviceSize size,
+        std::function<void()> onComplete = {});
+
+    void copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
+        const VkBufferCopy* regions, uint32_t regionCount,
+        std::function<void()> onComplete = {});
+
+    /** Pumps the async‑upload queue; call once per‑frame (block = true on shutdown). */
+    void flushUploads(bool block = false);
 
 private:
-    // --------------------------------------------------------------------------
-    // Internal Helpers
-    // --------------------------------------------------------------------------
-    std::vector<char> readFile(const std::string& filePath);
+    // ── internal helpers ─────────────────────────────────────────────────
+    std::vector<char> readFile(const std::string& path);
 
-    /** vkCreateBuffer + memory allocation + bind. */
-    void createBuffer(
-        VkDeviceSize size,
-        VkBufferUsageFlags usage,
-        VkMemoryPropertyFlags properties,
-        VkBuffer& buffer,
-        VkDeviceMemory& bufferMemory);
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+        VkMemoryPropertyFlags props,
+        VkBuffer& buf, VkDeviceMemory& mem);
 
-    /** Selects a suitable memory type index. */
     uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
 
-    /** Creates or grows the reusable staging buffer. */
     void createStagingBuffer(VkDeviceSize size);
     std::pair<VkBuffer, VkDeviceMemory> getOrCreateStagingBuffer(VkDeviceSize size);
 
 private:
     VulkanContext* m_context = nullptr;
+
     std::unordered_map<std::string, VkShaderModule> m_shaderModules;
 
-    // Single reusable staging buffer
+    // Re‑usable host‑visible staging buffer for geometry uploads
     VkBuffer       m_stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
     VkDeviceSize   m_stagingBufferSize = 0;

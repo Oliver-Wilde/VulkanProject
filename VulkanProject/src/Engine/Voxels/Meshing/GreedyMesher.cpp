@@ -1,5 +1,5 @@
-// ============================================================================
-// GreedyMesher.cpp  – original builders + merge?cap
+ï»¿// ============================================================================
+// GreedyMesher.cpp  â€“Â original builders + merge?cap
 // ============================================================================
 
 #include "GreedyMesher.h"
@@ -19,7 +19,7 @@
 static constexpr int MAX_GREEDY_RUN = 32;
 
 // ---------------------------------------------------------------------------
-// packColor: clamp [0..1] ? R8G8B8A8
+// packColor: clamp [0..1] ?Â R8G8B8A8
 // ---------------------------------------------------------------------------
 static uint32_t packColor(float r, float g, float b)
 {
@@ -34,7 +34,7 @@ static uint32_t packColor(float r, float g, float b)
 }
 
 // ---------------------------------------------------------------------------
-// Quad helpers — identical to your original code (only indices via push_back)
+// Quad helpers â€” identical to your original code (only indices via push_back)
 // ---------------------------------------------------------------------------
 static void buildQuadPosZ(int sx, int sy, int w, int h, int z,
     int ox, int oy, int oz, int id,
@@ -181,13 +181,28 @@ bool GreedyMesher::generateMesh(
 
     auto divFloor = [](int v, int d) { return (v >= 0) ? v / d : (v - (d - 1)) / d; };
 
-    auto isSolidGlobal = [&](int x, int y, int z)->bool
+    auto isSolidGlobal = [&](int x, int y, int z) -> bool
         {
+            // Inside the current chunk?
             if (x >= 0 && x < SX && y >= 0 && y < SY && z >= 0 && z < SZ)
                 return isSolidID(blk.getBlock(x, y, z));
-            int wx = cx * Chunk::SIZE_X + x, wy = cy * Chunk::SIZE_Y + y, wz = cz * Chunk::SIZE_Z + z;
-            int ncx = divFloor(wx, Chunk::SIZE_X), ncy = divFloor(wy, Chunk::SIZE_Y), ncz = divFloor(wz, Chunk::SIZE_Z);
-            const Chunk* n = mgr.getChunk(ncx, ncy, ncz); if (!n) return false;
+
+            // Map to worldâ€‘space, then to neighbourâ€‘chunk coords
+            int wx = cx * Chunk::SIZE_X + x;
+            int wy = cy * Chunk::SIZE_Y + y;
+            int wz = cz * Chunk::SIZE_Z + z;
+
+            int ncx = divFloor(wx, Chunk::SIZE_X);
+            int ncy = divFloor(wy, Chunk::SIZE_Y);
+            int ncz = divFloor(wz, Chunk::SIZE_Z);
+
+            // *** NEW GUARD ***
+            if (!mgr.hasChunk(ncx, ncy, ncz))        // neighbour not loaded yet
+                return false;                        // treat as air, avoid crash
+
+            const Chunk* n = mgr.getChunk(ncx, ncy, ncz);
+            if (!n) return false;
+
             return isSolidID(n->getBlock(wx - ncx * Chunk::SIZE_X,
                 wy - ncy * Chunk::SIZE_Y,
                 wz - ncz * Chunk::SIZE_Z));

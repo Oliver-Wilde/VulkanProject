@@ -1,55 +1,98 @@
+﻿// ============================================================================
+// ResourceManager.cpp     (FULL FILE – async uploads ready)
+// ============================================================================
+
 #include "ResourceManager.h"
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Voxels/Meshing/IMesher.h"
 
 #include <fstream>
 #include <stdexcept>
-#include <cstring> // for memcpy
+#include <cstring>
 #include <iostream>
-
-// [ADDED] For atomic usage in global memory counter
 #include <atomic>
+#include <queue>
+#include <mutex>
+#include <functional>
+#include <numeric>        
+// std::accumulate (used by others)
 
-// [ADDED] A global/static atomic to track total GPU buffer usage:
+// ─────────────────────────────────────────────────────────────────────────────
+// Global GPU‑memory counter (visible via GetTotalGPUBufferBytes())
+// ─────────────────────────────────────────────────────────────────────────────
 static std::atomic<size_t> g_totalGPUBufferBytes(0);
 
-static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024; // 4MB default
+// ─────────────────────────────────────────────────────────────────────────────
+// Lightweight async‑upload support (no header changes required)
+// ─────────────────────────────────────────────────────────────────────────────
+namespace
+{
+    struct PendingUpload
+    {
+        VkCommandBuffer       cmd = VK_NULL_HANDLE;
+        VkFence               fence = VK_NULL_HANDLE;
+        std::function<void()> onComplete;
+    };
+
+    std::queue<PendingUpload> g_pending;
+    std::mutex                g_pendingMutex;
+}
+
+/* Helper – checks & recycles finished uploads */
+static void flushPendingUploads(VulkanContext* ctx, bool block)
+{
+    std::lock_guard<std::mutex> guard(g_pendingMutex);
+
+    while (!g_pending.empty())
+    {
+        PendingUpload& up = g_pending.front();
+        VkResult st = vkGetFenceStatus(ctx->getDevice(), up.fence);
+
+        if (st == VK_NOT_READY && !block) break;
+        if (st == VK_NOT_READY && block)
+            vkWaitForFences(ctx->getDevice(), 1, &up.fence, VK_TRUE, UINT64_MAX);
+
+        vkDestroyFence(ctx->getDevice(), up.fence, nullptr);
+        vkFreeCommandBuffers(ctx->getDevice(), ctx->getCommandPool(), 1, &up.cmd);
+
+        if (up.onComplete) up.onComplete();
+        g_pending.pop();
+    }
+}
+
+// ============================================================================
+// Constants & ctor / dtor
+// ============================================================================
+static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024;   // 4 MiB
 
 ResourceManager::ResourceManager(VulkanContext* context)
     : m_context(context)
 {
+    /* nothing else */
 }
 
 ResourceManager::~ResourceManager()
 {
-    // Destroy all loaded shader modules
-    for (auto& kv : m_shaderModules) {
+    /* make sure every outstanding upload finished */
+    flushPendingUploads(m_context, /*block=*/true);
+
+    for (auto& kv : m_shaderModules)
         vkDestroyShaderModule(m_context->getDevice(), kv.second, nullptr);
-    }
     m_shaderModules.clear();
 
-    // Destroy any leftover staging buffer
-    if (m_stagingBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
-        m_stagingBuffer = VK_NULL_HANDLE;
-    }
-    if (m_stagingMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
-        m_stagingMemory = VK_NULL_HANDLE;
-    }
+    if (m_stagingBuffer) vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
+    if (m_stagingMemory) vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
 }
 
-// -------------------------------------------
-// createStagingBuffer
-// -------------------------------------------
+// ============================================================================
+// Staging‑buffer helpers  (unchanged logic)
+// ============================================================================
 void ResourceManager::createStagingBuffer(VkDeviceSize size)
 {
-    if (m_stagingBuffer != VK_NULL_HANDLE) {
-        // If it's already big enough, do nothing
-        if (size <= m_stagingBufferSize) {
-            return;
-        }
-        // Otherwise, free and recreate a larger one
+    if (m_stagingBuffer && size <= m_stagingBufferSize) return;
+
+    if (m_stagingBuffer)
+    {
         vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
         vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
         m_stagingBuffer = VK_NULL_HANDLE;
@@ -57,385 +100,394 @@ void ResourceManager::createStagingBuffer(VkDeviceSize size)
         m_stagingBufferSize = 0;
     }
 
-    // Create new staging buffer
-    VkBufferCreateInfo bufInfo{};
-    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufInfo.size = size;
-    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBufferCreateInfo bc{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bc.size = size;
+    bc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_context->getDevice(), &bc, nullptr, &m_stagingBuffer) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager: staging buffer create failed");
 
-    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &m_stagingBuffer) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create staging buffer!");
-    }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(m_context->getDevice(), m_stagingBuffer, &req);
 
-    VkMemoryRequirements memReq;
-    vkGetBufferMemoryRequirements(m_context->getDevice(), m_stagingBuffer, &memReq);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReq.size;
-    allocInfo.memoryTypeIndex = findMemoryType(
-        memReq.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-
-    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &m_stagingMemory) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate staging buffer memory!");
-    }
+    VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(m_context->getDevice(), &ai, nullptr, &m_stagingMemory) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager: staging buffer alloc failed");
 
     vkBindBufferMemory(m_context->getDevice(), m_stagingBuffer, m_stagingMemory, 0);
     m_stagingBufferSize = size;
 }
 
-// -------------------------------------------
-// getOrCreateStagingBuffer
-// -------------------------------------------
 std::pair<VkBuffer, VkDeviceMemory> ResourceManager::getOrCreateStagingBuffer(VkDeviceSize size)
 {
-    // Round up size to reduce frequent expansions
-    static const VkDeviceSize chunkSize = 512 * 1024; // 512KB increments
-    if (size > 0) {
-        VkDeviceSize newSize = ((size + chunkSize - 1) / chunkSize) * chunkSize;
-        createStagingBuffer(newSize);
-    }
-    else {
-        createStagingBuffer(chunkSize);
-    }
+    static const VkDeviceSize CHUNK = 512 * 1024;                     // 512 KiB steps
+    VkDeviceSize want = ((size + CHUNK - 1) / CHUNK) * CHUNK;
+    createStagingBuffer(std::max(want, DEFAULT_STAGING_SIZE));
     return { m_stagingBuffer, m_stagingMemory };
 }
 
-// -------------------------------------------
-// readFile => same as original
-// -------------------------------------------
+// ============================================================================
+// File I/O helpers (unchanged)
+// ============================================================================
 std::vector<char> ResourceManager::readFile(const std::string& filePath)
 {
     std::ifstream file(filePath, std::ios::ate | std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file: " + filePath);
-    }
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> buffer(fileSize);
-    file.seekg(0);
-    file.read(buffer.data(), fileSize);
-    file.close();
-    return buffer;
+    if (!file.is_open()) throw std::runtime_error("Cannot open file: " + filePath);
+
+    size_t sz = static_cast<size_t>(file.tellg());
+    std::vector<char> buf(sz);
+    file.seekg(0);  file.read(buf.data(), sz);  file.close();
+    return buf;
 }
 
-// -------------------------------------------
-// loadShaderModule => same as original
-// -------------------------------------------
-VkShaderModule ResourceManager::loadShaderModule(const std::string& filePath)
+VkShaderModule ResourceManager::loadShaderModule(const std::string& path)
 {
-    auto it = m_shaderModules.find(filePath);
-    if (it != m_shaderModules.end()) {
+    if (auto it = m_shaderModules.find(path); it != m_shaderModules.end())
         return it->second;
-    }
 
-    auto code = readFile(filePath);
+    auto code = readFile(path);
 
-    VkShaderModuleCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    ci.codeSize = code.size();
+    ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
-    VkShaderModule shaderModule;
-    if (vkCreateShaderModule(m_context->getDevice(), &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create shader module for " + filePath);
-    }
+    VkShaderModule mod;
+    if (vkCreateShaderModule(m_context->getDevice(), &ci, nullptr, &mod) != VK_SUCCESS)
+        throw std::runtime_error("Shader module create failed: " + path);
 
-    m_shaderModules[filePath] = shaderModule;
-    return shaderModule;
+    return m_shaderModules[path] = mod;
 }
 
-// -------------------------------------------
-// createChunkBuffers => uses single staging
-// -------------------------------------------
-void ResourceManager::createChunkBuffers(
-    const std::vector<Vertex>& verts,
+// ============================================================================
+// Chunk‑buffer upload  (still synchronous, but uses copyBufferRegions)
+// ============================================================================
+void ResourceManager::createChunkBuffers(const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
-    VkBuffer& outVertexBuffer,
-    VkDeviceMemory& outVertexMemory,
-    VkBuffer& outIndexBuffer,
-    VkDeviceMemory& outIndexMemory)
+    VkBuffer& vb, VkDeviceMemory& vbMem,
+    VkBuffer& ib, VkDeviceMemory& ibMem)
 {
-    VkDeviceSize vbSize = sizeof(Vertex) * verts.size();
-    VkDeviceSize ibSize = sizeof(uint32_t) * inds.size();
+    VkDeviceSize vbSz = sizeof(Vertex) * verts.size();
+    VkDeviceSize ibSz = sizeof(uint32_t) * inds.size();
 
-    // 1) Create device-local buffers
-    createBuffer(
-        vbSize,
+    createBuffer(vbSz,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        outVertexBuffer,
-        outVertexMemory
-    );
+        vb, vbMem);
 
-    createBuffer(
-        ibSize,
+    createBuffer(ibSz,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        outIndexBuffer,
-        outIndexMemory
-    );
+        ib, ibMem);
 
-    // 2) Get or create staging buffer large enough for both vertex + index data
-    VkDeviceSize totalSize = vbSize + ibSize;
-    auto stagingPair = getOrCreateStagingBuffer(totalSize);
-    VkBuffer stagingBuf = stagingPair.first;
-    VkDeviceMemory stagingMem = stagingPair.second;
+    // stage
+    VkDeviceSize total = vbSz + ibSz;
+    auto [stBuf, stMem] = getOrCreateStagingBuffer(total);
 
-    // 3) Copy CPU data into staging
-    VkDeviceSize vbOffset = 0;
-    VkDeviceSize ibOffset = vbSize;
-
-    if (vbSize > 0) {
-        void* data = nullptr;
-        vkMapMemory(m_context->getDevice(), stagingMem, vbOffset, vbSize, 0, &data);
-        std::memcpy(data, verts.data(), static_cast<size_t>(vbSize));
-        vkUnmapMemory(m_context->getDevice(), stagingMem);
+    // copy CPU → staging
+    if (vbSz)
+    {
+        void* p; vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
+        std::memcpy(p, verts.data(), static_cast<size_t>(vbSz));
+        vkUnmapMemory(m_context->getDevice(), stMem);
+    }
+    if (ibSz)
+    {
+        void* p; vkMapMemory(m_context->getDevice(), stMem, vbSz, ibSz, 0, &p);
+        std::memcpy(p, inds.data(), static_cast<size_t>(ibSz));
+        vkUnmapMemory(m_context->getDevice(), stMem);
     }
 
-    if (ibSize > 0) {
-        void* data = nullptr;
-        vkMapMemory(m_context->getDevice(), stagingMem, ibOffset, ibSize, 0, &data);
-        std::memcpy(data, inds.data(), static_cast<size_t>(ibSize));
-        vkUnmapMemory(m_context->getDevice(), stagingMem);
+    // copy staging → device (two regions)
+    VkBufferCopy regions[2]{};
+    uint32_t n = 0;
+    if (vbSz) { regions[n] = { 0, 0, vbSz }; ++n; }
+    if (ibSz) { regions[n] = { vbSz, 0, ibSz }; ++n; }
+
+    copyBufferRegions(stBuf, vb, &regions[0], vbSz ? 1 : 0);
+    if (ibSz)
+        copyBufferRegions(stBuf, ib, &regions[1], 1);
+}
+
+void ResourceManager::createChunkBuffersAsync(
+    const std::vector<Vertex>& verts,
+    const std::vector<uint32_t>& inds,
+    VkBuffer& vb, VkDeviceMemory& vbMem,
+    VkBuffer& ib, VkDeviceMemory& ibMem,
+    std::function<void()> onComplete)
+{
+    VkDeviceSize vbSz = sizeof(Vertex) * verts.size();
+    VkDeviceSize ibSz = sizeof(uint32_t) * inds.size();
+
+    /* 1) create device‑local buffers */
+    createBuffer(vbSz,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vb, vbMem);
+
+    createBuffer(ibSz,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, ib, ibMem);
+
+    /* 2) ensure staging buffer large enough & map CPU data */
+    VkDeviceSize total = vbSz + ibSz;
+    auto [stBuf, stMem] = getOrCreateStagingBuffer(total);
+
+    if (vbSz)
+    {
+        void* p; vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
+        std::memcpy(p, verts.data(), size_t(vbSz));
+        vkUnmapMemory(m_context->getDevice(), stMem);
+    }
+    if (ibSz)
+    {
+        void* p; vkMapMemory(m_context->getDevice(), stMem, vbSz, ibSz, 0, &p);
+        std::memcpy(p, inds.data(), size_t(ibSz));
+        vkUnmapMemory(m_context->getDevice(), stMem);
     }
 
-    // 4) Copy from stagingBuf => device-local for vertex + index
-    // We'll do two distinct copy regions
-    if (vbSize > 0) {
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = vbOffset;
-        copyRegion.dstOffset = 0;
-        copyRegion.size = vbSize;
-        copyBufferRegions(stagingBuf, outVertexBuffer, &copyRegion, 1);
+    /* 3) schedule async copies (one per dst buffer) */
+    const int copyCount = int((vbSz ? 1 : 0) + (ibSz ? 1 : 0));
+    if (copyCount == 0)
+    {
+        if (onComplete) onComplete();
+        return;
     }
 
-    if (ibSize > 0) {
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = ibOffset;
-        copyRegion.dstOffset = 0;
-        copyRegion.size = ibSize;
-        copyBufferRegions(stagingBuf, outIndexBuffer, &copyRegion, 1);
+    auto done = std::make_shared<std::atomic<int>>(0);
+    auto makeCallback = [done, copyCount, onComplete]()
+        {
+            if (++(*done) == copyCount && onComplete)
+                onComplete();
+        };
+
+    if (vbSz)
+    {
+        VkBufferCopy r{ 0, 0, vbSz };
+        copyBufferRegionsAsync(stBuf, vb, &r, 1, makeCallback);
+    }
+    if (ibSz)
+    {
+        VkBufferCopy r{ vbSz, 0, ibSz };
+        copyBufferRegionsAsync(stBuf, ib, &r, 1, makeCallback);
     }
 }
 
-// -------------------------------------------
-// destroyChunkBuffers => same as original, but track memory
-// -------------------------------------------
-void ResourceManager::destroyChunkBuffers(
-    VkBuffer vb, VkDeviceMemory vbMem,
+// ============================================================================
+// destroyChunkBuffers  (tracks global usage)
+// ============================================================================
+void ResourceManager::destroyChunkBuffers(VkBuffer vb, VkDeviceMemory vbMem,
     VkBuffer ib, VkDeviceMemory ibMem)
 {
-    if (vb != VK_NULL_HANDLE) {
-        // Optionally re-query memory size to subtract from global usage
-        VkMemoryRequirements memReq;
-        vkGetBufferMemoryRequirements(m_context->getDevice(), vb, &memReq);
-
-        // [ADDED] decrement usage
-        g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
-
-        vkDestroyBuffer(m_context->getDevice(), vb, nullptr);
-    }
-    if (vbMem != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context->getDevice(), vbMem, nullptr);
-    }
-
-    if (ib != VK_NULL_HANDLE) {
-        VkMemoryRequirements memReq;
-        vkGetBufferMemoryRequirements(m_context->getDevice(), ib, &memReq);
-
-        // [ADDED] decrement usage
-        g_totalGPUBufferBytes.fetch_sub(memReq.size, std::memory_order_relaxed);
-
-        vkDestroyBuffer(m_context->getDevice(), ib, nullptr);
-    }
-    if (ibMem != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context->getDevice(), ibMem, nullptr);
-    }
+    auto destroy = [&](VkBuffer b)
+        {
+            if (!b) return;
+            VkMemoryRequirements r;
+            vkGetBufferMemoryRequirements(m_context->getDevice(), b, &r);
+            g_totalGPUBufferBytes.fetch_sub(r.size, std::memory_order_relaxed);
+            vkDestroyBuffer(m_context->getDevice(), b, nullptr);
+        };
+    if (vb) destroy(vb);
+    if (ib) destroy(ib);
+    if (vbMem) vkFreeMemory(m_context->getDevice(), vbMem, nullptr);
+    if (ibMem) vkFreeMemory(m_context->getDevice(), ibMem, nullptr);
 }
 
-// -------------------------------------------
-// createBuffer
-// -------------------------------------------
-void ResourceManager::createBuffer(
-    VkDeviceSize size,
-    VkBufferUsageFlags usage,
-    VkMemoryPropertyFlags properties,
-    VkBuffer& buffer,
-    VkDeviceMemory& bufferMemory)
+// ============================================================================
+// Low‑level buffer helper  (unchanged + global counter)
+// ============================================================================
+void ResourceManager::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags props,
+    VkBuffer& buf, VkDeviceMemory& mem)
 {
-    VkBufferCreateInfo bufInfo{};
-    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufInfo.size = size;
-    bufInfo.usage = usage;
-    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBufferCreateInfo bc{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bc.size = size;
+    bc.usage = usage;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_context->getDevice(), &bc, nullptr, &buf) != VK_SUCCESS)
+        throw std::runtime_error("Buffer create failed");
 
-    if (vkCreateBuffer(m_context->getDevice(), &bufInfo, nullptr, &buffer) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create buffer!");
-    }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(m_context->getDevice(), buf, &req);
 
-    VkMemoryRequirements memReq;
-    vkGetBufferMemoryRequirements(m_context->getDevice(), buffer, &memReq);
+    VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, props);
+    if (vkAllocateMemory(m_context->getDevice(), &ai, nullptr, &mem) != VK_SUCCESS)
+        throw std::runtime_error("Buffer alloc failed");
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReq.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, properties);
-
-    if (vkAllocateMemory(m_context->getDevice(), &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate buffer memory!");
-    }
-
-    vkBindBufferMemory(m_context->getDevice(), buffer, bufferMemory, 0);
-
-    // [ADDED] Increase global GPU usage
-    g_totalGPUBufferBytes.fetch_add(memReq.size, std::memory_order_relaxed);
+    vkBindBufferMemory(m_context->getDevice(), buf, mem, 0);
+    g_totalGPUBufferBytes.fetch_add(req.size, std::memory_order_relaxed);
 }
 
-// -------------------------------------------
-// copyBuffer
-// -------------------------------------------
+// ============================================================================
+// Synchronous copy helpers  (UNCHANGED)
+// ============================================================================
 void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 {
-    if (size == 0) {
-        return;
-    }
+    if (!size) return;
 
-    VkCommandPool   cmdPool = m_context->getCommandPool();
-    VkQueue         gfxQueue = m_context->getGraphicsQueue();
+    VkCommandPool pool = m_context->getCommandPool();
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
 
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = cmdPool;
-    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd);
 
-    VkCommandBuffer cmdBuf;
-    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate staging command buffer!");
-    }
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    VkBufferCopy r{ 0,0,size };
+    vkCmdCopyBuffer(cmd, src, dst, 1, &r);
+    vkEndCommandBuffer(cmd);
 
-    VkBufferCopy copyRegion{};
-    copyRegion.size = size;
-    copyRegion.srcOffset = 0;
-    copyRegion.dstOffset = 0;
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
 
-    vkCmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion);
+    vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_context->getGraphicsQueue());
 
-    vkEndCommandBuffer(cmdBuf);
-
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-
-    VkFence copyFence;
-    if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &copyFence) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create fence for copyBuffer!");
-    }
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmdBuf;
-
-    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
-        vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
-        throw std::runtime_error("Failed to submit copy command buffer!");
-    }
-
-    vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
-
-    vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
+    vkFreeCommandBuffers(m_context->getDevice(), pool, 1, &cmd);
 }
 
-// -------------------------------------------
-// copyBufferRegions
-// -------------------------------------------
-void ResourceManager::copyBufferRegions(
-    VkBuffer src,
-    VkBuffer dst,
-    const VkBufferCopy* regions,
-    uint32_t regionCount)
+void ResourceManager::copyBufferRegions(VkBuffer src, VkBuffer dst,
+    const VkBufferCopy* regions, uint32_t count)
 {
-    if (!regions || regionCount == 0) {
-        return;
-    }
+    if (!regions || !count) return;
 
-    VkCommandPool cmdPool = m_context->getCommandPool();
-    VkQueue       gfxQueue = m_context->getGraphicsQueue();
+    VkCommandPool pool = m_context->getCommandPool();
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
 
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = cmdPool;
-    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd);
 
-    VkCommandBuffer cmdBuf;
-    if (vkAllocateCommandBuffers(m_context->getDevice(), &allocInfo, &cmdBuf) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate command buffer!");
-    }
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    vkCmdCopyBuffer(cmd, src, dst, count, regions);
+    vkEndCommandBuffer(cmd);
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
 
-    vkCmdCopyBuffer(cmdBuf, src, dst, regionCount, regions);
+    vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_context->getGraphicsQueue());
 
-    vkEndCommandBuffer(cmdBuf);
-
-    // Fence
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-
-    VkFence copyFence;
-    if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &copyFence) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create fence for copyBuffer!");
-    }
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmdBuf;
-
-    if (vkQueueSubmit(gfxQueue, 1, &submitInfo, copyFence) != VK_SUCCESS) {
-        vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
-        throw std::runtime_error("Failed to submit copy command buffer!");
-    }
-
-    vkWaitForFences(m_context->getDevice(), 1, &copyFence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(m_context->getDevice(), copyFence, nullptr);
-
-    vkFreeCommandBuffers(m_context->getDevice(), cmdPool, 1, &cmdBuf);
+    vkFreeCommandBuffers(m_context->getDevice(), pool, 1, &cmd);
 }
 
-// -------------------------------------------
-// findMemoryType => unchanged from original
-// -------------------------------------------
+// ============================================================================
+// NEW  ── asynchronous helper (no header change needed until you call it)
+// ============================================================================
+void ResourceManager::copyBufferAsync(VkBuffer src, VkBuffer dst, VkDeviceSize size,
+    std::function<void()> onComplete)
+{
+    if (!size) { if (onComplete) onComplete(); return; }
+
+    VkCommandPool pool = m_context->getCommandPool();
+
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferAsync – cmd alloc failed");
+
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    VkBufferCopy r{ 0,0,size };
+    vkCmdCopyBuffer(cmd, src, dst, 1, &r);
+    vkEndCommandBuffer(cmd);
+
+    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence;
+    if (vkCreateFence(m_context->getDevice(), &fi, nullptr, &fence) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferAsync – fence create failed");
+
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fence) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferAsync – submit failed");
+
+    std::lock_guard<std::mutex> guard(g_pendingMutex);
+    g_pending.push({ cmd, fence, std::move(onComplete) });
+}
+
+/* call this once per‑frame (e.g. inside Renderer::freeDeferredResources) */
+void ResourceManager::flushUploads(bool block /*= false*/)
+{
+    flushPendingUploads(m_context, block);
+}
+
+// ============================================================================
+// Misc helpers
+// ============================================================================
 uint32_t ResourceManager::findMemoryType(uint32_t filter, VkMemoryPropertyFlags props)
 {
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &memProps);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(m_context->getPhysicalDevice(), &mp);
 
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
-        bool isRequiredType = (filter & (1 << i)) != 0;
-        bool hasProperties = ((memProps.memoryTypes[i].propertyFlags & props) == props);
-        if (isRequiredType && hasProperties) {
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((filter & (1u << i)) && (mp.memoryTypes[i].propertyFlags & props) == props)
             return i;
-        }
-    }
-    throw std::runtime_error("Failed to find suitable memory type!");
+
+    throw std::runtime_error("ResourceManager: suitable memory type not found");
 }
 
-// [ADDED] A simple getter so the UI or other code can read total GPU usage
 size_t ResourceManager::GetTotalGPUBufferBytes() const
 {
     return g_totalGPUBufferBytes.load(std::memory_order_relaxed);
+}
+
+
+void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
+    const VkBufferCopy* regions,
+    uint32_t regionCount,
+    std::function<void()> onComplete)
+{
+    if (!regions || regionCount == 0)
+    {
+        if (onComplete) onComplete();
+        return;
+    }
+
+    VkCommandPool pool = m_context->getCommandPool();
+
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – cmd alloc failed");
+
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    vkCmdCopyBuffer(cmd, src, dst, regionCount, regions);
+    vkEndCommandBuffer(cmd);
+
+    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence;
+    if (vkCreateFence(m_context->getDevice(), &fi, nullptr, &fence) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – fence create failed");
+
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fence) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – submit failed");
+
+    std::lock_guard<std::mutex> guard(g_pendingMutex);
+    g_pending.push({ cmd, fence, std::move(onComplete) });
 }

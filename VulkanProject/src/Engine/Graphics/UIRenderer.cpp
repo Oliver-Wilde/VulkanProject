@@ -1,4 +1,4 @@
-#include "UIRenderer.h"
+﻿#include "UIRenderer.h"
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Core/Window.h"
 #include "Engine/Voxels/VoxelWorld.h"
@@ -170,158 +170,92 @@ void UIRenderer::renderImGui(VkCommandBuffer cmdBuf)
 // renderDebugWindow
 // -----------------------------------------------------------------------------
 void UIRenderer::renderDebugWindow(
-    float dt,
-    float fps,
-    float avgFps,
-    float cpuUsage,
-    float avgCpu,
-    uint32_t totalVertices,
-    uint32_t drawCallCount,
-    VoxelWorld* voxelWorld,
-    bool& wireframeOn,
-    bool& enableFrustumCulling,
-    ResourceManager* resourceManager
-)
+    float dt, float fps, float avgFps,
+    float cpu, float avgCpu,
+    uint32_t verts, uint32_t draws,
+    VoxelWorld* world,
+    bool& wireframe,
+    bool& frustum,
+    ResourceManager* rm)
 {
-    if (!m_initialized) {
-        return; // If ImGui not inited, skip
-    }
+    if (!m_initialized) return;
 
     ImGui::Begin("Debug");
 
-    // Show wireframe status, toggle
-    ImGui::Text("Wireframe: %s", wireframeOn ? "ON" : "OFF");
-    if (ImGui::Button("Toggle Wireframe")) {
-        wireframeOn = !wireframeOn;
-    }
-
-    // Frustum culling
-    ImGui::Checkbox("Frustum Culling", &enableFrustumCulling);
+    /* toggles */
+    if (ImGui::Button(wireframe ? "Wireframe ON" : "Wireframe OFF"))
+        wireframe = !wireframe;
+    ImGui::SameLine();
+    ImGui::Checkbox("Frustum culling", &frustum);
     ImGui::Separator();
 
-    // Mesher selection
-    static int mesherTypeIndex = 0; // 0 = GREEDY, 1 = NAIVE
-    const char* mesherTypes[] = { "Greedy", "Naive" };
-    if (ImGui::Combo("Mesher Type", &mesherTypeIndex, mesherTypes, IM_ARRAYSIZE(mesherTypes))) {
-        if (voxelWorld) {
-            if (mesherTypeIndex == 0) {
-                voxelWorld->setMesherType(VoxelWorld::MesherType::GREEDY);
-            }
-            else {
-                voxelWorld->setMesherType(VoxelWorld::MesherType::NAIVE);
-            }
+    /* mesher type */
+    int m = int(world->getMesherType());
+    if (ImGui::RadioButton("Greedy mesher", m == 0)) m = 0;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Naive mesher", m == 1)) m = 1;
+    world->setMesherType(static_cast<VoxelWorld::MesherType>(m));
+    ImGui::Separator();
+
+    /* perf */
+    ImGui::Text("Δt:  %.3f ms", dt * 1000.f);
+    ImGui::Text("FPS: %.1f (avg %.1f)", fps, avgFps);
+    ImGui::Text("CPU: %.1f%% (avg %.1f%%)", cpu, avgCpu);
+    ImGui::Separator();
+
+    /* scene stats */
+    ImGui::Text("Draw calls: %u", draws);
+    ImGui::Text("Vertices:   %u", verts);
+
+    /* chunk counts */
+    auto& cm = world->getChunkManager();
+    ImGui::Text("Chunks: %zu", cm.getAllChunks().size());
+
+    /* CPU mem */
+    double cpuMB = Chunk::s_totalCPUBytes.load(std::memory_order_relaxed) /
+        (1024.0 * 1024.0);
+    ImGui::Text("Chunk CPU mem: %.2f MB", cpuMB);
+
+    /* GPU mem */
+    if (rm)
+    {
+        double gpuMB = rm->GetTotalGPUBufferBytes() / (1024.0 * 1024.0);
+        ImGui::Text("GPU buffer mem: %.2f MB", gpuMB);
+    }
+
+    /*───────────────────────────────────────────────────────────────────
+      NEW  –– mesh‑upload budget & queue stats
+     ──────────────────────────────────────────────────────────────────*/
+    if (ImGui::CollapsingHeader("Chunk upload budget", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        size_t bytesBudget = world->getUploadBudgetBytes();
+        int    chunkBudget = world->getUploadBudgetChunks();
+
+        float mbBudget = float(bytesBudget) / (1024.0f * 1024.0f);
+        if (ImGui::SliderFloat("MB / frame", &mbBudget, 0.5f, 16.0f, "%.1f"))
+        {
+            world->setUploadBudget(size_t(mbBudget * 1024.0f * 1024.0f),
+                chunkBudget);
+            bytesBudget = world->getUploadBudgetBytes();
         }
-    }
-    ImGui::Separator();
-
-    // CPU usage, times
-    ImGui::Text("Delta Time:  %.3f s", dt);
-    ImGui::Text("FPS (Instant):  %.2f", fps);
-    ImGui::Text("FPS (Average):  %.2f", avgFps);
-    ImGui::Text("CPU Usage (Instant):  %.1f%%", cpuUsage);
-    ImGui::Text("CPU Usage (Average):  %.1f%%", avgCpu);
-    ImGui::Separator();
-
-    // Geometry stats
-    ImGui::Text("Vertex Count:  %u", totalVertices);
-    ImGui::Text("Draw Calls:    %u", drawCallCount);
-
-    // Check if voxelWorld is null
-    if (!voxelWorld) {
-        ImGui::Text("No VoxelWorld pointer (null).");
-        ImGui::End();
-        return;
-    }
-
-    auto& chunkMgr = voxelWorld->getChunkManager();
-    ImGui::Text("Chunk Count:  %zu", chunkMgr.getAllChunks().size());
-    auto usage = chunkMgr.getTotalVoxelUsage();
-    ImGui::Text("Active Voxels: %zu", usage.first);
-    ImGui::Text("Empty Voxels:  %zu", usage.second);
-
-    // Additional debug: chunk states
-    {
-        size_t emptyChunkCount = 0;
-        size_t solidChunkCount = 0;
-        size_t normalChunkCount = 0;
-
-        size_t totalActiveVoxels = 0;
-        size_t totalEmptyVoxels = 0;
-
-        const auto& allChunks = chunkMgr.getAllChunks();
-        for (auto& kv : allChunks) {
-            Chunk* c = kv.second.get();
-            if (!c) continue;
-
-            // Check chunk state
-            switch (c->getState()) {
-            case Chunk::ChunkState::EMPTY:
-                emptyChunkCount++;
-                break;
-            case Chunk::ChunkState::SOLID:
-                solidChunkCount++;
-                break;
-            case Chunk::ChunkState::NORMAL:
-                normalChunkCount++;
-                break;
-            }
-
-            // For comparison, accumulate usage
-            auto cUsage = c->getVoxelUsage();
-            totalActiveVoxels += cUsage.first;
-            totalEmptyVoxels += cUsage.second;
+        if (ImGui::SliderInt("Chunks / frame", &chunkBudget, 1, 32))
+        {
+            world->setUploadBudget(bytesBudget, chunkBudget);
         }
-
-        ImGui::Separator();
-        ImGui::Text("Chunk States:");
-        ImGui::Text("  EMPTY:  %zu", emptyChunkCount);
-        ImGui::Text("  SOLID:  %zu", solidChunkCount);
-        ImGui::Text("  NORMAL: %zu", normalChunkCount);
-
-        ImGui::Text("Recounted Active Voxels: %zu", totalActiveVoxels);
-        ImGui::Text("Recounted Empty Voxels:  %zu", totalEmptyVoxels);
+        ImGui::Text("Pending uploads: %zu", world->getPendingUploadCount());
     }
 
-    ImGui::Separator();
-
-    // --------------------------------------------------------------------
-    // PHASE 2: Show total CPU memory used by chunk voxel arrays
-    // --------------------------------------------------------------------
+    /* CPU profiler table */
+    if (ImGui::CollapsingHeader("CPU timers"))
     {
-        // atomic<size_t> is in Engine/Voxels/Chunk.h
-        size_t cpuBytes = Chunk::s_totalCPUBytes.load(std::memory_order_relaxed);
-        double cpuMB = double(cpuBytes) / (1024.0 * 1024.0);
-        ImGui::Text("Chunk CPU Memory: %.2f MB", cpuMB);
-    }
-
-    // --------------------------------------------------------------------
-    // Show GPU memory usage
-    // --------------------------------------------------------------------
-    {
-        size_t gpuBytes = 0;
-        if (resourceManager) {
-            gpuBytes = resourceManager->GetTotalGPUBufferBytes();
+        const auto& map = CpuProfiler::GetProfileRecords();
+        for (auto& kv : map)
+        {
+            const auto& rec = kv.second;
+            double avg = rec.callCount ? rec.accumTimeMs / rec.callCount : 0.0;
+            ImGui::Text("%s  |  last %.2f ms / avg %.2f ms (%d calls)",
+                kv.first.c_str(), rec.lastTimeMs, avg, rec.callCount);
         }
-        ImGui::Text("GPU Buffer Memory: %.2f MB", float(gpuBytes) / (1024.0f * 1024.0f));
-    }
-
-    ImGui::Separator();
-    ImGui::Text("CPU Timing (ms):");
-    const auto& profileMap = CpuProfiler::GetProfileRecords();
-    for (auto& kv : profileMap)
-    {
-        const std::string& label = kv.first;
-        const ProfileRecord& rec = kv.second;
-
-        double average = (rec.callCount > 0)
-            ? (rec.accumTimeMs / double(rec.callCount))
-            : 0.0;
-
-        ImGui::Text("%s: Last=%.2fms, Avg=%.2fms (%d calls)",
-            label.c_str(),
-            rec.lastTimeMs,
-            average,
-            rec.callCount);
     }
 
     ImGui::End();
