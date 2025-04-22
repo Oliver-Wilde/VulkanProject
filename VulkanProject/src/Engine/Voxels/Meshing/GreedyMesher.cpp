@@ -177,17 +177,22 @@ bool GreedyMesher::generateMesh(
 
     const int SX = blk.getSizeX(), SY = blk.getSizeY(), SZ = blk.getSizeZ();
 
-    auto isSolidID = [&](int id) { return id > 0 && VoxelTypeRegistry::get().getVoxel(id).isSolid; };
+    auto isSolidID = [&](int id)
+        { return id > 0 && VoxelTypeRegistry::get().getVoxel(id).isSolid; };
 
-    auto divFloor = [](int v, int d) { return (v >= 0) ? v / d : (v - (d - 1)) / d; };
+    auto divFloor = [](int v, int d)
+        { return (v >= 0) ? v / d : (v - (d - 1)) / d; };
 
+    /* -------------------------------------------------------------------- */
+    /* neighbour test protected by shared_ptr                               */
+    /* -------------------------------------------------------------------- */
     auto isSolidGlobal = [&](int x, int y, int z) -> bool
         {
-            // Inside the current chunk?
+            // inside current chunk
             if (x >= 0 && x < SX && y >= 0 && y < SY && z >= 0 && z < SZ)
                 return isSolidID(blk.getBlock(x, y, z));
 
-            // Map to world‑space, then to neighbour‑chunk coords
+            // convert to world coords
             int wx = cx * Chunk::SIZE_X + x;
             int wy = cy * Chunk::SIZE_Y + y;
             int wz = cz * Chunk::SIZE_Z + z;
@@ -196,14 +201,13 @@ bool GreedyMesher::generateMesh(
             int ncy = divFloor(wy, Chunk::SIZE_Y);
             int ncz = divFloor(wz, Chunk::SIZE_Z);
 
-            // *** NEW GUARD ***
-            if (!mgr.hasChunk(ncx, ncy, ncz))        // neighbour not loaded yet
-                return false;                        // treat as air, avoid crash
+            if (!mgr.hasChunk(ncx, ncy, ncz))
+                return false;                    // neighbour not loaded → treat as air
 
-            const Chunk* n = mgr.getChunk(ncx, ncy, ncz);
-            if (!n) return false;
+            std::shared_ptr<Chunk> neigh = mgr.getChunk(ncx, ncy, ncz);
+            if (!neigh) return false;
 
-            return isSolidID(n->getBlock(wx - ncx * Chunk::SIZE_X,
+            return isSolidID(neigh->getBlock(wx - ncx * Chunk::SIZE_X,
                 wy - ncy * Chunk::SIZE_Y,
                 wz - ncz * Chunk::SIZE_Z));
         };

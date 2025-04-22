@@ -1,4 +1,4 @@
-#include "Frustum.h"
+﻿#include "Frustum.h"
 #include <cmath>   // for std::sqrt
 #include <Engine/Scene/Camera.h>
 #include <vulkan/vulkan_core.h>
@@ -64,52 +64,42 @@ void Frustum::normalizePlane(Plane& plane)
 
 bool Frustum::intersectsAABB(const glm::vec3& minB, const glm::vec3& maxB) const
 {
-    // For each plane, if the box is completely 'behind' that plane, we're out.
-    for (int i = 0; i < 6; i++)
+    // For each plane, if the box is completely outside (behind) that plane, we can reject it.
+    // We test the vertex that is **furthest along the plane normal** (the so‑called p‑vertex).
+    // If that vertex is behind the plane, the whole AABB is.
+    for (int i = 0; i < 6; ++i)
     {
         const Plane& p = planes[i];
 
-        // Find the "closest point" (in terms of plane normal direction)
-        // For the plane normal, if A>0 => use max x, else use min x, etc.
-        // This point is the "most likely to be outside" corner of the box.
-        float x = (p.A >= 0.0f) ? minB.x : maxB.x;
-        float y = (p.B >= 0.0f) ? minB.y : maxB.y;
-        float z = (p.C >= 0.0f) ? minB.z : maxB.z;
+        // Select the vertex that maximises dot(n, v) wrt plane normal sign
+        float x = (p.A >= 0.0f) ? maxB.x : minB.x;
+        float y = (p.B >= 0.0f) ? maxB.y : minB.y;
+        float z = (p.C >= 0.0f) ? maxB.z : minB.z;
 
-        // Distance from plane
         float dist = p.A * x + p.B * y + p.C * z + p.D;
-
-        // If dist < 0 => box is entirely behind this plane => outside.
-        if (dist < 0.0f) {
-            return false; // completely out
-        }
+        if (dist < 0.0f)
+            return false;          // AABB is completely outside this plane
     }
-
-    // If we never found it completely outside, it's at least partially inside.
-    return true;
+    return true;                   // at least partially inside all planes
 }
-
 
 Frustum buildCameraFrustum(const Camera& camera, VkExtent2D extent)
 {
-    // 1) Calculate aspect ratio
+    // 1) Aspect ratio
     float aspect = float(extent.width) / float(extent.height);
 
-    // 2) Create a standard perspective projection (45�, near=0.1f, far=1000.f)
+    // 2) Perspective projection (45° FOV, near 0.01, far very far for terrain)
     glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 100000.0f);
 
-    
-
-    // 3) Flip Y for Vulkan
+    // 3) Vulkan NDC has inverted Y
     proj[1][1] *= -1.f;
 
-    // 4) Build the view matrix from the camera
+    // 4) View matrix from camera
     glm::mat4 view = camera.getViewMatrix();
 
-    // 5) Multiply => VP
+    // 5) Combined clip matrix
     glm::mat4 vp = proj * view;
 
-    // 6) Fill out a Frustum struct
     Frustum frustum;
     frustum.extractPlanes(vp);
     return frustum;

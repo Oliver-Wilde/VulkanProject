@@ -1,85 +1,84 @@
-#include "ChunkManager.h"
-#include <stdexcept>
+﻿#include "ChunkManager.h"
 #include <Engine/Utils/Logger.h>
 
-ChunkManager::ChunkManager()
-{
-}
+#include <shared_mutex>
 
-ChunkManager::~ChunkManager()
-{
-    // unique_ptr automatically cleans up all Chunks in m_chunks
-}
+ChunkManager::ChunkManager() = default;
+ChunkManager::~ChunkManager() = default;
 
+/* ────────────────────────────────────────────────────────────────────────── */
+/* presence check (reader lock)                                              */
+/* ────────────────────────────────────────────────────────────────────────── */
 bool ChunkManager::hasChunk(int cx, int cy, int cz) const
 {
-    ChunkCoord coord{ cx, cy, cz };
-    auto it = m_chunks.find(coord);
-    return (it != m_chunks.end());
+    std::shared_lock<std::shared_mutex> rd(m_mutex);
+    return m_chunks.find({ cx, cy, cz }) != m_chunks.end();
 }
 
-Chunk* ChunkManager::getChunk(int cx, int cy, int cz) const
+/* ────────────────────────────────────────────────────────────────────────── */
+/* getChunk – returns shared_ptr so lifetime extends across threads          */
+/* ────────────────────────────────────────────────────────────────────────── */
+std::shared_ptr<Chunk> ChunkManager::getChunk(int cx, int cy, int cz) const
 {
-    ChunkCoord coord{ cx, cy, cz };
-    auto it = m_chunks.find(coord);
-    if (it == m_chunks.end())
-    {
-        return nullptr;
-    }
-    return it->second.get();
+    std::shared_lock<std::shared_mutex> rd(m_mutex);
+    auto it = m_chunks.find({ cx, cy, cz });
+    return (it != m_chunks.end()) ? it->second : nullptr;
 }
 
-Chunk* ChunkManager::createChunk(int cx, int cy, int cz)
+/* ────────────────────────────────────────────────────────────────────────── */
+/* createChunk (writer lock)                                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+std::shared_ptr<Chunk> ChunkManager::createChunk(int cx, int cy, int cz)
 {
-    ChunkCoord coord{ cx, cy, cz };
-    auto it = m_chunks.find(coord);
-    if (it != m_chunks.end())
-    {
-        // Already exists
-        return it->second.get();
-    }
+    std::unique_lock<std::shared_mutex> wr(m_mutex);
 
-    // Otherwise create a new one
-    std::unique_ptr<Chunk> newChunk = std::make_unique<Chunk>(cx, cy, cz);
-    Chunk* chunkPtr = newChunk.get();
-    m_chunks.emplace(coord, std::move(newChunk));
+    ChunkCoord key{ cx, cy, cz };
+    auto it = m_chunks.find(key);
+    if (it != m_chunks.end()) return it->second;
 
-    Logger::Info("Creating chunk at ("
-        + std::to_string(cx) + ", "
-        + std::to_string(cy) + ", "
-        + std::to_string(cz) + ")");
+    auto chunk = std::make_shared<Chunk>(cx, cy, cz);
+    m_chunks.emplace(key, chunk);
 
-    return chunkPtr;
+    Logger::Info("Creating chunk at (" +
+        std::to_string(cx) + ", " +
+        std::to_string(cy) + ", " +
+        std::to_string(cz) + ")");
+
+    return chunk;
 }
 
+/* ────────────────────────────────────────────────────────────────────────── */
+/* removeChunk (writer lock) – shared_ptr ensures safe deferred destruction  */
+/* ────────────────────────────────────────────────────────────────────────── */
 void ChunkManager::removeChunk(int cx, int cy, int cz)
 {
-    ChunkCoord coord{ cx, cy, cz };
-    auto it = m_chunks.find(coord);
+    std::unique_lock<std::shared_mutex> wr(m_mutex);
+
+    ChunkCoord key{ cx, cy, cz };
+    auto it = m_chunks.find(key);
     if (it != m_chunks.end())
     {
-        Logger::Info("Removing chunk at ("
-            + std::to_string(cx) + ", "
-            + std::to_string(cy) + ", "
-            + std::to_string(cz) + ")");
-
-        m_chunks.erase(it);
+        Logger::Info("Removing chunk at (" +
+            std::to_string(cx) + ", " +
+            std::to_string(cy) + ", " +
+            std::to_string(cz) + ")");
+        m_chunks.erase(it);      // actual delete occurs when last ref drops
     }
 }
 
-// Note: We do NOT redefine getAllChunks() here, because it's inline in the header.
-
-// Summaries active/empty usage across all chunks
+/* ────────────────────────────────────────────────────────────────────────── */
+/* aggregate voxel usage (reader lock)                                       */
+/* ────────────────────────────────────────────────────────────────────────── */
 std::pair<size_t, size_t> ChunkManager::getTotalVoxelUsage() const
 {
-    size_t totalActive = 0;
-    size_t totalEmpty = 0;
+    std::shared_lock<std::shared_mutex> rd(m_mutex);
 
+    size_t active = 0, empty = 0;
     for (const auto& kv : m_chunks)
     {
-        std::pair<size_t, size_t> usage = kv.second->getVoxelUsage();
-        totalActive += usage.first;
-        totalEmpty += usage.second;
+        auto usage = kv.second->getVoxelUsage();
+        active += usage.first;
+        empty += usage.second;
     }
-    return { totalActive, totalEmpty };
+    return { active, empty };
 }

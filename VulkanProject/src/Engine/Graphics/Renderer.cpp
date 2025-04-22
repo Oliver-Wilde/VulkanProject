@@ -16,8 +16,8 @@
 #include "Engine/Voxels/Chunk.h"
 #include "Engine/Scene/Camera.h"
 
+#include "Engine/Utils/CpuProfiler.h" 
 
-#include "../Utils/CpuProfiler.h"
 #include <Engine/Utils/Logger.h>
 #include <Engine/Utils/ThreadPool.h>
 #include <numeric>   
@@ -48,11 +48,11 @@ static uint64_t fnv1a64(const void* d, size_t n)
 Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
     : m_owner(owner)
 {
-    // create a dedicated command pool for this thread (graphics family)
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pci.queueFamilyIndex = m_owner->m_context->getGraphicsQueueFamilyIndex();
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    if (vkCreateCommandPool(m_owner->m_context->getDevice(), &pci, nullptr, &m_cmdPool) != VK_SUCCESS)
+    if (vkCreateCommandPool(m_owner->m_context->getDevice(),
+        &pci, nullptr, &m_cmdPool) != VK_SUCCESS)
         throw std::runtime_error("GeometryBuilder: command‑pool create failed");
 
     m_thread = std::thread(&GeometryBuilder::threadMain, this);
@@ -60,6 +60,10 @@ Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
 
 Renderer::GeometryBuilder::~GeometryBuilder()
 {
+    /* ensure GPU is idle before freeing any buffers in this pool */
+    VkDevice dev = m_owner->m_context->getDevice();
+    vkDeviceWaitIdle(dev);
+
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_exit = true;
@@ -67,22 +71,22 @@ Renderer::GeometryBuilder::~GeometryBuilder()
     m_cv.notify_all();
     if (m_thread.joinable()) m_thread.join();
 
-    // free any leftover command buffers
+    /* free any leftover command buffers */
     while (!m_done.empty())
     {
-        vkFreeCommandBuffers(m_owner->m_context->getDevice(), m_cmdPool, 1, &m_done.front().cmd);
+        vkFreeCommandBuffers(dev, m_cmdPool, 1, &m_done.front().cmd);
         m_done.pop_front();
     }
-    while (!m_jobs.empty()) m_jobs.pop_front();                           // ◆ PATCH
+    while (!m_jobs.empty()) m_jobs.pop_front();
 
-    vkDestroyCommandPool(m_owner->m_context->getDevice(), m_cmdPool, nullptr);
+    vkDestroyCommandPool(dev, m_cmdPool, nullptr);
 }
 
 void Renderer::GeometryBuilder::submit(const GeometryJob& job)
 {
     {
         std::lock_guard<std::mutex> lk(m_mutex);
-        m_jobs.push_back(job);                                            // ◆ PATCH
+        m_jobs.push_back(job);
     }
     m_cv.notify_one();
 }

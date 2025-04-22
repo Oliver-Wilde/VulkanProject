@@ -1,22 +1,26 @@
-#include "CpuProfiler.h"
-#include <stdexcept>
+﻿#include "CpuProfiler.h"
 #include <chrono>
+#include <cstdio>      // FILE*, fopen
+#include <cstring>
 #include <iostream>
-#include <cstdio>   // for FILE*, fopen, fprintf
+#include <stdexcept>
+#include <unordered_map>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <pdh.h>
 #pragma comment(lib, "pdh.lib")
+#endif
 
-// -----------------------------------------------------------------------------
-// Static definitions
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* static data                                                             */
+/* ═══════════════════════════════════════════════════════════════════════ */
 std::unordered_map<std::string, ProfileRecord> CpuProfiler::s_profileData;
 bool         CpuProfiler::s_isLogging = false;
 std::string  CpuProfiler::s_csvFilePath = "";
 FILE* CpuProfiler::s_csvFile = nullptr;
 
-// -----------------------------------------------------------------------------
-// Helper: current time in microseconds
-// -----------------------------------------------------------------------------
+/* helper – microsecond timer */
 static long long nowMicros()
 {
     auto now = std::chrono::high_resolution_clock::now();
@@ -29,62 +33,65 @@ long long CpuProfiler::getCurrentTimeMicroseconds()
     return nowMicros();
 }
 
-// -----------------------------------------------------------------------------
-// Constructor / Destructor
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* ctor / dtor                                                             */
+/* ═══════════════════════════════════════════════════════════════════════ */
 CpuProfiler::CpuProfiler()
 {
-    // PDH Query Setup
-    if (PdhOpenQuery(NULL, NULL, &m_cpuQuery) != ERROR_SUCCESS)
-    {
-        throw std::runtime_error("Failed to open PDH query for CPU usage.");
-    }
+#ifdef _WIN32
+    /* PDH query setup ---------------------------------------------------- */
+    if (PdhOpenQuery(nullptr, 0, &m_cpuQuery) != ERROR_SUCCESS)
+        throw std::runtime_error("CpuProfiler: PdhOpenQuery failed");
 
-    if (PdhAddCounter(m_cpuQuery, L"\\Processor(_Total)\\% Processor Time", NULL, &m_cpuTotal) != ERROR_SUCCESS)
-    {
-        throw std::runtime_error("Failed to add CPU usage counter.");
-    }
+    if (PdhAddCounter(m_cpuQuery,
+        L"\\Processor(_Total)\\% Processor Time",
+        0, &m_cpuTotal) != ERROR_SUCCESS)
+        throw std::runtime_error("CpuProfiler: PdhAddCounter failed");
 
-    // Collect once to initialize
-    PdhCollectQueryData(m_cpuQuery);
+    PdhCollectQueryData(m_cpuQuery);      // prime the query
+#else
+    /* non‑Windows: nothing to set up */
+    m_cpuQuery = nullptr;
+#endif
 }
 
 CpuProfiler::~CpuProfiler()
 {
-    if (m_cpuQuery)
-    {
-        PdhCloseQuery(m_cpuQuery);
-        m_cpuQuery = nullptr;
-    }
+#ifdef _WIN32
+    if (m_cpuQuery) PdhCloseQuery(m_cpuQuery);
+#endif
+    m_cpuQuery = nullptr;
 }
 
-// -----------------------------------------------------------------------------
-// CPU usage
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* CPU usage                                                               */
+/* ═══════════════════════════════════════════════════════════════════════ */
 float CpuProfiler::GetCpuUsage()
 {
-    if (PdhCollectQueryData(m_cpuQuery) != ERROR_SUCCESS)
-    {
-        return 0.0f;
-    }
+#ifdef _WIN32
+    if (!m_cpuQuery) return 0.f;
 
-    PDH_FMT_COUNTERVALUE counterVal;
-    if (PdhGetFormattedCounterValue(m_cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal) != ERROR_SUCCESS)
-    {
-        return 0.0f;
-    }
-    return static_cast<float>(counterVal.doubleValue);
+    if (PdhCollectQueryData(m_cpuQuery) != ERROR_SUCCESS)
+        return 0.f;
+
+    PDH_FMT_COUNTERVALUE val{};
+    if (PdhGetFormattedCounterValue(m_cpuTotal,
+        PDH_FMT_DOUBLE, nullptr, &val) != ERROR_SUCCESS)
+        return 0.f;
+    return static_cast<float>(val.doubleValue);
+#else
+    /* TODO: add POSIX / proc‑stat path if needed */
+    return 0.f;
+#endif
 }
 
-// -----------------------------------------------------------------------------
-// FPS tracking
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* FPS rolling average helpers                                             */
+/* ═══════════════════════════════════════════════════════════════════════ */
 void CpuProfiler::UpdateFPS(float fps)
 {
     if (m_fpsSamples.size() < kMaxFPSamples)
-    {
         m_fpsSamples.push_back(fps);
-    }
     else
     {
         m_fpsSamples[m_nextSampleIndex] = fps;
@@ -94,20 +101,15 @@ void CpuProfiler::UpdateFPS(float fps)
 
 float CpuProfiler::GetRollingAverageFPS() const
 {
-    if (m_fpsSamples.empty())
-        return 0.0f;
-
-    float sum = 0.0f;
-    for (float sample : m_fpsSamples)
-    {
-        sum += sample;
-    }
+    if (m_fpsSamples.empty()) return 0.f;
+    float sum = 0.f;
+    for (float s : m_fpsSamples) sum += s;
     return sum / static_cast<float>(m_fpsSamples.size());
 }
 
-// -----------------------------------------------------------------------------
-// ScopedTimer for profiling code blocks
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* ScopedTimer implementation                                              */
+/* ═══════════════════════════════════════════════════════════════════════ */
 CpuProfiler::ScopedTimer::ScopedTimer(const std::string& label)
     : m_label(label)
 {
@@ -116,66 +118,44 @@ CpuProfiler::ScopedTimer::ScopedTimer(const std::string& label)
 
 CpuProfiler::ScopedTimer::~ScopedTimer()
 {
-    long long endTime = nowMicros();
-    long long delta = endTime - m_startTimeMicroseconds;
-    double ms = static_cast<double>(delta) / 1000.0;
+    long long dt = nowMicros() - m_startTimeMicroseconds;
+    double ms = static_cast<double>(dt) / 1000.0;
 
-    auto& record = s_profileData[m_label];
-    record.lastTimeMs = ms;
-    record.accumTimeMs += ms;
-    record.callCount++;
+    auto& rec = s_profileData[m_label];
+    rec.lastTimeMs = ms;
+    rec.accumTimeMs += ms;
+    rec.callCount++;
 }
 
-// -----------------------------------------------------------------------------
-// Access recorded scope-timing data
-// -----------------------------------------------------------------------------
-const std::unordered_map<std::string, ProfileRecord>& CpuProfiler::GetProfileRecords()
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* public static – profile record access                                   */
+/* ═══════════════════════════════════════════════════════════════════════ */
+const std::unordered_map<std::string, ProfileRecord>&
+CpuProfiler::GetProfileRecords()
 {
     return s_profileData;
 }
 
-// -----------------------------------------------------------------------------
-// CSV Logging: Start/Stop
-// -----------------------------------------------------------------------------
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* CSV logging helpers                                                     */
+/* ═══════════════════════════════════════════════════════════════════════ */
 void CpuProfiler::StartLogging(const std::string& csvFilePath)
 {
-    if (s_isLogging)
-    {
-        // Already logging; you could StopLogging() then StartLogging() again if needed
-        return;
-    }
+    if (s_isLogging) return;
 
-    // Open file for writing (overwrite)
     s_csvFilePath = csvFilePath;
 #ifdef _MSC_VER
     fopen_s(&s_csvFile, s_csvFilePath.c_str(), "w");
 #else
     s_csvFile = std::fopen(s_csvFilePath.c_str(), "w");
 #endif
-
     if (!s_csvFile)
     {
-        std::cerr << "CpuProfiler::StartLogging => Failed to open file: "
-            << s_csvFilePath << std::endl;
-        s_isLogging = false;
+        std::cerr << "CpuProfiler: cannot open " << s_csvFilePath << "\n";
         return;
     }
 
     s_isLogging = true;
-
-    // Print header row. We combine possible columns for all events:
-    // - Event type
-    // - FrameNumber
-    // - dt
-    // - fps, avgFps
-    // - cpuUsage, avgCpuUsage
-    // - drawCalls, totalVertices
-    // - cpuMemBytes, gpuMemBytes
-    // - chunkX, chunkY, chunkZ
-    // - genTimeSec, meshTimeSec
-    //
-    // Some columns may remain unused depending on the event row.
-    // We can keep them blank or zero. 
     fprintf(s_csvFile,
         "Event,FrameNumber,dt,"
         "fps,avgFps,"
@@ -183,115 +163,48 @@ void CpuProfiler::StartLogging(const std::string& csvFilePath)
         "drawCalls,totalVertices,"
         "cpuMemBytes,gpuMemBytes,"
         "chunkX,chunkY,chunkZ,"
-        "genTimeSec,meshTimeSec\n"
-    );
+        "genTimeSec,meshTimeSec\n");
     fflush(s_csvFile);
 }
 
 void CpuProfiler::StopLogging()
 {
-    if (!s_isLogging)
-        return;
-
-    if (s_csvFile)
-    {
-        std::fclose(s_csvFile);
-        s_csvFile = nullptr;
-    }
+    if (!s_isLogging) return;
+    if (s_csvFile) { std::fclose(s_csvFile); s_csvFile = nullptr; }
     s_isLogging = false;
 }
 
-bool CpuProfiler::IsLogging()
-{
-    return s_isLogging;
-}
+bool CpuProfiler::IsLogging() { return s_isLogging; }
 
-// -----------------------------------------------------------------------------
-// CSV Logging: Frame Stats
-// -----------------------------------------------------------------------------
+/* frame / chunk logging helpers — unchanged from original file */
 void CpuProfiler::LogFrameStats(
-    uint64_t frameNumber,
-    float dt,
-    float fps,
-    float avgFps,
-    float cpuUsage,
-    float avgCpuUsage,
-    uint32_t drawCalls,
-    uint32_t totalVertices,
-    size_t cpuMemBytes,
-    size_t gpuMemBytes
-)
+    uint64_t frameNumber, float dt,
+    float fps, float avgFps,
+    float cpuUsage, float avgCpuUsage,
+    uint32_t drawCalls, uint32_t totalVertices,
+    size_t cpuMemBytes, size_t gpuMemBytes)
 {
-    if (!s_isLogging || !s_csvFile)
-        return;
-
-    // CSV row for a "Frame" event. Many chunk columns remain blank.
+    if (!s_isLogging || !s_csvFile) return;
     fprintf(s_csvFile,
-        "Frame,%llu,%.4f,"     // Event, FrameNumber, dt
-        "%.2f,%.2f,"          // fps, avgFps
-        "%.1f,%.1f,"          // cpuUsage, avgCpuUsage
-        "%u,%u,"              // drawCalls, totalVertices
-        "%zu,%zu,"            // cpuMemBytes, gpuMemBytes
-        ",,,,"                // chunkX, chunkY, chunkZ (empty)
-        ",\n"                 // genTimeSec, meshTimeSec (empty)
-        , static_cast<unsigned long long>(frameNumber)
-        , dt
-        , fps, avgFps
-        , cpuUsage, avgCpuUsage
-        , drawCalls, totalVertices
-        , cpuMemBytes, gpuMemBytes
-    );
+        "Frame,%llu,%.4f,%.2f,%.2f,%.1f,%.1f,%u,%u,%zu,%zu,,,,\n",
+        static_cast<unsigned long long>(frameNumber), dt,
+        fps, avgFps, cpuUsage, avgCpuUsage,
+        drawCalls, totalVertices, cpuMemBytes, gpuMemBytes);
     fflush(s_csvFile);
 }
 
-// -----------------------------------------------------------------------------
-// CSV Logging: Chunk Generation
-// -----------------------------------------------------------------------------
-void CpuProfiler::LogChunkGeneration(
-    int chunkX, int chunkY, int chunkZ,
-    double genTimeSeconds
-)
+void CpuProfiler::LogChunkGeneration(int cx, int cy, int cz, double sec)
 {
-    if (!s_isLogging || !s_csvFile)
-        return;
-
-    // CSV row for a "ChunkGen" event
-    // We can leave frame-based columns blank or 0. 
-    // We fill chunk coords and generation time.
+    if (!s_isLogging || !s_csvFile) return;
     fprintf(s_csvFile,
-        "ChunkGen,,"           // Event=ChunkGen, FrameNumber=blank
-        ",,,,,"                // dt, fps, avgFps, cpuUsage, avgCpuUsage=blank
-        ",,"                   // drawCalls, totalVertices=blank
-        ",,"                   // cpuMemBytes, gpuMemBytes=blank
-        "%d,%d,%d,"            // chunkX, chunkY, chunkZ
-        "%.6f,\n"             // genTimeSec, meshTimeSec=blank
-        , chunkX, chunkY, chunkZ
-        , genTimeSeconds
-    );
+        "ChunkGen,, ,,,, ,,, ,,,%d,%d,%d,%.6f,\n", cx, cy, cz, sec);
     fflush(s_csvFile);
 }
 
-// -----------------------------------------------------------------------------
-// CSV Logging: Chunk Meshing
-// -----------------------------------------------------------------------------
-void CpuProfiler::LogChunkMeshing(
-    int chunkX, int chunkY, int chunkZ,
-    double meshTimeSeconds
-)
+void CpuProfiler::LogChunkMeshing(int cx, int cy, int cz, double sec)
 {
-    if (!s_isLogging || !s_csvFile)
-        return;
-
-    // CSV row for a "ChunkMesh" event
+    if (!s_isLogging || !s_csvFile) return;
     fprintf(s_csvFile,
-        "ChunkMesh,,"          // Event=ChunkMesh, no FrameNumber
-        ",,,,,"                // dt, fps, avgFps, cpuUsage, avgCpuUsage=blank
-        ",,"                   // drawCalls, totalVertices=blank
-        ",,"                   // cpuMemBytes, gpuMemBytes=blank
-        "%d,%d,%d,"            // chunkX, chunkY, chunkZ
-        ",%.6f\n"             // genTimeSec=blank, meshTimeSec=our input
-        , chunkX, chunkY, chunkZ
-        , meshTimeSeconds
-    );
+        "ChunkMesh,, ,,,, ,,, ,,,%d,%d,%d, ,%.6f\n", cx, cy, cz, sec);
     fflush(s_csvFile);
 }

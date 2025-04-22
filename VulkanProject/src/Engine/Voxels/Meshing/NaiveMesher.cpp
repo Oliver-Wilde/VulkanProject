@@ -45,24 +45,24 @@ static bool isSolidGlobal(
         z >= 0 && z < Chunk::SIZE_Z)
     {
         int id = currentChunk.getBlock(x, y, z);
-        return (id > 0) ? isSolidID(id) : false;
+        return (id > 0) && isSolidID(id);
     }
-    else {
-        int nx = cx, ny = cy, nz = cz;
-        int localX = x, localY = y, localZ = z;
-        if (x < 0) { nx -= 1; localX += Chunk::SIZE_X; }
-        else if (x >= Chunk::SIZE_X) { nx += 1; localX -= Chunk::SIZE_X; }
-        if (y < 0) { ny -= 1; localY += Chunk::SIZE_Y; }
-        else if (y >= Chunk::SIZE_Y) { ny += 1; localY -= Chunk::SIZE_Y; }
-        if (z < 0) { nz -= 1; localZ += Chunk::SIZE_Z; }
-        else if (z >= Chunk::SIZE_Z) { nz += 1; localZ -= Chunk::SIZE_Z; }
 
-        const Chunk* neighbor = manager.getChunk(nx, ny, nz);
-        if (!neighbor)
-            return false;
-        int id = neighbor->getBlock(localX, localY, localZ);
-        return (id > 0) ? isSolidID(id) : false;
-    }
+    int nx = cx, ny = cy, nz = cz;
+    int lx = x, ly = y, lz = z;
+
+    if (lx < 0) { nx--; lx += Chunk::SIZE_X; }
+    else if (lx >= Chunk::SIZE_X) { nx++; lx -= Chunk::SIZE_X; }
+    if (ly < 0) { ny--; ly += Chunk::SIZE_Y; }
+    else if (ly >= Chunk::SIZE_Y) { ny++; ly -= Chunk::SIZE_Y; }
+    if (lz < 0) { nz--; lz += Chunk::SIZE_Z; }
+    else if (lz >= Chunk::SIZE_Z) { nz++; lz -= Chunk::SIZE_Z; }
+
+    std::shared_ptr<const Chunk> neigh = manager.getChunk(nx, ny, nz);
+    if (!neigh) return false;
+
+    int id = neigh->getBlock(lx, ly, lz);
+    return (id > 0) && isSolidID(id);
 }
 
 bool NaiveMesher::generateMesh(

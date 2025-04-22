@@ -84,7 +84,7 @@ void VoxelWorld::initWorld()
         for (int cz = -VIEW_DISTANCE; cz <= VIEW_DISTANCE; ++cz)
             for (int cy = cyMin; cy <= cyMax; ++cy)
             {
-                Chunk* chk = m_chunkManager.createChunk(cx, cy, cz);
+                auto chk = m_chunkManager.createChunk(cx, cy, cz);
                 g_threadPool.enqueueTask([this, chk, cx, cy, cz]()
                     {
                         m_terrainGenerator.generateChunk(*chk, cx, cy, cz);
@@ -216,44 +216,34 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 // ------------------------------------------------------------------------
 void VoxelWorld::loadOneChunk(const ChunkCoord& c)
 {
-    CpuProfiler::ScopedTimer timeLoad("VoxelWorld::loadOneChunk");
+    CpuProfiler::ScopedTimer _t("VoxelWorld::loadOneChunk");
 
-    if (m_chunkManager.hasChunk(c.x, c.y, c.z))
-    {
-        return; // already exists
-    }
+    if (m_chunkManager.hasChunk(c.x, c.y, c.z)) return;
 
-    Chunk* chunk = m_chunkManager.createChunk(c.x, c.y, c.z);
+    /* shared‑ptr keeps chunk alive until generation finishes */
+    auto chunk = m_chunkManager.createChunk(c.x, c.y, c.z);
 
-    // Kick off terrain generation
     g_threadPool.enqueueTask(
-        [this, chunk, c]()
+        [this, chunk, c]
         {
             m_terrainGenerator.generateChunk(*chunk, c.x, c.y, c.z);
             chunk->markDirty();
         },
-        TaskType::Generation,
-        /*priority=*/10
-    );
+        TaskType::Generation, 10);
 }
-
 // ------------------------------------------------------------------------
 // unloadOneChunk => ring-buffer destroy & remove
 // ------------------------------------------------------------------------
 void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
 {
-    CpuProfiler::ScopedTimer timeUnload("VoxelWorld::unloadOneChunk");
+    CpuProfiler::ScopedTimer _t("VoxelWorld::unloadOneChunk");
 
-    Chunk* chunk = m_chunkManager.getChunk(c.x, c.y, c.z);
-    if (!chunk)
-    {
-        return; // not existing
-    }
+    std::shared_ptr<Chunk> chunk = m_chunkManager.getChunk(c.x, c.y, c.z);
+    if (!chunk) return;
 
-    // If chunk is still uploading
-    if (chunk->isUploading())
+    if (chunk->isUploading())      // defer until upload finishes
     {
-        Logger::Info("unloadOneChunk => chunk uploading, re-queue: "
+        Logger::Info("unloadOneChunk – chunk uploading, re‑queue: "
             + std::to_string(c.x) + ","
             + std::to_string(c.y) + ","
             + std::to_string(c.z));
@@ -294,22 +284,21 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
     m_chunkManager.removeChunk(c.x, c.y, c.z);
 }
 
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------scheduleMeshingForDirtyChunks
 // scheduleMeshingForDirtyChunks => multi-lod only
 // ------------------------------------------------------------------------
 void VoxelWorld::scheduleMeshingForDirtyChunks()
 {
-    CpuProfiler::ScopedTimer t("VoxelWorld::scheduleMeshing");
+    CpuProfiler::ScopedTimer _t("VoxelWorld::scheduleMeshing");
 
     const auto& all = m_chunkManager.getAllChunks();
-    const IMesher* base =
-        (m_currentMesherType == MesherType::GREEDY)
+    const IMesher* base = (m_currentMesherType == MesherType::GREEDY)
         ? static_cast<const IMesher*>(&m_greedyMesher)
         : static_cast<const IMesher*>(&m_naiveMesher);
 
     for (auto& kv : all)
     {
-        Chunk* c = kv.second.get();
+        std::shared_ptr<Chunk> c = kv.second;
         if (!c || !c->isDirty()) continue;
 
         if (c->getState() == Chunk::ChunkState::NORMAL)
@@ -324,19 +313,21 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
         c->clearDirty();
         c->setIsUploading(true);
 
-        g_threadPool.enqueueTask([this, c, base]()
+        g_threadPool.enqueueTask(
+            [this, c, base]
             {
                 CpuProfiler::ScopedTimer tm("LOD build");
 
-                MultiLODResult mlr = LODMesher::buildAllLODs(
-                    *c, c->worldX(), c->worldY(), c->worldZ(),
-                    base, m_chunkManager);
+                MultiLODResult mlr =
+                    LODMesher::buildAllLODs(*c, c->worldX(), c->worldY(),
+                        c->worldZ(), base, m_chunkManager);
 
                 {
                     std::lock_guard<std::mutex> lk(s_resultMutex);
                     s_pendingLODResults.emplace_back(std::move(mlr));
                 }
-            }, TaskType::Meshing, 50);
+            },
+            TaskType::Meshing, 50);
     }
 }
 

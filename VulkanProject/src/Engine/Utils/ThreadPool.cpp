@@ -1,160 +1,123 @@
 #include "ThreadPool.h"
-#include <iostream> // optional for logs
+#include <iostream>   // optional logging
 
 ThreadPool::ThreadPool(size_t threadCount,
     size_t maxMeshTasks,
     size_t maxGenTasks)
 {
-    if (threadCount == 0) {
+    if (threadCount == 0)
+    {
         size_t hc = std::thread::hardware_concurrency();
         threadCount = (hc > 2) ? hc - 1 : 1;
     }
 
-    // Store concurrency limits
     m_maxMeshing = maxMeshTasks;
     m_maxGeneration = maxGenTasks;
 
-    // Launch worker threads
     m_workers.reserve(threadCount);
-    for (size_t i = 0; i < threadCount; i++) {
-        m_workers.emplace_back([this]() {
-            workerThreadFunc();
-            });
-    }
+    for (size_t i = 0; i < threadCount; ++i)
+        m_workers.emplace_back([this] { workerThreadFunc(); });
 }
 
-ThreadPool::~ThreadPool()
-{
-    shutdown();
-}
+ThreadPool::~ThreadPool() { shutdown(); }
 
+/* enqueue with priority ---------------------------------------------------- */
 void ThreadPool::enqueueTask(const std::function<void()>& taskFunc,
-    TaskType type,
-    int priority)
+    TaskType type, int priority)
 {
     {
-        std::unique_lock<std::mutex> lock(m_taskMutex);
-        // Push the new Task into our priority queue
-        m_tasks.push(Task(taskFunc, type, priority));
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        m_tasks.emplace(taskFunc, type, priority);
     }
     m_taskCondition.notify_one();
 }
 
+/* orderly shutdown --------------------------------------------------------- */
 void ThreadPool::shutdown()
 {
     {
-        std::unique_lock<std::mutex> lock(m_taskMutex);
-        if (!m_isShuttingDown) {
-            m_isShuttingDown = true;
-            m_shutdownFlag.store(true);
-        }
-        else {
-            return; // already shutting down
-        }
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        if (m_isShuttingDown) return;
+        m_isShuttingDown = true;
+        m_shutdownFlag.store(true);
     }
     m_taskCondition.notify_all();
 
-    for (auto& worker : m_workers) {
-        if (worker.joinable()) {
-            worker.join();
-        }
-    }
+    for (auto& w : m_workers)
+        if (w.joinable()) w.join();
     m_workers.clear();
 }
 
-size_t ThreadPool::getThreadCount() const
-{
-    return m_workers.size();
-}
+size_t ThreadPool::getThreadCount() const { return m_workers.size(); }
 
+/* **FIX** – protect queue size read with same mutex ----------------------- */
 size_t ThreadPool::getQueueSize()
 {
-    std::unique_lock<std::mutex> lock(m_taskMutex);
+    std::lock_guard<std::mutex> lock(m_taskMutex);
     return m_tasks.size();
 }
 
+/* worker loop ------------------------------------------------------------- */
 void ThreadPool::workerThreadFunc()
 {
     while (true)
     {
-        Task currentTask([]() {}, TaskType::Meshing, 0);
-        bool foundTask = false;
+        Task job([] {}, TaskType::Meshing, 0);
+        bool haveJob = false;
 
         {
-            std::unique_lock<std::mutex> lock(m_taskMutex);
-
-            // Wait for tasks or shutdown
-            m_taskCondition.wait(lock, [this]() {
+            std::unique_lock<std::mutex> lk(m_taskMutex);
+            m_taskCondition.wait(lk, [&] {
                 return !m_tasks.empty() || m_shutdownFlag.load();
                 });
 
-            if (m_shutdownFlag.load()) {
-                // Shutting down + no tasks => exit
-                if (m_tasks.empty()) {
-                    break;
-                }
-            }
+            if (m_shutdownFlag.load() && m_tasks.empty())
+                return;
 
-            // Try to find a task we can run that fits concurrency constraints
-            // Because it's a priority queue, we'll check the top. If we can’t run it,
-            // we might pop it and push it to a temporary container if it's not runnable.
-            // Then we re-push if we skip it. This is a simple approach to searching.
-
-            std::vector<Task> skippedTasks;
-            while (!m_tasks.empty()) {
-                Task topTask = m_tasks.top();
+            /* find a runnable task within concurrency limits -------------- */
+            std::vector<Task> skipped;
+            while (!m_tasks.empty())
+            {
+                Task top = m_tasks.top();
                 bool canRun = false;
 
-                if (topTask.type == TaskType::Meshing) {
-                    if (m_activeMeshing.load() < m_maxMeshing) {
-                        canRun = true;
-                        m_activeMeshing.fetch_add(1);
-                    }
+                if (top.type == TaskType::Meshing &&
+                    m_activeMeshing.load() < m_maxMeshing)
+                {
+                    canRun = true;
+                    m_activeMeshing.fetch_add(1);
                 }
-                else if (topTask.type == TaskType::Generation) {
-                    if (m_activeGeneration.load() < m_maxGeneration) {
-                        canRun = true;
-                        m_activeGeneration.fetch_add(1);
-                    }
+                else if (top.type == TaskType::Generation &&
+                    m_activeGeneration.load() < m_maxGeneration)
+                {
+                    canRun = true;
+                    m_activeGeneration.fetch_add(1);
                 }
 
-                if (canRun) {
-                    // We will run this task
-                    currentTask = topTask;
+                if (canRun)
+                {
+                    job = top;
                     m_tasks.pop();
-                    foundTask = true;
+                    haveJob = true;
                     break;
                 }
-                else {
-                    // Skip it for now => store it
-                    skippedTasks.push_back(topTask);
-                    m_tasks.pop();
-                }
+                skipped.push_back(top);
+                m_tasks.pop();
             }
+            for (auto& s : skipped) m_tasks.push(s);
 
-            // Re-push skipped tasks so they remain in the queue
-            for (auto& tsk : skippedTasks) {
-                m_tasks.push(tsk);
-            }
-
-            // If we didn't find any runnable tasks, keep waiting
-            if (!foundTask && !m_shutdownFlag.load()) {
+            if (!haveJob && !m_shutdownFlag.load())
                 continue;
-            }
-        } // lock scope ends here
+        } /* mutex released */
 
-        // If we found a task, run it outside the lock
-        if (foundTask) {
-            // Execute the task function
-            currentTask.func();
+        if (haveJob)
+        {
+            job.func();   /* execute */
 
-            // Decrement concurrency
-            if (currentTask.type == TaskType::Meshing) {
+            if (job.type == TaskType::Meshing)
                 m_activeMeshing.fetch_sub(1);
-            }
-            else if (currentTask.type == TaskType::Generation) {
+            else if (job.type == TaskType::Generation)
                 m_activeGeneration.fetch_sub(1);
-            }
         }
-    } // end while(true)
+    }
 }
