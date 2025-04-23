@@ -151,7 +151,7 @@ private:
     bool             m_useMultiLOD = true;   // runtime toggle
 
     // ── streaming distance ───────────────────────────────────────────────
-    static constexpr int VIEW_DISTANCE = 16;
+    static constexpr int VIEW_DISTANCE = 12;
 
     std::deque<ChunkCoord> m_chunksToLoad;
     std::deque<ChunkCoord> m_chunksToUnload;

@@ -1,5 +1,9 @@
 ﻿#include "Chunk.h"
+#include "Engine/Utils/CpuProfiler.h"
 
+// windows.h declares max/min macros → undef to use std::max/min cleanly
+#undef max
+#undef min
 #include <stdexcept>
 #include <cstddef>
 #include <utility>
@@ -33,7 +37,13 @@ Chunk::Chunk(int worldX, int worldY, int worldZ)
     , m_state(ChunkState::NORMAL)
 {
     size_t voxels = size_t(SIZE_X) * SIZE_Y * SIZE_Z;
-    m_blocks.resize(voxels, 0);
+
+    // instrument the big allocation to spot stalls -------------------------
+    {
+        CpuProfiler::ScopedTimer allocTimer("Chunk::alloc");
+        m_blocks.resize(voxels, 0);           // 32 768 bytes per chunk
+    }
+
     s_totalCPUBytes.fetch_add(voxels * sizeof(uint8_t), std::memory_order_relaxed);
 
     m_hasValidBounds = false;
@@ -48,6 +58,7 @@ Chunk::~Chunk()
             std::memory_order_relaxed);
     }
 }
+
 
 /*=============================================================================
   State helpers
@@ -70,7 +81,12 @@ void Chunk::makeNormal(uint8_t oldUniformID)
     if (!m_blocks.empty()) return;
 
     size_t voxels = size_t(SIZE_X) * SIZE_Y * SIZE_Z;
-    m_blocks.resize(voxels, oldUniformID);
+
+    {
+        CpuProfiler::ScopedTimer allocTimer("Chunk::alloc uniform→normal");
+        m_blocks.resize(voxels, oldUniformID);
+    }
+
     s_totalCPUBytes.fetch_add(voxels * sizeof(uint8_t), std::memory_order_relaxed);
 
     m_hasValidBounds = false;
@@ -97,6 +113,7 @@ int Chunk::getBlock(int x, int y, int z) const
         return int(m_blocks[idx]);
     }
 }
+
 
 /*=============================================================================
   setBlock

@@ -176,8 +176,11 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         }
     }
 
-    // 3) Batch loading
-    const int LOAD_BUDGET = 250;
+    // 3) Batch loading  (instrumented)
+    const int LOAD_BUDGET = 64;
+    size_t loadPlanned = std::min<size_t>(LOAD_BUDGET, m_chunksToLoad.size());
+    CpuProfiler::ScopedTimer _tBL("VW::batchLoad N=" + std::to_string(loadPlanned));
+
     int loadedCount = 0;
     while (!m_chunksToLoad.empty() && loadedCount < LOAD_BUDGET)
     {
@@ -188,8 +191,8 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     }
 
     // 4) Batch unloading
-    const int UNLOAD_BUDGET = 250;
-    const int UNLOAD_BATCHSIZE = 250;
+    const int UNLOAD_BUDGET = 64;
+    const int UNLOAD_BATCHSIZE = 64;
     int unloadedCount = 0;
     int batchCount = 0;
 
@@ -210,7 +213,6 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     gatherMesherResults();
     drainUploadQueue();
 }
-
 // ------------------------------------------------------------------------
 // loadOneChunk => create + queue generation
 // ------------------------------------------------------------------------
