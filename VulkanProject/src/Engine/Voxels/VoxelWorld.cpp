@@ -583,3 +583,11 @@ double VoxelWorld::getAvgMeshTime()
     return s_totalMeshTime / double(s_meshCount);
 }
 
+void VoxelWorld::forceRebuildAllChunks()
+{
+    const auto& map = m_chunkManager.getAllChunks();
+    for (auto& kv : map)
+    {
+        if (kv.second) kv.second->markDirty();
+    }
+}

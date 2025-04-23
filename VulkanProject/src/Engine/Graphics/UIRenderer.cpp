@@ -182,32 +182,42 @@ void UIRenderer::renderDebugWindow(
 
     ImGui::Begin("Debug");
 
-    /* toggles */
+    /* ───────── runtime toggles ────────────────────────────────────────── */
     if (ImGui::Button(wireframe ? "Wireframe ON" : "Wireframe OFF"))
         wireframe = !wireframe;
     ImGui::SameLine();
     ImGui::Checkbox("Frustum culling", &frustum);
     ImGui::Separator();
 
-    /* mesher type */
+    /* ───────── mesher type radio -- Greedy / Naive ───────────────────── */
     int m = int(world->getMesherType());
     if (ImGui::RadioButton("Greedy mesher", m == 0)) m = 0;
     ImGui::SameLine();
     if (ImGui::RadioButton("Naive mesher", m == 1)) m = 1;
     world->setMesherType(static_cast<VoxelWorld::MesherType>(m));
+
+    /* ───────── NEW: multi-LOD toggle ─────────────────────────────────── */
+    bool useLOD = world->isUsingMultiLOD();
+    if (ImGui::Checkbox("Multi-LOD (experimental)", &useLOD))
+    {
+        world->setUseMultiLOD(useLOD);
+        world->forceRebuildAllChunks();
+
+        
+    }
     ImGui::Separator();
 
-    /* perf */
+    /* ───────── perf numbers ───────────────────────────────────────────── */
     ImGui::Text("Δt:  %.3f ms", dt * 1000.f);
     ImGui::Text("FPS: %.1f (avg %.1f)", fps, avgFps);
     ImGui::Text("CPU: %.1f%% (avg %.1f%%)", cpu, avgCpu);
     ImGui::Separator();
 
-    /* scene stats */
+    /* ───────── scene stats ────────────────────────────────────────────── */
     ImGui::Text("Draw calls: %u", draws);
     ImGui::Text("Vertices:   %u", verts);
 
-    /* chunk counts */
+    /* chunk count */
     auto& cm = world->getChunkManager();
     ImGui::Text("Chunks: %zu", cm.getAllChunks().size());
 
@@ -223,9 +233,7 @@ void UIRenderer::renderDebugWindow(
         ImGui::Text("GPU buffer mem: %.2f MB", gpuMB);
     }
 
-    /*───────────────────────────────────────────────────────────────────
-      NEW  –– mesh‑upload budget & queue stats
-     ──────────────────────────────────────────────────────────────────*/
+    /* ───────── upload-budget controls (unchanged) ────────────────────── */
     if (ImGui::CollapsingHeader("Chunk upload budget", ImGuiTreeNodeFlags_DefaultOpen))
     {
         size_t bytesBudget = world->getUploadBudgetBytes();
@@ -245,7 +253,7 @@ void UIRenderer::renderDebugWindow(
         ImGui::Text("Pending uploads: %zu", world->getPendingUploadCount());
     }
 
-    /* CPU profiler table */
+    /* ───────── CPU profiler table (unchanged) ────────────────────────── */
     if (ImGui::CollapsingHeader("CPU timers"))
     {
         const auto& map = CpuProfiler::GetProfileRecords();
