@@ -79,7 +79,7 @@ void VoxelWorld::initWorld()
     Logger::Info("VoxelWorld::initWorld – generating initial region.");
 
     /* surrounding columns (single Y‑layer by default) */
-    int cyMin = 0, cyMax = 0;
+    int cyMin = 0, cyMax = 1;
     for (int cx = -VIEW_DISTANCE; cx <= VIEW_DISTANCE; ++cx)
         for (int cz = -VIEW_DISTANCE; cz <= VIEW_DISTANCE; ++cz)
             for (int cy = cyMin; cy <= cyMax; ++cy)

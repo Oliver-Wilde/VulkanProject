@@ -131,7 +131,7 @@ private:
     GreedyMesher     m_greedyMesher;
     NaiveMesher      m_naiveMesher;
     MesherType       m_currentMesherType = MesherType::GREEDY;
-    bool             m_useMultiLOD = true;
+    bool             m_useMultiLOD = false;
 
     // ── streaming distance ───────────────────────────────────────────────
     static constexpr int VIEW_DISTANCE = 16;

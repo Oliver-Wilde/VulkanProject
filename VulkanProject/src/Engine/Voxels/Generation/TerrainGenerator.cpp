@@ -6,7 +6,7 @@ static double s_totalGenTime = 0.0;
 static int    s_genCount = 0;
 
 // -----------------------------------------------------------------------------
-// Constructor Definition (Fixes LNK2001)
+// Constructor Definition 
 // -----------------------------------------------------------------------------
 TerrainGenerator::TerrainGenerator()
 {
@@ -37,8 +37,8 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
     int worldZOffset = cz * Chunk::SIZE_Z;
 
     // Example: Larger base + amplitude for massive mountains
-    int baseLevel = 8;
-    int mountainAmp = 64;
+    int baseLevel = 0;
+    int mountainAmp = 128;
 
     // Use a lower frequency => large horizontal features
     m_noise.SetFrequency(0.001f);
