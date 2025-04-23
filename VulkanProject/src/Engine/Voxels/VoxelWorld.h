@@ -1,4 +1,9 @@
-﻿#pragma once
+﻿// =============================================================================
+// VoxelWorld.h   — toggled single‑LOD ⇆ multi‑LOD support
+//   • exposes helpers that the .cpp will use to bypass the multi‑LOD path
+//   • **no public API changed**: the flag setters already exist
+// =============================================================================
+#pragma once
 
 #include <vulkan/vulkan.h>
 
@@ -84,22 +89,29 @@ private:
     void loadOneChunk(const ChunkCoord& c);
     void unloadOneChunk(const ChunkCoord& c);
 
+    // Central meshing dispatcher; branches on m_useMultiLOD
     void scheduleMeshingForDirtyChunks();
-    void gatherMesherResults();      // fills upload queue
-    void drainUploadQueue();         // obeys token bucket
 
-    // single‑LOD fallback
-    void uploadMeshToChunkSingleLOD(Chunk&,
-        const std::vector<Vertex>&,
-        const std::vector<uint32_t>&);
+    // Results gatherer: calls the correct specialised path
+    void gatherMesherResults();
+
+    // Drain GPU‑upload token bucket (multi‑LOD only)
+    void drainUploadQueue();
+
+    // ── single‑LOD‑specific helpers ──────────────────────────────────────
+    void scheduleMeshingSingleLOD(Chunk& chunk, const IMesher* baseMesher);
+    void gatherSingleLODResults();
+    void finalizeSingleLODMesh(MeshBuildResult& result);
+
+    // ── legacy helpers retained for LOD‑0 path ───────────────────────────
+    void uploadMeshToChunkSingleLOD(Chunk&, const std::vector<Vertex>&, const std::vector<uint32_t>&);
     void destroyChunkBuffersSingleLOD(Chunk&);
 
-    // multi‑LOD finalize
+    // ── multi‑LOD helpers (existing) ─────────────────────────────────────
     void finalizeMultiLOD(MultiLODResult&);
 
     // misc VK helpers (left unchanged)
-    void createBuffer(VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags,
-        VkBuffer&, VkDeviceMemory&);
+    void createBuffer(VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags, VkBuffer&, VkDeviceMemory&);
     void copyBuffer(VkBuffer, VkBuffer, VkDeviceSize);
     uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
 
@@ -131,7 +143,7 @@ private:
     GreedyMesher     m_greedyMesher;
     NaiveMesher      m_naiveMesher;
     MesherType       m_currentMesherType = MesherType::GREEDY;
-    bool             m_useMultiLOD = false;
+    bool             m_useMultiLOD = false;   // runtime toggle
 
     // ── streaming distance ───────────────────────────────────────────────
     static constexpr int VIEW_DISTANCE = 16;
@@ -139,20 +151,20 @@ private:
     std::deque<ChunkCoord> m_chunksToLoad;
     std::deque<ChunkCoord> m_chunksToUnload;
 
-    /*──────── legacy single‑LOD buffers (unused in new path) ──────────────*/
-    std::mutex                     m_singleLodMutex;
-    std::vector<MeshBuildResult>   m_pendingMeshResultsSingleLOD;
+    /*──────── legacy single‑LOD buffers ──────────────────────────────────*/
+    std::mutex                   m_singleLodMutex;
+    std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD;
 
-    /*──────── NEW: async multi‑LOD queues ────────────────────────────────*/
-    std::mutex                     m_multiLODMutex;
-    std::vector<MultiLODResult>    m_pendingMultiLODResults; // freshly meshed
+    /*──────── async multi‑LOD queues ────────────────────────────────────*/
+    std::mutex                  m_multiLODMutex;
+    std::vector<MultiLODResult> m_pendingMultiLODResults; // freshly meshed
 
-    /*──────── NEW: token‑bucket upload queue ─────────────────────────────*/
-    std::deque<PendingUpload>      m_uploadQueue;
-    size_t                         m_uploadBudgetBytes = 2 * 1024 * 1024; // 2 MB/frame default
-    int                            m_uploadBudgetChunks = 5;               // 5 chunks/frame
+    /*──────── token‑bucket upload queue (multi‑LOD only) ───────────────*/
+    std::deque<PendingUpload>   m_uploadQueue;
+    size_t                      m_uploadBudgetBytes = 2 * 1024 * 1024; // 2 MiB per frame
+    int                         m_uploadBudgetChunks = 5;               // 5 chunks per frame
 
-    /*──────── NEW: RAM mesh cache with simple LRU eviction ───────────────*/
+    /*──────── RAM mesh cache with simple LRU eviction ───────────────────*/
     std::unordered_map<uint64_t, CachedMesh> m_meshCache;   // hash → mesh
     std::list<uint64_t>                      m_cacheLRU;    // most‑recent front
     static constexpr size_t                  MAX_CACHE_SIZE = 256;
