@@ -1,6 +1,6 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// ResourceManager.h   – GPU buffer + shader management with async uploads
+// ResourceManager.h   – GPU buffer + shader management with async uploads
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
 
@@ -14,9 +14,9 @@ struct Vertex;
 
 /*=============================================================================
   ResourceManager
-    ‑ owns staging buffers, manages vkBuffer/vkMemory creation,
-      tracks total GPU bytes, loads SPIR‑V modules, and now supports
-      asynchronous chunk‑geometry uploads.
+    - owns staging buffers, manages vkBuffer/vkMemory creation,
+      tracks total GPU bytes, loads SPIR-V modules, and now supports
+      asynchronous chunk-geometry uploads.
 =============================================================================*/
 class ResourceManager
 {
@@ -34,10 +34,7 @@ public:
         VkBuffer& outVB, VkDeviceMemory& outVBmem,
         VkBuffer& outIB, VkDeviceMemory& outIBmem);
 
-    /** NEW: Non‑blocking variant.
-        Copies to a staging buffer and schedules an async transfer.
-        When the copy finishes, `onComplete()` is invoked on the main thread
-        (via flushUploads()). */
+    /** Non-blocking variant: schedules an async transfer. */
     void createChunkBuffersAsync(const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVB, VkDeviceMemory& outVBmem,
@@ -51,6 +48,14 @@ public:
     /** Debug info: total bytes of GPU memory currently allocated for buffers. */
     size_t GetTotalGPUBufferBytes() const;
 
+    /** Flush the async-upload queue; call once per-frame
+        (pass block = true only at shutdown). */
+    void flushUploads(bool block = false);
+
+    /** NEW: Optionally free or shrink an oversized staging buffer once the
+        big terrain bootstrap is finished.  Safe to call every frame.       */
+    void trimStagingBuffer();
+
     // ── Raw copy helpers (sync & async) ───────────────────────────────────
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void copyBufferRegions(VkBuffer src, VkBuffer dst,
@@ -62,9 +67,6 @@ public:
     void copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
         const VkBufferCopy* regions, uint32_t regionCount,
         std::function<void()> onComplete = {});
-
-    /** Pumps the async‑upload queue; call once per‑frame (block = true on shutdown). */
-    void flushUploads(bool block = false);
 
 private:
     // ── internal helpers ─────────────────────────────────────────────────
@@ -84,7 +86,7 @@ private:
 
     std::unordered_map<std::string, VkShaderModule> m_shaderModules;
 
-    // Re‑usable host‑visible staging buffer for geometry uploads
+    // Re-usable host-visible staging buffer for geometry uploads
     VkBuffer       m_stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
     VkDeviceSize   m_stagingBufferSize = 0;
