@@ -42,8 +42,8 @@ class ThreadPool
 public:
     // You can pass concurrency limits into the constructor
     ThreadPool(size_t totalThreads = 0,
-        size_t maxMeshTasks = 2,
-        size_t maxGenTasks = 2);
+        size_t maxMeshTasks = 4,
+        size_t maxGenTasks = 4);
     ~ThreadPool();
 
     // Instead of just enqueueTask(...), we have a version that includes priority & type

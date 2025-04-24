@@ -10,6 +10,9 @@ static int    s_genCount = 0;
 // -----------------------------------------------------------------------------
 TerrainGenerator::TerrainGenerator()
 {
+
+    CpuProfiler::ScopedTimer ctorTimer("TerrainGenerator::TerrainGenerator");  // Profiling constructor
+
     // Initialize noise parameters in the constructor
     m_seed = 1337;
     m_noise.SetSeed(m_seed);
@@ -28,6 +31,8 @@ TerrainGenerator::TerrainGenerator()
 // -----------------------------------------------------------------------------
 void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 {
+
+
     CpuProfiler::ScopedTimer timer("TerrainGenerator::generateChunk");
     using namespace std::chrono;
     auto startTime = high_resolution_clock::now();
@@ -130,6 +135,9 @@ void TerrainGenerator::generateChunk(Chunk& chunk, int cx, int cy, int cz)
 // -----------------------------------------------------------------------------
 double TerrainGenerator::getAvgGenTime()
 {
+
+    CpuProfiler::ScopedTimer avgTimeTimer("TerrainGenerator::getAvgGenTime");  // Profiling average generation time
+
     if (s_genCount == 0) return 0.0;
     return s_totalGenTime / s_genCount;
 }

@@ -1,7 +1,10 @@
 ﻿// ============================================================================
 // GreedyMesher.cpp  – original builders + merge?cap
 // ============================================================================
+#undef max 
+#undef min
 
+#include "Engine/Utils/CpuProfiler.h"
 #include "GreedyMesher.h"
 #include "Engine/Voxels/IBlockProvider.h"
 #include "../VoxelTypeRegistry.h"
@@ -9,9 +12,12 @@
 #include "../Chunk.h"
 #include "../ChunkManager.h"
 
+
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+
+
 
 // ---------------------------------------------------------------------------
 // Tunable: maximum merge run (per axis) to avoid huge quads
@@ -23,15 +29,16 @@ static constexpr int MAX_GREEDY_RUN = 32;
 // ---------------------------------------------------------------------------
 static uint32_t packColor(float r, float g, float b)
 {
-    r = std::max(0.f, std::min(1.f, r));
-    g = std::max(0.f, std::min(1.f, g));
-    b = std::max(0.f, std::min(1.f, b));
+    r = (r < 0.f) ? 0.f : (r > 1.f ? 1.f : r);  // Clamping r between 0 and 1
+    g = (g < 0.f) ? 0.f : (g > 1.f ? 1.f : g);  // Clamping g between 0 and 1
+    b = (b < 0.f) ? 0.f : (b > 1.f ? 1.f : b);  // Clamping b between 0 and 1
 
     uint32_t R = static_cast<uint32_t>(r * 255.0f);
     uint32_t G = static_cast<uint32_t>(g * 255.0f);
     uint32_t B = static_cast<uint32_t>(b * 255.0f);
     return (255u << 24) | (B << 16) | (G << 8) | R;
 }
+
 
 // ---------------------------------------------------------------------------
 // Quad helpers — identical to your original code (only indices via push_back)
@@ -158,6 +165,9 @@ bool GreedyMesher::generateMesh(
     std::vector<Vertex>& V, std::vector<uint32_t>& I,
     int ox, int oy, int oz, const ChunkManager& M) const
 {
+
+    CpuProfiler::ScopedTimer meshGenTimer("GreedyMesher::generateMesh");// Profiling mesh generation
+
     return generateMesh(static_cast<const IBlockProvider&>(c),
         cx, cy, cz, V, I, ox, oy, oz, M);
 }

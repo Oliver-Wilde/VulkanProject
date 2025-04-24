@@ -9,7 +9,9 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
 #include "Engine/Resources/ResourceManager.h"   // ResourceManager location
-#include "Engine/Utils/ThreadPool.h"            // global pool
+#include "Engine/Utils/ThreadPool.h"    
+#include "Engine/Utils/CpuProfiler.h"
+// global pool
 
 #include <stdexcept>
 #include <iostream>
@@ -31,6 +33,8 @@ Application::~Application()
 /* ============================================================================ */
 void Application::init()
 {
+    CpuProfiler::ScopedTimer initTimer("Application::init");  // Profiling init
+
     /* 1) Voxel registry ---------------------------------------------------- */
     registerAllVoxels();
     std::cout << "DEBUG: Registered all voxel types.\n";
@@ -70,6 +74,8 @@ void Application::init()
 /* ============================================================================ */
 void Application::handleInput(Camera& cam, float dt)
 {
+    CpuProfiler::ScopedTimer inputTimer("Application::handleInput");  // Profiling input handling
+
     GLFWwindow* window = m_window->getGLFWwindow();
 
     /* movement ------------------------------------------------------------- */
@@ -107,6 +113,8 @@ void Application::handleInput(Camera& cam, float dt)
 /* ============================================================================ */
 void Application::runLoop()
 {
+    CpuProfiler::ScopedTimer loopTimer("Application::runLoop");  // Profiling main loop
+
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
     bool wireframeWasPressed = false;
 
@@ -120,6 +128,7 @@ void Application::runLoop()
         handleInput(camera, dt);
 
         /* 2) world update --------------------------------------------------- */
+        CpuProfiler::ScopedTimer worldUpdateTimer("VoxelWorld::updateChunksAroundPlayer");  // Profiling chunk update
         if (m_voxelWorld)
             m_voxelWorld->updateChunksAroundPlayer(camera.position.x,
                 camera.position.z);
@@ -145,6 +154,8 @@ void Application::runLoop()
 /* ============================================================================ */
 void Application::cleanup()
 {
+    CpuProfiler::ScopedTimer cleanupTimer("Application::cleanup");  // Profiling cleanup
+
     /* 1) voxel world (needs renderer alive) ------------------------------- */
     delete m_voxelWorld;     m_voxelWorld = nullptr;
 

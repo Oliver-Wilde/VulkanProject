@@ -6,7 +6,7 @@
 #include "ResourceManager.h"
 #include "Engine/Graphics/VulkanContext.h"
 #include "Engine/Voxels/Meshing/IMesher.h"
-
+#include "Engine/Utils/CpuProfiler.h"
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
@@ -16,7 +16,7 @@
 #include <mutex>
 #include <functional>
 #include <numeric>        // std::accumulate
-
+#undef max
 // ─────────────────────────────────────────────────────────────────────────────
 // Global GPU-memory counter (visible via GetTotalGPUBufferBytes())
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,6 +96,9 @@ ResourceManager::~ResourceManager()
 // ============================================================================
 void ResourceManager::createStagingBuffer(VkDeviceSize size)
 {
+
+    CpuProfiler::ScopedTimer stagingBufferTimer("ResourceManager::createStagingBuffer");  // Profiling staging buffer creation
+
     /* already large enough? */
     if (m_stagingBuffer && size <= m_stagingBufferSize) return;
 
@@ -163,6 +166,9 @@ ResourceManager::getOrCreateStagingBuffer(VkDeviceSize size)
 // ============================================================================
 std::vector<char> ResourceManager::readFile(const std::string& filePath)
 {
+
+    CpuProfiler::ScopedTimer fileReadTimer("ResourceManager::readFile");  // Profiling file reading
+
     std::ifstream file(filePath, std::ios::ate | std::ios::binary);
     if (!file.is_open())
         throw std::runtime_error("Cannot open file: " + filePath);
@@ -177,6 +183,9 @@ std::vector<char> ResourceManager::readFile(const std::string& filePath)
 
 VkShaderModule ResourceManager::loadShaderModule(const std::string& path)
 {
+
+    CpuProfiler::ScopedTimer shaderLoadTimer("ResourceManager::loadShaderModule");  // Profiling shader module loading
+
     if (auto it = m_shaderModules.find(path); it != m_shaderModules.end())
         return it->second;
 
@@ -202,6 +211,9 @@ void ResourceManager::createChunkBuffers(const std::vector<Vertex>& verts,
     VkBuffer& vb, VkDeviceMemory& vbMem,
     VkBuffer& ib, VkDeviceMemory& ibMem)
 {
+    CpuProfiler::ScopedTimer chunkBufferCreationTimer("ResourceManager::createChunkBuffers");  // Profiling chunk buffer creation
+
+
     VkDeviceSize vbSz = sizeof(Vertex) * verts.size();
     VkDeviceSize ibSz = sizeof(uint32_t) * inds.size();
 
@@ -249,6 +261,9 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& verts,
     VkBuffer& ib, VkDeviceMemory& ibMem,
     std::function<void()> onComplete)
 {
+
+    CpuProfiler::ScopedTimer chunkBufferAsyncTimer("ResourceManager::createChunkBuffersAsync");  // Profiling async chunk buffer creation
+
     VkDeviceSize vbSz = sizeof(Vertex) * verts.size();
     VkDeviceSize ibSz = sizeof(uint32_t) * inds.size();
 
@@ -313,6 +328,9 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& verts,
 void ResourceManager::destroyChunkBuffers(VkBuffer vb, VkDeviceMemory vbMem,
     VkBuffer ib, VkDeviceMemory ibMem)
 {
+    CpuProfiler::ScopedTimer destroyChunkBuffers("ResourceManager::destroyChunkBuffers");  // Profiling async chunk buffer creation
+
+
     auto destroy = [&](VkBuffer b)
         {
             if (!b) return;
@@ -334,6 +352,9 @@ void ResourceManager::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     VkMemoryPropertyFlags props,
     VkBuffer& buf, VkDeviceMemory& mem)
 {
+    CpuProfiler::ScopedTimer createBuffer("ResourceManager::createBuffer");  // Profiling async chunk buffer creation
+
+
     VkBufferCreateInfo bc{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     bc.size = size;
     bc.usage = usage;
@@ -359,6 +380,9 @@ void ResourceManager::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
 // ============================================================================
 void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 {
+    CpuProfiler::ScopedTimer copyBuffer("ResourceManager::copyBuffer");  // Profiling async chunk buffer creation
+
+
     if (!size) return;
 
     VkCommandPool pool = m_context->getCommandPool();
@@ -397,6 +421,8 @@ void ResourceManager::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
 void ResourceManager::copyBufferRegions(VkBuffer src, VkBuffer dst,
     const VkBufferCopy* regions, uint32_t count)
 {
+    CpuProfiler::ScopedTimer copyBufferRegions("ResourceManager::copyBufferRegions");
+
     if (!regions || !count) return;
 
     VkCommandPool pool = m_context->getCommandPool();
@@ -437,6 +463,8 @@ void ResourceManager::copyBufferRegions(VkBuffer src, VkBuffer dst,
 void ResourceManager::copyBufferAsync(VkBuffer src, VkBuffer dst, VkDeviceSize size,
     std::function<void()> onComplete)
 {
+
+    CpuProfiler::ScopedTimer copyBufferAsync("ResourceManager::copyBufferAync");
     if (!size) { if (onComplete) onComplete(); return; }
 
     VkCommandPool pool = m_context->getCommandPool();
@@ -479,6 +507,8 @@ void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
     uint32_t regionCount,
     std::function<void()> onComplete)
 {
+
+    CpuProfiler::ScopedTimer copyBufferRegionsAsync("ResourceManager::copyBufferRegionsAsync");
     if (!regions || regionCount == 0)
     {
         if (onComplete) onComplete();

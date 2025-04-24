@@ -48,6 +48,8 @@ static uint64_t fnv1a64(const void* d, size_t n)
 Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
     : m_owner(owner)
 {
+    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::GeometryBuilder");
+
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pci.queueFamilyIndex = m_owner->m_context->getGraphicsQueueFamilyIndex();
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -60,6 +62,8 @@ Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
 
 Renderer::GeometryBuilder::~GeometryBuilder()
 {
+    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::~GeometryBuilder");
+
     VkDevice dev = m_owner->m_context->getDevice();
     vkDeviceWaitIdle(dev);
 
@@ -80,6 +84,8 @@ Renderer::GeometryBuilder::~GeometryBuilder()
 
 void Renderer::GeometryBuilder::submit(const GeometryJob& job)
 {
+    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::submit");
+
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_jobs.push_back(job);
@@ -90,6 +96,8 @@ void Renderer::GeometryBuilder::submit(const GeometryJob& job)
 VkCommandBuffer Renderer::GeometryBuilder::fetchFinished(uint32_t imgIdx,
     uint32_t& outVerts, uint32_t& outCalls, uint64_t& outHash)
 {
+    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::fetchFinished");
+
     std::lock_guard<std::mutex> lk(m_mutex);
     for (auto it = m_done.begin(); it != m_done.end(); ++it)
     {
@@ -109,6 +117,8 @@ VkCommandBuffer Renderer::GeometryBuilder::fetchFinished(uint32_t imgIdx,
 
 void Renderer::GeometryBuilder::threadMain()
 {
+    CpuProfiler::ScopedTimer threadMainTimer("Renderer::GeometryBuilder::threadMain");
+
     while (true)
     {
         GeometryJob job;
@@ -119,6 +129,8 @@ void Renderer::GeometryBuilder::threadMain()
             job = m_jobs.front();
             m_jobs.pop_front();
         }
+
+        CpuProfiler::ScopedTimer allocTimer("Renderer::GeometryBuilder::allocateCommandBuffer");  // Profiling buffer allocation
 
         /* allocate a secondary CB */
         VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -132,6 +144,8 @@ void Renderer::GeometryBuilder::threadMain()
             Logger::Error("GeometryBuilder: CMD alloc failed");
             continue;
         }
+
+        CpuProfiler::ScopedTimer visibleSetTimer("Renderer::GeometryBuilder::visibleSetGather");
 
         /* visible‑set gather */
         std::vector<Chunk*> vis;
@@ -154,7 +168,11 @@ void Renderer::GeometryBuilder::threadMain()
         uint64_t hash = fnv1a64(vis.data(), vis.size() * sizeof(Chunk*));
         hash ^= (job.wantWire ? 0x1 : 0x0);
 
+        
+        
         /* record CB */
+
+        CpuProfiler::ScopedTimer recordTimer("Renderer::GeometryBuilder::recordCommandBuffer");
         VkCommandBufferInheritanceInfo inh{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
         inh.renderPass = m_owner->m_rpManager->getRenderPass();
         inh.subpass = 0;
@@ -187,6 +205,7 @@ void Renderer::GeometryBuilder::threadMain()
 
         /* push finished */
         {
+            CpuProfiler::ScopedTimer pushTimer("Renderer::GeometryBuilder::pushFinished");
             std::lock_guard<std::mutex> lk(m_mutex);
             m_done.push_back({ gcb, vertsTotal,
                 static_cast<uint32_t>(vis.size()),

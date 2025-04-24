@@ -38,10 +38,13 @@ VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
     , m_resourceManager(resourceMgr)
     , m_renderer(nullptr)
 {
+    CpuProfiler::ScopedTimer ctorTimer("VoxelWorld::VoxelWorld");
 }
 
 VoxelWorld::~VoxelWorld()
 {
+    CpuProfiler::ScopedTimer dtorTimer("VoxelWorld::~VoxelWorld");
+
     // ring‑buffer free of every chunk’s GPU buffers
     const auto& all = m_chunkManager.getAllChunks();
     for (auto& kv : all)
@@ -76,6 +79,8 @@ void VoxelWorld::setRenderer(Renderer* r) { m_renderer = r; }
 // ------------------------------------------------------------------------
 void VoxelWorld::initWorld()
 {
+    CpuProfiler::ScopedTimer initTimer("VoxelWorld::initWorld");
+
     Logger::Info("VoxelWorld::initWorld – generating initial region.");
 
     /* surrounding columns (single Y‑layer by default) */
@@ -98,81 +103,96 @@ void VoxelWorld::initWorld()
 // ------------------------------------------------------------------------
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
-    // Convert to chunk coords in X, Z
-    int centerX = static_cast<int>(std::floor(playerPosX / float(Chunk::SIZE_X)));
-    int centerZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-    // If you have direct camera access, retrieve the actual Y-position
-    float playerPosY = 0.0f;
-    if (m_renderer)
+    static const int UPDATE_INTERVAL = 10;  // Update every 10 frames, for example
+    static int frameCounter = 0;
+    if (frameCounter++ % UPDATE_INTERVAL == 0)
     {
-        // e.g.: playerPosY = m_renderer->getCamera().position.y;
-    }
-    int centerY = static_cast<int>(std::floor(playerPosY / float(Chunk::SIZE_Y)));
 
-    int verticalRange = 2;
-    int minCy = centerY - verticalRange;
-    int maxCy = centerY + verticalRange;
+        CpuProfiler::ScopedTimer updateChunksTimer("VoxelWorld::updateChunksAroundPlayer");  // Profiling chunk update
 
-    // 1) Identify newly in-range chunks
-    {
-        std::vector<ChunkCoord> toLoad;
-        toLoad.reserve((2 * VIEW_DISTANCE + 1) * (2 * verticalRange + 1)
-            * (2 * VIEW_DISTANCE + 1));
+        // Convert to chunk coords in X, Z
+        int centerX = static_cast<int>(std::floor(playerPosX / float(Chunk::SIZE_X)));
+        int centerZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-        for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
+        // If you have direct camera access, retrieve the actual Y-position
+        float playerPosY = 0.0f;
+        if (m_renderer)
         {
-            for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
+            // e.g.: playerPosY = m_renderer->getCamera().position.y;
+        }
+        int centerY = static_cast<int>(std::floor(playerPosY / float(Chunk::SIZE_Y)));
+
+        int verticalRange = 2;
+        int minCy = centerY - verticalRange;
+        int maxCy = centerY + verticalRange;
+
+        // 1) Identify newly in-range chunks
+        {
+            CpuProfiler::ScopedTimer identifyChunksTimer("VoxelWorld::identifyChunksToLoad");  // Profiling chunk identification
+
+
+            std::vector<ChunkCoord> toLoad;
+            toLoad.reserve((2 * VIEW_DISTANCE + 1) * (2 * verticalRange + 1)
+                * (2 * VIEW_DISTANCE + 1));
+
+            for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
             {
-                for (int cy = minCy; cy <= maxCy; ++cy)
+                for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
                 {
-                    if (!m_chunkManager.hasChunk(cx, cy, cz))
+                    for (int cy = minCy; cy <= maxCy; ++cy)
                     {
-                        toLoad.push_back({ cx, cy, cz });
+                        if (!m_chunkManager.hasChunk(cx, cy, cz))
+                        {
+                            toLoad.push_back({ cx, cy, cz });
+                        }
                     }
                 }
             }
-        }
 
-        // Sort nearest first
-        auto distSq = [&](const ChunkCoord& cc)
+            // Sort nearest first
+            auto distSq = [&](const ChunkCoord& cc)
+                {
+                    int dx = cc.x - centerX;
+                    int dy = cc.y - centerY;
+                    int dz = cc.z - centerZ;
+                    return (dx * dx + dy * dy + dz * dz);
+                };
+            std::sort(toLoad.begin(), toLoad.end(),
+                [&](auto& a, auto& b) { return distSq(a) < distSq(b); });
+
+            for (auto& cc : toLoad)
             {
-                int dx = cc.x - centerX;
-                int dy = cc.y - centerY;
-                int dz = cc.z - centerZ;
-                return (dx * dx + dy * dy + dz * dz);
-            };
-        std::sort(toLoad.begin(), toLoad.end(),
-            [&](auto& a, auto& b) { return distSq(a) < distSq(b); });
-
-        for (auto& cc : toLoad)
-        {
-            m_chunksToLoad.push_back(cc);
-        }
-    }
-
-    // 2) Identify out-of-range chunks
-    {
-        const auto& allChunks = m_chunkManager.getAllChunks();
-        std::vector<ChunkCoord> outOfRange;
-        outOfRange.reserve(allChunks.size());
-
-        for (auto& kv : allChunks)
-        {
-            const ChunkCoord& cc = kv.first;
-            int dx = std::abs(cc.x - centerX);
-            int dy = std::abs(cc.y - centerY);
-            int dz = std::abs(cc.z - centerZ);
-
-            if (dx > VIEW_DISTANCE || dz > VIEW_DISTANCE || dy > verticalRange)
-            {
-                outOfRange.push_back(cc);
+                m_chunksToLoad.push_back(cc);
             }
         }
 
-        for (auto& cc : outOfRange)
+        // 2) Identify out-of-range chunks
         {
-            m_chunksToUnload.push_back(cc);
+
+            CpuProfiler::ScopedTimer identifyUnloadChunksTimer("VoxelWorld::identifyChunksToUnload");  // Profiling chunk unloading
+
+            const auto& allChunks = m_chunkManager.getAllChunks();
+            std::vector<ChunkCoord> outOfRange;
+            outOfRange.reserve(allChunks.size());
+
+            for (auto& kv : allChunks)
+            {
+                const ChunkCoord& cc = kv.first;
+                int dx = std::abs(cc.x - centerX);
+                int dy = std::abs(cc.y - centerY);
+                int dz = std::abs(cc.z - centerZ);
+
+                if (dx > VIEW_DISTANCE || dz > VIEW_DISTANCE || dy > verticalRange)
+                {
+                    outOfRange.push_back(cc);
+                }
+            }
+
+            for (auto& cc : outOfRange)
+            {
+                m_chunksToUnload.push_back(cc);
+            }
         }
     }
 
