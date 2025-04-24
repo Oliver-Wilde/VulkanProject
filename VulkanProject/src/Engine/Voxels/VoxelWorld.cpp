@@ -399,72 +399,90 @@ void VoxelWorld::finalizeMultiLOD(MultiLODResult& mlr)
     Chunk* c = mlr.chunkPtr;
     if (!c) return;
 
-    for (int i = 0; i < MultiLODResult::MAX_LODS; i++)
+    /* Count how many real uploads we’ll issue so we know when we’re done.   */
+    int uploadsNeeded = 0;
+    for (int i = 0; i < MultiLODResult::MAX_LODS; ++i)
+        if (!mlr.lods[i].verts.empty() && !mlr.lods[i].inds.empty())
+            ++uploadsNeeded;
+
+    /* If nothing to upload we can immediately mark the chunk as ready.      */
+    if (uploadsNeeded == 0)
     {
-        auto& newLOD = mlr.lods[i];
-        auto& oldData = c->getLODData(i);
-
-        // ring-buffer free old geometry
-        if (m_renderer &&
-            (oldData.vertexBuffer != VK_NULL_HANDLE ||
-                oldData.indexBuffer != VK_NULL_HANDLE))
+        for (int i = 0; i < MultiLODResult::MAX_LODS; ++i)
         {
-            QueuedChunkDestruction qcd;
-            qcd.vb = oldData.vertexBuffer;
-            qcd.vbMem = oldData.vertexMemory;
-            qcd.ib = oldData.indexBuffer;
-            qcd.ibMem = oldData.indexMemory;
-            m_renderer->enqueueDeferredDestroy(qcd);
-        }
-
-        // Reset references
-        oldData.vertexBuffer = VK_NULL_HANDLE;
-        oldData.vertexMemory = VK_NULL_HANDLE;
-        oldData.indexBuffer = VK_NULL_HANDLE;
-        oldData.indexMemory = VK_NULL_HANDLE;
-        oldData.vertexCount = 0;
-        oldData.indexCount = 0;
-
-        // If we have geometry at LOD i
-        if (!newLOD.verts.empty() && !newLOD.inds.empty())
-        {
-            VkBuffer vb, ib;
-            VkDeviceMemory vbMem, ibMem;
-            m_resourceManager->createChunkBuffers(
-                newLOD.verts, newLOD.inds,
-                vb, vbMem, ib, ibMem
-            );
-
-            oldData.vertexBuffer = vb;
-            oldData.vertexMemory = vbMem;
-            oldData.indexBuffer = ib;
-            oldData.indexMemory = ibMem;
-            oldData.vertexCount = static_cast<uint32_t>(newLOD.verts.size());
-            oldData.indexCount = static_cast<uint32_t>(newLOD.inds.size());
-
-            // Optional: store an error metric if present
-            if (i < static_cast<int>(newLOD.lodErrors.size()))
-            {
-                float eVal = newLOD.lodErrors[i];
-                c->setLODErrorValue(i, eVal);
-            }
-            else
-            {
-                c->setLODErrorValue(i, 0.f);
-            }
-            c->setLODGenerated(i, true);
-        }
-        else
-        {
+            auto& old = c->getLODData(i);
+            old.vertexBuffer = old.indexBuffer = VK_NULL_HANDLE;
+            old.vertexMemory = old.indexMemory = VK_NULL_HANDLE;
+            old.vertexCount = old.indexCount = 0;
             c->setLODGenerated(i, false);
             c->setLODErrorValue(i, 0.f);
         }
+        c->setIsUploading(false);
+        return;
+    }
+
+    auto remaining = std::make_shared<std::atomic<int>>(uploadsNeeded);
+
+    for (int i = 0; i < MultiLODResult::MAX_LODS; ++i)
+    {
+        auto& newLOD = mlr.lods[i];
+        auto& old = c->getLODData(i);
+
+        /* Free any previous GPU buffers ring-buffer style */
+        if (m_renderer &&
+            (old.vertexBuffer || old.indexBuffer))
+        {
+            QueuedChunkDestruction qcd;
+            qcd.vb = old.vertexBuffer;  qcd.vbMem = old.vertexMemory;
+            qcd.ib = old.indexBuffer;   qcd.ibMem = old.indexMemory;
+            m_renderer->enqueueDeferredDestroy(qcd);
+        }
+
+        /* Reset current references                                               */
+        old.vertexBuffer = old.indexBuffer = VK_NULL_HANDLE;
+        old.vertexMemory = old.indexMemory = VK_NULL_HANDLE;
+        old.vertexCount = old.indexCount = 0;
+        c->setLODGenerated(i, false);
+        c->setLODErrorValue(i, 0.f);
+
+        /* Empty LOD – done already                                              */
+        if (newLOD.verts.empty() || newLOD.inds.empty())
+            continue;
+
+        /* Prepare shared handle container filled by ResourceManager            */
+        struct GPU { VkBuffer vb{}, ib{}; VkDeviceMemory vbMem{}, ibMem{}; };
+        auto gpu = std::make_shared<GPU>();
+        uint32_t vCnt = static_cast<uint32_t>(newLOD.verts.size());
+        uint32_t iCnt = static_cast<uint32_t>(newLOD.inds.size());
+        float    lodErr =
+            (i < static_cast<int>(newLOD.lodErrors.size())) ? newLOD.lodErrors[i] : 0.f;
+
+        /* Kick async upload                                                     */
+        m_resourceManager->createChunkBuffersAsync(
+            newLOD.verts, newLOD.inds,
+            gpu->vb, gpu->vbMem, gpu->ib, gpu->ibMem,
+            /* onComplete ----------------------------------------------------- */
+            [c, i, gpu, vCnt, iCnt, lodErr, remaining]()
+            {
+                /* Chunk might have been unloaded in the meantime               */
+                if (!c) return;
+
+                auto& out = c->getLODData(i);
+                out.vertexBuffer = gpu->vb;  out.vertexMemory = gpu->vbMem;
+                out.indexBuffer = gpu->ib;  out.indexMemory = gpu->ibMem;
+                out.vertexCount = vCnt;     out.indexCount = iCnt;
+                c->setLODErrorValue(i, lodErr);
+                c->setLODGenerated(i, true);
+
+                /* If this was the last outstanding upload → mark ready         */
+                if (--(*remaining) == 0)
+                    c->setIsUploading(false);
+            });
     }
 }
-
 void VoxelWorld::drainUploadQueue()
 {
-    if (!m_useMultiLOD) return; // single‑LOD uploads synchronously
+    if (!m_useMultiLOD) return;
 
     size_t bytesLeft = m_uploadBudgetBytes;
     int    chunksLeft = m_uploadBudgetChunks;
@@ -476,7 +494,6 @@ void VoxelWorld::drainUploadQueue()
         m_uploadQueue.pop_front();
 
         finalizeMultiLOD(pu.mlr);
-        if (pu.mlr.chunkPtr) pu.mlr.chunkPtr->setIsUploading(false);
 
         bytesLeft -= pu.bytes;
         --chunksLeft;

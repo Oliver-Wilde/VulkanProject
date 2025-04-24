@@ -38,50 +38,36 @@ namespace
     std::mutex                g_pendingMutex;
 }
 
-/* Helper – checks & recycles finished uploads */
-static void flushPendingUploads(VulkanContext* ctx, bool block)
-{
-    std::lock_guard<std::mutex> guard(g_pendingMutex);
 
-    while (!g_pending.empty())
-    {
-        PendingUpload& up = g_pending.front();
-        VkResult st = vkGetFenceStatus(ctx->getDevice(), up.fence);
-
-        if (st == VK_NOT_READY && !block) break;
-        if (st == VK_NOT_READY && block)
-            vkWaitForFences(ctx->getDevice(), 1, &up.fence, VK_TRUE, UINT64_MAX);
-
-        vkDestroyFence(ctx->getDevice(), up.fence, nullptr);
-        vkFreeCommandBuffers(ctx->getDevice(), ctx->getCommandPool(), 1, &up.cmd);
-
-        if (up.onComplete) up.onComplete();
-        g_pending.pop();
-    }
-}
 
 // ============================================================================
 // Constants & ctor / dtor
 // ============================================================================
 static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024;   // 4 MiB
 
-ResourceManager::ResourceManager(VulkanContext* context)
-    : m_context(context)
+ResourceManager::ResourceManager(VulkanContext* ctx)
+    : m_context(ctx)
 {
+    /* dedicated transfer command-pool (allows RESET) ---------------------- */
+    VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    pci.queueFamilyIndex = ctx->getGraphicsQueueFamilyIndex();
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(ctx->getDevice(), &pci, nullptr, &m_transferPool)
+        != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager: transfer pool create failed");
 }
 
 ResourceManager::~ResourceManager()
 {
-    /* make sure every outstanding upload finished */
-    flushPendingUploads(m_context, /*block = */ true);
+    /* make sure every outstanding upload finished and got recycled */
+    flushUploads(true);
 
     for (auto& kv : m_shaderModules)
         vkDestroyShaderModule(m_context->getDevice(), kv.second, nullptr);
 
-    /* ── staging buffer cleanup now updates the global counter ─────────── */
     if (m_stagingBuffer)
     {
-        VkMemoryRequirements req;
+        VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_context->getDevice(),
             m_stagingBuffer, &req);
         g_totalGPUBufferBytes.fetch_sub(req.size, std::memory_order_relaxed);
@@ -89,7 +75,63 @@ ResourceManager::~ResourceManager()
     }
     if (m_stagingMemory)
         vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
+
+    /* return cached command buffers */
+    for (VkCommandBuffer c : m_freeCmdBuffers)
+        vkFreeCommandBuffers(m_context->getDevice(), m_transferPool, 1, &c);
+    for (VkFence f : m_freeFences)
+        vkDestroyFence(m_context->getDevice(), f, nullptr);
+
+    vkDestroyCommandPool(m_context->getDevice(), m_transferPool, nullptr);
 }
+
+VkCommandBuffer ResourceManager::acquireCmd()
+{
+    if (!m_freeCmdBuffers.empty())
+    {
+        VkCommandBuffer cmd = m_freeCmdBuffers.back();
+        m_freeCmdBuffers.pop_back();
+        vkResetCommandBuffer(cmd, 0);
+        return cmd;
+    }
+
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = m_transferPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager: CMD alloc failed");
+    return cmd;
+}
+void ResourceManager::recycleCmd(VkCommandBuffer cmd)
+{
+    if (cmd) m_freeCmdBuffers.push_back(cmd);
+}
+
+VkFence ResourceManager::acquireFence()
+{
+    if (!m_freeFences.empty())
+    {
+        VkFence f = m_freeFences.back();
+        m_freeFences.pop_back();
+        vkResetFences(m_context->getDevice(), 1, &f);
+        return f;
+    }
+
+    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence f;
+    if (vkCreateFence(m_context->getDevice(), &fi, nullptr, &f) != VK_SUCCESS)
+        throw std::runtime_error("ResourceManager: fence create failed");
+    return f;
+}
+void ResourceManager::recycleFence(VkFence f)
+{
+    if (f) m_freeFences.push_back(f);
+}
+
+
 
 // ============================================================================
 // Staging-buffer helpers
@@ -460,46 +502,29 @@ void ResourceManager::copyBufferRegions(VkBuffer src, VkBuffer dst,
 // ============================================================================
 // NEW  – asynchronous helpers (unchanged)
 // ============================================================================
-void ResourceManager::copyBufferAsync(VkBuffer src, VkBuffer dst, VkDeviceSize size,
-    std::function<void()> onComplete)
+void ResourceManager::copyBufferAsync(VkBuffer src, VkBuffer dst, VkDeviceSize sz,
+    std::function<void()> cb)
 {
+    CpuProfiler::ScopedTimer _t("RM::copyBufferAsync");
+    if (!sz) { if (cb) cb(); return; }
 
-    CpuProfiler::ScopedTimer copyBufferAsync("ResourceManager::copyBufferAync");
-    if (!size) { if (onComplete) onComplete(); return; }
-
-    VkCommandPool pool = m_context->getCommandPool();
-
-    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    ai.commandPool = pool;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-
-    VkCommandBuffer cmd;
-    if (vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd) != VK_SUCCESS)
-        throw std::runtime_error("ResourceManager::copyBufferAsync – cmd alloc failed");
+    VkCommandBuffer cmd = acquireCmd();
+    VkFence         fnc = acquireFence();
 
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
-
-    VkBufferCopy r{ 0, 0, size };
+    VkBufferCopy r{ 0,0,sz };
     vkCmdCopyBuffer(cmd, src, dst, 1, &r);
     vkEndCommandBuffer(cmd);
 
-    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VkFence fence;
-    if (vkCreateFence(m_context->getDevice(), &fi, nullptr, &fence) != VK_SUCCESS)
-        throw std::runtime_error("ResourceManager::copyBufferAsync – fence create failed");
-
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fnc) != VK_SUCCESS)
+        throw std::runtime_error("RM::copyBufferAsync submit failed");
 
-    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fence) != VK_SUCCESS)
-        throw std::runtime_error("ResourceManager::copyBufferAsync – submit failed");
-
-    std::lock_guard<std::mutex> guard(g_pendingMutex);
-    g_pending.push({ cmd, fence, std::move(onComplete) });
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+    g_pending.push({ cmd, fnc, std::move(cb) });
 }
 
 void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
@@ -507,24 +532,14 @@ void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
     uint32_t regionCount,
     std::function<void()> onComplete)
 {
-
-    CpuProfiler::ScopedTimer copyBufferRegionsAsync("ResourceManager::copyBufferRegionsAsync");
+    CpuProfiler::ScopedTimer t("ResourceManager::copyBufferRegionsAsync");
     if (!regions || regionCount == 0)
     {
         if (onComplete) onComplete();
         return;
     }
 
-    VkCommandPool pool = m_context->getCommandPool();
-
-    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    ai.commandPool = pool;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-
-    VkCommandBuffer cmd;
-    if (vkAllocateCommandBuffers(m_context->getDevice(), &ai, &cmd) != VK_SUCCESS)
-        throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – cmd alloc failed");
+    VkCommandBuffer cmd = acquireCmd();
 
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -533,10 +548,7 @@ void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
     vkCmdCopyBuffer(cmd, src, dst, regionCount, regions);
     vkEndCommandBuffer(cmd);
 
-    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VkFence fence;
-    if (vkCreateFence(m_context->getDevice(), &fi, nullptr, &fence) != VK_SUCCESS)
-        throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – fence create failed");
+    VkFence fence = acquireFence();
 
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
@@ -545,10 +557,9 @@ void ResourceManager::copyBufferRegionsAsync(VkBuffer src, VkBuffer dst,
     if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fence) != VK_SUCCESS)
         throw std::runtime_error("ResourceManager::copyBufferRegionsAsync – submit failed");
 
-    std::lock_guard<std::mutex> guard(g_pendingMutex);
+    std::lock_guard<std::mutex> g(g_pendingMutex);
     g_pending.push({ cmd, fence, std::move(onComplete) });
 }
-
 // ============================================================================
 // Misc helpers
 // ============================================================================
@@ -573,8 +584,26 @@ size_t ResourceManager::GetTotalGPUBufferBytes() const
 /* Flush async uploads once per-frame */
 void ResourceManager::flushUploads(bool block /* = false */)
 {
-    flushPendingUploads(m_context, block);
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+
+    while (!g_pending.empty())
+    {
+        PendingUpload& up = g_pending.front();
+        VkResult st = vkGetFenceStatus(m_context->getDevice(), up.fence);
+
+        if (st == VK_NOT_READY && !block) break;
+        if (st == VK_NOT_READY && block)
+            vkWaitForFences(m_context->getDevice(), 1, &up.fence, VK_TRUE, UINT64_MAX);
+
+        recycleFence(up.fence);
+        recycleCmd(up.cmd);
+
+        if (up.onComplete) up.onComplete();
+        g_pending.pop();
+    }
 }
+
+
 
 
 void ResourceManager::trimStagingBuffer()
