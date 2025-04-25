@@ -1,77 +1,62 @@
-#pragma once
+﻿#pragma once
 #include <functional>
 #include <vector>
-#include <queue>
-#include <mutex>
-#include <atomic>
-#include <condition_variable>
+#include <deque>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <memory>
 
-// For example, define your task types:
-enum class TaskType
-{
-    Meshing,
-    Generation,
-    // ... Add more if needed
-};
+// ─── task metadata ─────────────────────────────────────────────────────────
+enum class TaskType : uint8_t { Meshing, Generation };
 
 struct Task
 {
-    std::function<void()>  func;
-    TaskType               type;
-    int                    priority;
-
-    // Constructor helper
-    Task(const std::function<void()>& f, TaskType t, int p)
-        : func(f), type(t), priority(p) {}
+    std::function<void()> func;
+    TaskType              type;
+    int                   priority;
 };
 
-// Comparator for priority_queue
-// Higher priority = tasks should come out first
-struct TaskCompare
+struct alignas(64) WorkDeque
 {
-    // Return true if lhs < rhs => means "rhs is higher priority"
-    bool operator()(const Task& lhs, const Task& rhs)
-    {
-        return lhs.priority < rhs.priority;
-    }
+    std::deque<Task> q;
+    std::mutex       mtx;
 };
 
 class ThreadPool
 {
 public:
-    // You can pass concurrency limits into the constructor
-    ThreadPool(size_t totalThreads = 0,
+    ThreadPool(size_t threadCount = 0,
         size_t maxMeshTasks = 4,
         size_t maxGenTasks = 4);
     ~ThreadPool();
 
-    // Instead of just enqueueTask(...), we have a version that includes priority & type
-    void enqueueTask(const std::function<void()>& taskFunc,
+    void enqueueTask(const std::function<void()>& fn,
         TaskType type,
         int priority = 0);
 
     void shutdown();
-    size_t getThreadCount() const;
-    size_t getQueueSize(); // For debugging
+
+    size_t getThreadCount() const { return m_workers.size(); }
+    size_t getQueueSize();              // aggregate across deques
 
 private:
-    // Worker thread function
-    void workerThreadFunc();
+    void workerMain(size_t index);
+    bool tryPopLocal(size_t idx, Task& out);
+    bool trySteal(size_t thiefIdx, Task& out);
 
-    // We use a priority queue that compares Task priorities
-    std::priority_queue<Task, std::vector<Task>, TaskCompare> m_tasks;
+    std::vector<std::unique_ptr<WorkDeque>> m_queues;   // ★ pointer-wrapper
 
-    // Concurrency counters
-    size_t                 m_maxMeshing = 2;
-    size_t                 m_maxGeneration = 2;
-    std::atomic<size_t>    m_activeMeshing{ 0 };
-    std::atomic<size_t>    m_activeGeneration{ 0 };
-
-    // Other existing members
     std::vector<std::thread> m_workers;
-    std::mutex               m_taskMutex;
-    std::condition_variable  m_taskCondition;
-    bool                     m_isShuttingDown = false;
-    std::atomic<bool>        m_shutdownFlag{ false };
+    std::atomic<bool>   m_shutdown{ false };
+    std::atomic<size_t> m_rrEnq{ 0 };
+
+    const size_t m_maxMeshing;
+    const size_t m_maxGeneration;
+    std::atomic<size_t> m_activeMeshing{ 0 };
+    std::atomic<size_t> m_activeGeneration{ 0 };
+
+    std::condition_variable m_cv;
+    std::mutex              m_sleepMtx;
 };
