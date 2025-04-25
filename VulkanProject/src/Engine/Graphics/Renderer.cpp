@@ -725,7 +725,10 @@ void Renderer::recreateSwapChain()
     glfwGetFramebufferSize(m_window->getGLFWwindow(), &w, &h);
     if (w == 0 || h == 0) return;
 
-    vkDeviceWaitIdle(m_context->getDevice());
+    // --- NEW: wait only for per-frame fences instead of full device idle ---
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+        vkWaitForFences(m_context->getDevice(), 1,
+            &m_frames[i].inFlightFence, VK_TRUE, UINT64_MAX);
 
     m_rpManager->cleanup();
     m_swapChain->cleanup();

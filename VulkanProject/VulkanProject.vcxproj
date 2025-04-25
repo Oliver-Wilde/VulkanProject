@@ -161,7 +161,7 @@
     <ClCompile Include="External Libraries\imgui\imgui_draw.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_tables.cpp" />
     <ClCompile Include="External Libraries\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="src\Engine\Graphics\Frustrum.cpp" />
+    <ClCompile Include="src\Engine\Graphics\Frustum.cpp" />
     <ClCompile Include="src\Engine\Core\Application.cpp" />
     <ClCompile Include="src\Engine\Core\Time.cpp" />
     <ClCompile Include="src\Engine\Core\Window.cpp" />

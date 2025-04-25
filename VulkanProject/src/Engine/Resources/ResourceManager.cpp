@@ -48,19 +48,16 @@ static const VkDeviceSize DEFAULT_STAGING_SIZE = 4 * 1024 * 1024;   // 4 MiB
 ResourceManager::ResourceManager(VulkanContext* ctx)
     : m_context(ctx)
 {
-    /* dedicated transfer command-pool (allows RESET) ---------------------- */
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pci.queueFamilyIndex = ctx->getGraphicsQueueFamilyIndex();
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    if (vkCreateCommandPool(ctx->getDevice(), &pci, nullptr, &m_transferPool)
-        != VK_SUCCESS)
+    if (vkCreateCommandPool(ctx->getDevice(), &pci, nullptr, &m_transferPool) != VK_SUCCESS)
         throw std::runtime_error("ResourceManager: transfer pool create failed");
 }
 
 ResourceManager::~ResourceManager()
 {
-    /* make sure every outstanding upload finished and got recycled */
-    flushUploads(true);
+    flushUploads(true);                  // ensure async work finished
 
     for (auto& kv : m_shaderModules)
         vkDestroyShaderModule(m_context->getDevice(), kv.second, nullptr);
@@ -68,15 +65,13 @@ ResourceManager::~ResourceManager()
     if (m_stagingBuffer)
     {
         VkMemoryRequirements req{};
-        vkGetBufferMemoryRequirements(m_context->getDevice(),
-            m_stagingBuffer, &req);
+        vkGetBufferMemoryRequirements(m_context->getDevice(), m_stagingBuffer, &req);
         g_totalGPUBufferBytes.fetch_sub(req.size, std::memory_order_relaxed);
         vkDestroyBuffer(m_context->getDevice(), m_stagingBuffer, nullptr);
     }
     if (m_stagingMemory)
         vkFreeMemory(m_context->getDevice(), m_stagingMemory, nullptr);
 
-    /* return cached command buffers */
     for (VkCommandBuffer c : m_freeCmdBuffers)
         vkFreeCommandBuffers(m_context->getDevice(), m_transferPool, 1, &c);
     for (VkFence f : m_freeFences)
@@ -253,50 +248,9 @@ void ResourceManager::createChunkBuffers(const std::vector<Vertex>& verts,
     VkBuffer& vb, VkDeviceMemory& vbMem,
     VkBuffer& ib, VkDeviceMemory& ibMem)
 {
-    CpuProfiler::ScopedTimer chunkBufferCreationTimer("ResourceManager::createChunkBuffers");  // Profiling chunk buffer creation
-
-
-    VkDeviceSize vbSz = sizeof(Vertex) * verts.size();
-    VkDeviceSize ibSz = sizeof(uint32_t) * inds.size();
-
-    createBuffer(vbSz,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        vb, vbMem);
-
-    createBuffer(ibSz,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        ib, ibMem);
-
-    // ── copy CPU → staging ───────────────────────────────────────────────
-    VkDeviceSize total = vbSz + ibSz;
-    auto [stBuf, stMem] = getOrCreateStagingBuffer(total);
-
-    if (vbSz)
-    {
-        void* p; vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
-        std::memcpy(p, verts.data(), size_t(vbSz));
-        vkUnmapMemory(m_context->getDevice(), stMem);
-    }
-    if (ibSz)
-    {
-        void* p; vkMapMemory(m_context->getDevice(), stMem, vbSz, ibSz, 0, &p);
-        std::memcpy(p, inds.data(), size_t(ibSz));
-        vkUnmapMemory(m_context->getDevice(), stMem);
-    }
-
-    // ── copy staging → device (two regions) ───────────────────────────────
-    VkBufferCopy regions[2]{};
-    uint32_t n = 0;
-    if (vbSz) { regions[n] = { 0,    0, vbSz }; ++n; }
-    if (ibSz) { regions[n] = { vbSz, 0, ibSz }; ++n; }
-
-    copyBufferRegions(stBuf, vb, &regions[0], vbSz ? 1 : 0);
-    if (ibSz)
-        copyBufferRegions(stBuf, ib, &regions[1], 1);
+    // Forward to fully asynchronous path to avoid vkQueueWaitIdle stalls.
+    createChunkBuffersAsync(verts, inds, vb, vbMem, ib, ibMem, nullptr);
 }
-
 void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
     VkBuffer& vb, VkDeviceMemory& vbMem,
