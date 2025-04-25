@@ -1,63 +1,49 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// ResourceManager.h   – GPU buffer + shader management with async uploads
-//   • 2025-04-24: adds per-frame command-buffer / fence cache to avoid
-//                driver-level allocations on every async transfer.
+// ResourceManager.h   (2025-04-25)
+//   • 3-slot staging-buffer ring
+//   • All uploads asynchronous
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
-
+#include <vector>
 #include <string>
 #include <unordered_map>
-#include <vector>
+#include <deque>
 #include <functional>
-#include <deque>          // free-lists
 
 class VulkanContext;
 struct Vertex;
 
-/*=============================================================================
-  ResourceManager
-    - owns staging buffers, manages vkBuffer/vkMemory creation,
-      tracks total GPU bytes, loads SPIR-V modules, supports asynchronous
-      geometry uploads, and now reuses command buffers & fences.
-=============================================================================*/
 class ResourceManager
 {
 public:
     explicit ResourceManager(VulkanContext* ctx);
     ~ResourceManager();
 
-    // ── Shader modules ────────────────────────────────────────────────────
+    // ── shaders ───────────────────────────────────────────────────────────
     VkShaderModule loadShaderModule(const std::string& spirvPath);
 
-    // ── Chunk vertex / index buffers  (synchronous & asynchronous) ───────
-    /** Traditional blocking upload: returns only when data is on the GPU. */
+    // ── chunk buffers (always async now) ──────────────────────────────────
     void createChunkBuffers(const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVB, VkDeviceMemory& outVBmem,
         VkBuffer& outIB, VkDeviceMemory& outIBmem);
 
-    /** Non-blocking variant: schedules an async transfer. */
     void createChunkBuffersAsync(const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVB, VkDeviceMemory& outVBmem,
         VkBuffer& outIB, VkDeviceMemory& outIBmem,
         std::function<void()> onComplete = {});
 
-    /** Frees both VB/IB and their device memory, tracking global byte usage. */
     void destroyChunkBuffers(VkBuffer vb, VkDeviceMemory vbMem,
         VkBuffer ib, VkDeviceMemory ibMem);
 
-    /** Debug: total bytes of GPU memory currently allocated for buffers. */
     size_t GetTotalGPUBufferBytes() const;
 
-    /** Flush the async-upload queue; call once per-frame. */
-    void flushUploads(bool block = false);
+    void flushUploads(bool block = false);     // call once per-frame
+    void trimStagingBuffer();                  // optional memory tidy-up
 
-    /** Shrink an oversized staging buffer after bootstrap.                */
-    void trimStagingBuffer();
-
-    // ── Raw copy helpers (sync & async) ───────────────────────────────────
+    // ── raw copy helpers (prefer async) ───────────────────────────────────
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void copyBufferRegions(VkBuffer src, VkBuffer dst,
         const VkBufferCopy* regions, uint32_t regionCount);
@@ -70,37 +56,43 @@ public:
         std::function<void()> onComplete = {});
 
 private:
-    // ── internal helpers ─────────────────────────────────────────────────
-    std::vector<char> readFile(const std::string& path);
+    // ── staging-ring helpers ──────────────────────────────────────────────
+    struct StagingSlot
+    {
+        VkBuffer       buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize   size = 0;
+    };
+    static constexpr int kStagingSlots = 3;
+    StagingSlot   m_slots[kStagingSlots];
+    uint32_t      m_currentSlot = 0;
 
+    void   ensureSlotCapacity(int slot, VkDeviceSize wantSize);
+    StagingSlot& currentSlot();
+    std::pair<VkBuffer, VkDeviceMemory>
+        getOrCreateStagingBuffer(VkDeviceSize size);
+
+    // ── allocator & misc helpers ──────────────────────────────────────────
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
         VkMemoryPropertyFlags props,
         VkBuffer& buf, VkDeviceMemory& mem);
 
-    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props);
+    uint32_t findMemoryType(uint32_t bits, VkMemoryPropertyFlags props);
+    std::vector<char> readFile(const std::string& path);
 
-    void createStagingBuffer(VkDeviceSize size);
-    std::pair<VkBuffer, VkDeviceMemory> getOrCreateStagingBuffer(VkDeviceSize size);
-
-    /* NEW: command-buffer / fence cache used by async transfers ----------- */
+    // ── command-buffer / fence cache ─────────────────────────────────────
     VkCommandBuffer acquireCmd();
     void            recycleCmd(VkCommandBuffer cmd);
-
     VkFence         acquireFence();
-    void            recycleFence(VkFence fence);
+    void            recycleFence(VkFence f);
 
 private:
     VulkanContext* m_context = nullptr;
 
-    std::unordered_map<std::string, VkShaderModule> m_shaderModules;
-
-    // ── staging buffer (host-visible) ────────────────────────────────────
-    VkBuffer       m_stagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_stagingMemory = VK_NULL_HANDLE;
-    VkDeviceSize   m_stagingBufferSize = 0;
-
-    // ── transfer pool & reusable objects (NEW) ───────────────────────────
+    // pools & caches
     VkCommandPool               m_transferPool = VK_NULL_HANDLE;
     std::deque<VkCommandBuffer> m_freeCmdBuffers;
     std::deque<VkFence>         m_freeFences;
+
+    std::unordered_map<std::string, VkShaderModule> m_shaderModules;
 };
