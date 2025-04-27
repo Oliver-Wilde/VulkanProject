@@ -219,101 +219,58 @@ void Renderer::GeometryBuilder::threadMain()
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
-Renderer::Renderer(VulkanContext* context, Window* window, VoxelWorld* voxelWorld)
-    : m_context(context)
-    , m_window(window)
-    , m_voxelWorld(voxelWorld)
+Renderer::Renderer(VulkanContext* ctx, Window* wnd, VoxelWorld* world)
+    : m_context(ctx)
+    , m_window(wnd)
+    , m_voxelWorld(world)
 {
-    // 1) Swap chain
-    m_swapChain = new SwapChain();
-    m_swapChain->init(m_context, m_window);
-
-    // 2) Managers
+    // 1) swap‑chain & managers (unchanged)
+    m_swapChain = new SwapChain();      m_swapChain->init(m_context, m_window);
     m_resourceMgr = new ResourceManager(m_context);
     m_pipelineMgr = new PipelineManager(m_context, m_resourceMgr);
     m_rpManager = new RenderPassManager(m_context, m_swapChain);
-
-    // 3) Render pass + framebuffers
     m_rpManager->createRenderPass();
     m_rpManager->createFramebuffers();
 
-    // 4) Pipelines (fill & wireframe) + descriptor layout for MVP
+    // 2) pipelines + layout
     auto extent = m_swapChain->getExtent();
-    auto renderPass = m_rpManager->getRenderPass();
-
+    auto rp = m_rpManager->getRenderPass();
     m_mvpLayout = m_pipelineMgr->createMVPDescriptorSetLayout();
-    m_pipelineMgr->createVoxelPipelineFill("voxel_fill", renderPass, extent, m_mvpLayout);
-    m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", renderPass, extent, m_mvpLayout);
+    m_pipelineMgr->createVoxelPipelineFill("voxel_fill", rp, extent, m_mvpLayout);
+    m_pipelineMgr->createVoxelPipelineWireframe("voxel_wireframe", rp, extent, m_mvpLayout);
 
-    // 5) Uniform buffer for MVP
+    // 3) uniform buffer
     createMVPUniformBuffer();
 
-    // 6) Per‑frame resources (command buffers, semaphores, fences)
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-    {
-        VkCommandBufferAllocateInfo cmdAlloc{};
-        cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        cmdAlloc.commandPool = m_context->getCommandPool();
-        cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cmdAlloc.commandBufferCount = 1;
+    // 4) primary command buffers, fences, binary sem (legacy) handled by …
+    createSyncObjects();
 
-        if (vkAllocateCommandBuffers(m_context->getDevice(), &cmdAlloc,
-            &m_frames[i].commandBuffer) != VK_SUCCESS)
-        {
-            throw std::runtime_error("Renderer: failed to allocate command buffer");
-        }
-
-        VkSemaphoreCreateInfo semInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-
-        if (vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
-            &m_frames[i].imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(m_context->getDevice(), &semInfo, nullptr,
-                &m_frames[i].renderFinishedSemaphore) != VK_SUCCESS)
-        {
-            throw std::runtime_error("Renderer: failed to create semaphores");
-        }
-
-        VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-        if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr,
-            &m_frames[i].inFlightFence) != VK_SUCCESS)
-        {
-            throw std::runtime_error("Renderer: failed to create fences");
-        }
-    }
-
-    // 7) UIRenderer (ImGui)
+    // 5) UI
     m_uiRenderer = new UIRenderer();
-    m_uiRenderer->init(
-        m_context,
-        m_window,
-        m_rpManager->getRenderPass(),
-        m_swapChain->getImageCount());
+    m_uiRenderer->init(m_context, m_window, rp, m_swapChain->getImageCount());
 
-    // ── 8) NEW – geometry secondary command buffers  ░░░░░░░░░░░░░░░░░░░░░░░░░
+    // 6) geometry secondary CB pool
     size_t imgCount = m_swapChain->getImageCount();
-
     m_geomCmd.resize(imgCount, VK_NULL_HANDLE);
     m_geomHash.resize(imgCount, 0);
     m_cachedVerts.resize(imgCount, 0);
     m_cachedCalls.resize(imgCount, 0);
-    m_cachedWireframe.resize(imgCount, false);  
+    m_cachedWireframe.resize(imgCount, false);
 
-    VkCommandBufferAllocateInfo secAlloc{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    secAlloc.commandPool = m_context->getCommandPool();
-    secAlloc.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
-    secAlloc.commandBufferCount = 1;
-
+    VkCommandBufferAllocateInfo secAI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    secAI.commandPool = m_context->getCommandPool();
+    secAI.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    secAI.commandBufferCount = 1;
     for (size_t i = 0; i < imgCount; ++i)
     {
-        if (vkAllocateCommandBuffers(m_context->getDevice(),
-            &secAlloc,
-            &m_geomCmd[i]) != VK_SUCCESS)
+        if (vkAllocateCommandBuffers(m_context->getDevice(), &secAI, &m_geomCmd[i]) != VK_SUCCESS)
             throw std::runtime_error("Renderer: secondary CB alloc failed");
     }
 
+    // 7) async builder
+    m_geoBuilder = std::make_unique<GeometryBuilder>(this);
 }
+
 
 
 
@@ -321,46 +278,20 @@ Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
 
-    // Secondary CBs
+    destroySyncObjects();
+
     if (!m_geomCmd.empty())
-        vkFreeCommandBuffers(m_context->getDevice(),
-            m_context->getCommandPool(),
-            static_cast<uint32_t>(m_geomCmd.size()),
-            m_geomCmd.data());
+        vkFreeCommandBuffers(m_context->getDevice(), m_context->getCommandPool(),
+            static_cast<uint32_t>(m_geomCmd.size()), m_geomCmd.data());
 
-    // Per‑flight resources
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
-    {
-        if (m_frames[i].commandBuffer)
-            vkFreeCommandBuffers(m_context->getDevice(),
-                m_context->getCommandPool(), 1, &m_frames[i].commandBuffer);
-        if (m_frames[i].imageAvailableSemaphore)
-            vkDestroySemaphore(m_context->getDevice(),
-                m_frames[i].imageAvailableSemaphore, nullptr);
-        if (m_frames[i].renderFinishedSemaphore)
-            vkDestroySemaphore(m_context->getDevice(),
-                m_frames[i].renderFinishedSemaphore, nullptr);
-        if (m_frames[i].inFlightFence)
-            vkDestroyFence(m_context->getDevice(),
-                m_frames[i].inFlightFence, nullptr);
-    }
+    if (m_uiRenderer) { m_uiRenderer->cleanup(); delete m_uiRenderer; }
+    if (m_resourceMgr) { delete m_resourceMgr; }
+    delete m_pipelineMgr; delete m_rpManager; delete m_swapChain;
 
-    // Uniform resources
-    if (m_mvpBuffer)          vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
-    if (m_mvpMemory)          vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
-    if (m_mvpDescriptorPool)  vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
-    if (m_mvpLayout)          vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
-
-    // UI
-    if (m_uiRenderer) { m_uiRenderer->cleanup(); delete m_uiRenderer; m_uiRenderer = nullptr; }
-
-    // Managers
-    delete m_rpManager;   m_rpManager = nullptr;
-    delete m_pipelineMgr; m_pipelineMgr = nullptr;
-    delete m_resourceMgr; m_resourceMgr = nullptr;
-
-    // Swap‑chain
-    if (m_swapChain) { m_swapChain->cleanup(); delete m_swapChain; m_swapChain = nullptr; }
+    vkDestroyBuffer(m_context->getDevice(), m_mvpBuffer, nullptr);
+    vkFreeMemory(m_context->getDevice(), m_mvpMemory, nullptr);
+    vkDestroyDescriptorPool(m_context->getDevice(), m_mvpDescriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
 }
 
 // ============================================================================
@@ -376,7 +307,9 @@ void Renderer::enableFrustumCulling(bool enable) { m_enableFrustumCulling = enab
 // ============================================================================
 void Renderer::enqueueDeferredDestroy(const QueuedChunkDestruction& q)
 {
-    m_deferredFrees[m_currentFrame].push_back(q);
+    int safeIndex = (m_currentFrame + DESTROY_LATENCY)
+        % (MAX_FRAMES_IN_FLIGHT + DESTROY_LATENCY);
+    m_deferredFrees[safeIndex].push_back(q);
 }
 void Renderer::freeDeferredResources()
 {
@@ -494,46 +427,37 @@ void Renderer::renderFrame()
     CpuProfiler::ScopedTimer ft("Renderer::renderFrame");
     updateMVP();
 
-    // wait for previous frame
-    vkWaitForFences(m_context->getDevice(), 1,
-        &m_frames[m_currentFrame].inFlightFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(m_context->getDevice(), 1,
-        &m_frames[m_currentFrame].inFlightFence);
+    FrameResources& fr = m_frames[m_currentFrame];
+
+    // 1) CPU wait on fence from N‑2 frames
+    vkWaitForFences(m_context->getDevice(), 1, &fr.inFlightFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(m_context->getDevice(), 1, &fr.inFlightFence);
 
     freeDeferredResources();
-
     m_resourceMgr->flushUploads(false);
 
-    // acquire next image
+    // 2) acquire image
     uint32_t imgIdx;
-    VkResult res = vkAcquireNextImageKHR(
-        m_context->getDevice(),
-        m_swapChain->getSwapChain(),
-        UINT64_MAX,
-        m_frames[m_currentFrame].imageAvailableSemaphore,
-        VK_NULL_HANDLE,
-        &imgIdx);
-
-    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    VkResult acq = vkAcquireNextImageKHR(m_context->getDevice(), m_swapChain->getSwapChain(),
+        UINT64_MAX, fr.imageAvailableSemaphore,
+        VK_NULL_HANDLE, &imgIdx);
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
     {
         recreateSwapChain(); return;
     }
-    else if (res != VK_SUCCESS)
-        throw std::runtime_error("Renderer: vkAcquireNextImageKHR failed");
+    else if (acq != VK_SUCCESS) throw std::runtime_error("vkAcquireNextImageKHR failed");
 
-    // frustum
-    Frustum fr;
+    // 3) frustum + geometry CB build (unchanged)
+    Frustum frustum;
     if (m_enableFrustumCulling)
-        fr = buildCameraFrustum(m_camera, m_swapChain->getExtent());
+        frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
 
-    // geometry secondary CB
     uint32_t verts = 0, draws = 0;
-    buildGeometryCB(imgIdx, fr, m_enableFrustumCulling, verts, draws);
+    buildGeometryCB(imgIdx, frustum, m_enableFrustumCulling, verts, draws);
 
-    // record primary CB
-    VkCommandBuffer cmd = m_frames[m_currentFrame].commandBuffer;
+    // 4) record primary CB (unchanged except cmd var)
+    VkCommandBuffer cmd = fr.commandBuffer;
     vkResetCommandBuffer(cmd, 0);
-
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &bi);
 
@@ -545,8 +469,7 @@ void Renderer::renderFrame()
     rp.renderPass = m_rpManager->getRenderPass();
     rp.framebuffer = m_rpManager->getFramebuffers()[imgIdx];
     rp.renderArea = { {0,0}, m_swapChain->getExtent() };
-    rp.clearValueCount = 2;
-    rp.pClearValues = clear;
+    rp.clearValueCount = 2; rp.pClearValues = clear;
 
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdExecuteCommands(cmd, 1, &m_geomCmd[imgIdx]);
@@ -555,57 +478,61 @@ void Renderer::renderFrame()
     float dt = m_time ? m_time->getDeltaTime() : 0.f;
     float fps = dt > 0.f ? 1.f / dt : 0.f;
     float cpu = g_cpuProfiler.GetCpuUsage();
-
     m_uiRenderer->beginFrame();
-    m_uiRenderer->renderDebugWindow(dt, fps, fps,
-        cpu, cpu, verts, draws,
-        m_voxelWorld,
-        m_wireframeOn, m_enableFrustumCulling,
+    m_uiRenderer->renderDebugWindow(dt, fps, fps, cpu, cpu, verts, draws,
+        m_voxelWorld, m_wireframeOn, m_enableFrustumCulling,
         m_resourceMgr);
     m_uiRenderer->renderImGui(cmd);
 
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 
-    // submit
-    VkSemaphore wait = m_frames[m_currentFrame].imageAvailableSemaphore;
-    VkSemaphore signal = m_frames[m_currentFrame].renderFinishedSemaphore;
-    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // 5) submit -----------------------------------------------------------
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    std::array<VkSemaphore, 1> waitSems = { fr.imageAvailableSemaphore };
+    std::array<VkSemaphore, 2> signalSems = { fr.renderFinishedSemaphore, fr.timelineSemaphore };
 
-    VkSubmitInfo sub{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    sub.waitSemaphoreCount = 1;
-    sub.pWaitSemaphores = &wait;
-    sub.pWaitDstStageMask = &stage;
-    sub.commandBufferCount = 1;
-    sub.pCommandBuffers = &cmd;
-    sub.signalSemaphoreCount = 1;
-    sub.pSignalSemaphores = &signal;
+    // increment timeline value for this frame
+    uint64_t nextTL = ++fr.timelineValue;
 
-    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &sub,
-        m_frames[m_currentFrame].inFlightFence) != VK_SUCCESS)
-        throw std::runtime_error("Renderer: vkQueueSubmit failed");
+    VkTimelineSemaphoreSubmitInfo tlInfo{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    std::array<uint64_t, 1> waitVals = { 0 };            // binary sem → ignored
+    std::array<uint64_t, 2> signalVals = { 0, nextTL };
+    tlInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitVals.size());
+    tlInfo.pWaitSemaphoreValues = waitVals.data();
+    tlInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalVals.size());
+    tlInfo.pSignalSemaphoreValues = signalVals.data();
 
-    // present
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.waitSemaphoreCount = static_cast<uint32_t>(waitSems.size());
+    si.pWaitSemaphores = waitSems.data();
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    si.signalSemaphoreCount = static_cast<uint32_t>(signalSems.size());
+    si.pSignalSemaphores = signalSems.data();
+    si.pNext = m_useTimelineSemaphores ? &tlInfo : nullptr;
+
+    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fr.inFlightFence) != VK_SUCCESS)
+        throw std::runtime_error("vkQueueSubmit failed");
+
+    // 6) present ----------------------------------------------------------
     VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &signal;
+    pi.pWaitSemaphores = &fr.renderFinishedSemaphore;
     VkSwapchainKHR sc = m_swapChain->getSwapChain();
-    pi.swapchainCount = 1;
-    pi.pSwapchains = &sc;
-    pi.pImageIndices = &imgIdx;
+    pi.swapchainCount = 1; pi.pSwapchains = &sc; pi.pImageIndices = &imgIdx;
 
-    res = vkQueuePresentKHR(m_context->getPresentQueue(), &pi);
-    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    VkResult pres = vkQueuePresentKHR(m_context->getPresentQueue(), &pi);
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR)
         recreateSwapChain();
-    else if (res != VK_SUCCESS)
-        throw std::runtime_error("Renderer: vkQueuePresentKHR failed");
+    else if (pres != VK_SUCCESS)
+        throw std::runtime_error("vkQueuePresentKHR failed");
 
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // CSV logging
     s_frameCounter++;
-    CpuProfiler::LogFrameStats(s_frameCounter, dt, fps, fps,
-        cpu, cpu, draws, verts,
+    CpuProfiler::LogFrameStats(s_frameCounter, dt, fps, fps, cpu, cpu, draws, verts,
         Chunk::s_totalCPUBytes.load(std::memory_order_relaxed),
         m_resourceMgr->GetTotalGPUBufferBytes());
 }
@@ -672,6 +599,58 @@ void Renderer::updateMVP()
     std::memcpy(data, &blk, sizeof(MVPBlock));
     vkUnmapMemory(m_context->getDevice(), m_mvpMemory);
 }
+
+void Renderer::createSyncObjects()
+{
+    VkDevice dev = m_context->getDevice();
+
+    VkSemaphoreCreateInfo binCI{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    VkFenceCreateInfo      fenceCI{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    VkSemaphoreTypeCreateInfo timelineInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+    timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    timelineInfo.initialValue = 0;
+
+    VkSemaphoreCreateInfo tlCI{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    tlCI.pNext = &timelineInfo;
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        // primary command buffer
+        VkCommandBufferAllocateInfo cmdAI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmdAI.commandPool = m_context->getCommandPool();
+        cmdAI.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdAI.commandBufferCount = 1;
+        vkAllocateCommandBuffers(dev, &cmdAI, &m_frames[i].commandBuffer);
+
+        // binary semaphores (legacy – still used for swap‑chain acquire/present)
+        vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].imageAvailableSemaphore);
+        vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].renderFinishedSemaphore);
+
+        // timeline semaphore
+        if (m_useTimelineSemaphores)
+            vkCreateSemaphore(dev, &tlCI, nullptr, &m_frames[i].timelineSemaphore);
+
+        // fence
+        vkCreateFence(dev, &fenceCI, nullptr, &m_frames[i].inFlightFence);
+    }
+}
+
+void Renderer::destroySyncObjects()
+{
+    VkDevice dev = m_context->getDevice();
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        vkDestroySemaphore(dev, m_frames[i].imageAvailableSemaphore, nullptr);
+        vkDestroySemaphore(dev, m_frames[i].renderFinishedSemaphore, nullptr);
+        if (m_useTimelineSemaphores && m_frames[i].timelineSemaphore)
+            vkDestroySemaphore(dev, m_frames[i].timelineSemaphore, nullptr);
+        vkDestroyFence(dev, m_frames[i].inFlightFence, nullptr);
+        vkFreeCommandBuffers(dev, m_context->getCommandPool(), 1, &m_frames[i].commandBuffer);
+    }
+}
+
 
 // ============================================================================
 // Low‑level buffer helper

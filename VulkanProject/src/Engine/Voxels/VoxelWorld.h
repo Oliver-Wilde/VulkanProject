@@ -1,8 +1,5 @@
 ﻿// =============================================================================
-// VoxelWorld.h   — toggled single-LOD ⇆ multi-LOD support
-//   • exposes helpers that the .cpp will use to bypass the multi-LOD path
-//   • **public API change**: adds forceRebuildAllChunks() so UI can safely
-//     mark every chunk dirty without touching ChunkManager internals.
+// VoxelWorld.h   — adaptive upload-budget + frame-time tracker
 // =============================================================================
 #pragma once
 
@@ -15,6 +12,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <list>
+#include <chrono>                              // ← NEW: frame-time stamps
 
 #include "ChunkManager.h"
 #include "Meshing/NaiveMesher.h"
@@ -80,10 +78,22 @@ public:
     /** Marks every loaded chunk dirty so its geometry is rebuilt next frame. */
     void forceRebuildAllChunks();
 
-    // ── NEW: upload budget control ─────────────────────────────────────────
+    // ── upload budget control ─────────────────────────────────────────────
     /** Set per-frame GPU upload budget (bytes + chunk count). */
-    void setUploadBudget(size_t bytes, int chunks = 5) { m_uploadBudgetBytes = bytes; m_uploadBudgetChunks = chunks; }
-    size_t getUploadBudgetBytes() const { return m_uploadBudgetBytes; }
+    void setUploadBudget(size_t bytes, int chunks = 5)
+    {
+        // clamp bytes
+        if (bytes < MIN_UPLOAD_BUDGET_BYTES)      bytes = MIN_UPLOAD_BUDGET_BYTES;
+        else if (bytes > MAX_UPLOAD_BUDGET_BYTES) bytes = MAX_UPLOAD_BUDGET_BYTES;
+
+        // clamp chunks
+        if (chunks < MIN_UPLOAD_BUDGET_CHUNKS)        chunks = MIN_UPLOAD_BUDGET_CHUNKS;
+        else if (chunks > MAX_UPLOAD_BUDGET_CHUNKS)   chunks = MAX_UPLOAD_BUDGET_CHUNKS;
+
+        m_uploadBudgetBytes = bytes;
+        m_uploadBudgetChunks = chunks;
+    }
+    size_t getUploadBudgetBytes()  const { return m_uploadBudgetBytes; }
     int    getUploadBudgetChunks() const { return m_uploadBudgetChunks; }
 
     /** Current length of the pending-GPU queue (for ImGui stats). */
@@ -151,7 +161,7 @@ private:
     bool             m_useMultiLOD = true;   // runtime toggle
 
     // ── streaming distance ───────────────────────────────────────────────
-    static constexpr int VIEW_DISTANCE = 12;
+    static constexpr int VIEW_DISTANCE = 16;
 
     std::deque<ChunkCoord> m_chunksToLoad;
     std::deque<ChunkCoord> m_chunksToUnload;
@@ -166,11 +176,24 @@ private:
 
     /*──────── token-bucket upload queue (multi-LOD only) ───────────────*/
     std::deque<PendingUpload>   m_uploadQueue;
-    size_t                      m_uploadBudgetBytes = 2 * 1024 * 1024; // 2 MiB per frame
-    int                         m_uploadBudgetChunks = 5;               // 5 chunks per frame
+
+    // NEW: adaptive upload-budget limits
+    static constexpr size_t MIN_UPLOAD_BUDGET_BYTES = 512 * 1024;      // 0.5 MiB
+    static constexpr size_t MAX_UPLOAD_BUDGET_BYTES = 16 * 1024 * 1024; // 16 MiB
+    static constexpr int    MIN_UPLOAD_BUDGET_CHUNKS = 1;
+    static constexpr int    MAX_UPLOAD_BUDGET_CHUNKS = 32;
+
+    size_t m_uploadBudgetBytes = 2 * 1024 * 1024; // starts at 2 MiB per frame
+    int    m_uploadBudgetChunks = 5;               // 5 chunks per frame
 
     /*──────── RAM mesh cache with simple LRU eviction ───────────────────*/
     std::unordered_map<uint64_t, CachedMesh> m_meshCache;   // hash → mesh
     std::list<uint64_t>                      m_cacheLRU;    // most-recent front
     static constexpr size_t                  MAX_CACHE_SIZE = 256;
+
+    /*──────── NEW: rolling frame-time tracking for budget tuning ────────*/
+    static constexpr size_t                  FRAME_TIME_BUFFER = 120;
+    std::deque<float>                        m_frameTimeMs;
+    std::chrono::high_resolution_clock::time_point m_lastFrameTS{};
+    int                                      m_adjustCooldownFrames = 0;
 };

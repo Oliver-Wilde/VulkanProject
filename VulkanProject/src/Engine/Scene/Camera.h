@@ -11,7 +11,7 @@ public:
     float pitch = 0.0f; // rotation around X axis
 
     // Movement speeds
-    float moveSpeed = 25.0f;   // units per second
+    float moveSpeed = 75.0f;   // units per second
     float turnSpeed = 0.2f;   // mouse sensitivity
 
     Camera(const glm::vec3& startPos = glm::vec3(5.0f, 5.0f, 5.0f))

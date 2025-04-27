@@ -1,8 +1,9 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
 // Renderer.h – batch‑rendering voxel renderer with background CB builder
+//              [2025‑04‑27]   timeline‑semaphore & parallel‑submit overhaul
 // ───────────────────────────────────────────────────────────────────────────
-#include <deque>            // ← switched container type for async queues
+#include <deque>
 #include <vector>
 #include <queue>
 #include <thread>
@@ -33,12 +34,22 @@ struct MVPBlock { glm::mat4 mvp; };
 // ─── per‑flight resources ─────────────────────────────────────────────────
 struct FrameResources
 {
+    // NOTE: With timeline semaphores we need only *one* semaphore per frame,
+    //       whose counter value we signal / wait.  We keep the old binary
+    //       pair for backwards compatibility until all callers migrate.
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkSemaphore     imageAvailableSemaphore = VK_NULL_HANDLE;
-    VkSemaphore     renderFinishedSemaphore = VK_NULL_HANDLE;
-    VkFence         inFlightFence = VK_NULL_HANDLE;
+    VkSemaphore     imageAvailableSemaphore = VK_NULL_HANDLE;   // binary (legacy)
+    VkSemaphore     renderFinishedSemaphore = VK_NULL_HANDLE;   // binary (legacy)
+
+    /* NEW — timeline semaphore: a single handle whose counter we increment
+       once per submission; acquire / present wait on specific values. */
+    VkSemaphore     timelineSemaphore = VK_NULL_HANDLE;
+    uint64_t        timelineValue = 0;               // last signalled
+
+    VkFence         inFlightFence = VK_NULL_HANDLE;  // CPU‑side reset
 };
 static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+static constexpr int DESTROY_LATENCY = 3;
 
 // ═══════════════════════════   R E N D E R E R   ═══════════════════════════
 class Renderer
@@ -55,7 +66,9 @@ public:
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
 private:
-    // ─── big‑buffer batch helper ───────────────────────────────────────────
+    /* ------------------------------------------------------------
+       Mesh‑batch helper (unchanged; definition at bottom of header)
+       ------------------------------------------------------------ */
     struct MeshBatch
     {
         VkBuffer       vbo = VK_NULL_HANDLE;
@@ -76,14 +89,14 @@ private:
             VkBuffer srcIbo, VkDeviceSize srcIboBytes);
     };
 
-    // ──────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────
     // Background geometry builder (records secondary CBs off‑thread)
-    // ──────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────
     struct GeometryJob
     {
         Frustum   frustum;
         bool      useCulling = true;
-        uint32_t  imgIdx = 0;     // swap‑chain image this CB targets
+        uint32_t  imgIdx = 0;  // swap‑chain image this CB targets
         bool      wantWire = false;
     };
 
@@ -93,23 +106,20 @@ private:
         explicit GeometryBuilder(Renderer* owner);
         ~GeometryBuilder();
 
-        void submit(const GeometryJob& job);          // non‑blocking
+        void submit(const GeometryJob& job);
         VkCommandBuffer fetchFinished(uint32_t imgIdx,
             uint32_t& outVerts,
             uint32_t& outCalls,
             uint64_t& outHash);
-
     private:
         void threadMain();
-
         Renderer* m_owner;
-        std::thread                   m_thread;
-        std::mutex                    m_mutex;
-        std::condition_variable       m_cv;
+        std::thread                 m_thread;
+        std::mutex                  m_mutex;
+        std::condition_variable     m_cv;
 
-        /* switched to deque so we can push_back / pop_front & iterate */
-        std::deque<GeometryJob>       m_jobs;
-        bool                          m_exit = false;
+        std::deque<GeometryJob>     m_jobs;
+        bool                        m_exit = false;
 
         struct FinishedCB
         {
@@ -119,20 +129,23 @@ private:
             uint64_t hash;
             bool     wire;
         };
-        std::deque<FinishedCB>        m_done;         // likewise, deque
+        std::deque<FinishedCB>      m_done;
 
-        /* handy cache of the owner’s command pool (fixes m_cmdPool errors) */
-        VkCommandPool                 m_cmdPool = VK_NULL_HANDLE;
+        VkCommandPool               m_cmdPool = VK_NULL_HANDLE;
     };
 
-    // ─── existing synchronous CB builder (kept for fallback) ──────────────
+    // ------------------------------------------------------------------
+    // geometry CB builder (legacy sync path)
+    // ------------------------------------------------------------------
     uint64_t buildGeometryCB(uint32_t imgIdx,
         const Frustum& fr,
-        bool useCull,
+        bool           useCull,
         uint32_t& outVerts,
         uint32_t& outCalls);
 
-    // ─── internal helpers ────────────────────────────────────────────────
+    // ------------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------------
     void freeDeferredResources();
     void addSample(std::deque<float>& buf, float v);
     float computeAverage(const std::deque<float>& buf);
@@ -141,14 +154,19 @@ private:
     void updateMVP();
     void recreateSwapChain();
 
+    /* NEW – timeline‑semaphore helpers */
+    void createSyncObjects();
+    void destroySyncObjects();
+
     void createBuffer(VkDeviceSize,
         VkBufferUsageFlags,
         VkMemoryPropertyFlags,
         VkBuffer&, VkDeviceMemory&);
-
     uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
 
-    // ─── members ──────────────────────────────────────────────────────────
+    // ------------------------------------------------------------------
+    // members
+    // ------------------------------------------------------------------
     VulkanContext* m_context = nullptr;
     Window* m_window = nullptr;
     VoxelWorld* m_voxelWorld = nullptr;
@@ -169,7 +187,8 @@ private:
     // per‑flight & deferred frees
     FrameResources      m_frames[MAX_FRAMES_IN_FLIGHT];
     int                 m_currentFrame = 0;
-    std::vector<QueuedChunkDestruction> m_deferredFrees[MAX_FRAMES_IN_FLIGHT];
+    std::vector<QueuedChunkDestruction>
+        m_deferredFrees[MAX_FRAMES_IN_FLIGHT + DESTROY_LATENCY];
 
     // mesh‑batches per‑flight
     MeshBatch           m_batches[MAX_FRAMES_IN_FLIGHT];
@@ -195,4 +214,7 @@ private:
     std::deque<float>   m_cpuSamples;
 
     Camera              m_camera;
+
+    // feature toggles
+    bool                m_useTimelineSemaphores = true; // compile‑time opt‑out
 };

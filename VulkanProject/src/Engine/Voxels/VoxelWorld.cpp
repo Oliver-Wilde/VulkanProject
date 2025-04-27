@@ -9,14 +9,17 @@
 #include "Engine/Voxels/Meshing/LODMesher.h"
 #include "Engine/Graphics/Renderer.h"  // ring-buffer logic
 #include "Engine/Utils/CpuProfiler.h"  // for CpuProfiler::ScopedTimer
-
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <chrono>
 #include <mutex>
 #include <thread>
 #include <sstream>
+#include <numeric>
 
+
+using Clock = std::chrono::high_resolution_clock;
 // Externally declared:
 extern ThreadPool g_threadPool;
 
@@ -30,28 +33,33 @@ static int    s_meshCount = 0;
 static std::mutex s_resultMutex;
 static std::vector<MultiLODResult> s_pendingLODResults;
 
+
+
+static float averageDequeMs(const std::deque<float>& d)
+{
+    if (d.empty()) return 0.f;
+    return std::accumulate(d.begin(), d.end(), 0.f) /
+        static_cast<float>(d.size());
+}
 // ------------------------------------------------------------------------
 // Constructor / Destructor
 // ------------------------------------------------------------------------
-VoxelWorld::VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr)
-    : m_context(context)
-    , m_resourceManager(resourceMgr)
-    , m_renderer(nullptr)
+VoxelWorld::VoxelWorld(VulkanContext* ctx, ResourceManager* rm)
+    : m_context(ctx)
+    , m_resourceManager(rm)
 {
-    CpuProfiler::ScopedTimer ctorTimer("VoxelWorld::VoxelWorld");
+    CpuProfiler::ScopedTimer _t("VoxelWorld::VoxelWorld");
+    m_lastFrameTS = Clock::now();           // start frame-timer
 }
 
 VoxelWorld::~VoxelWorld()
 {
-    CpuProfiler::ScopedTimer dtorTimer("VoxelWorld::~VoxelWorld");
-
-    // ring‑buffer free of every chunk’s GPU buffers
+    CpuProfiler::ScopedTimer _t("VoxelWorld::~VoxelWorld");
     const auto& all = m_chunkManager.getAllChunks();
     for (auto& kv : all)
     {
         if (!kv.second) continue;
         Chunk* c = kv.second.get();
-
         for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; ++lod)
         {
             auto& ld = c->getLODData(lod);
@@ -59,9 +67,8 @@ VoxelWorld::~VoxelWorld()
 
             if (m_renderer)
             {
-                QueuedChunkDestruction q;
-                q.vb = ld.vertexBuffer;  q.vbMem = ld.vertexMemory;
-                q.ib = ld.indexBuffer;   q.ibMem = ld.indexMemory;
+                QueuedChunkDestruction q{ ld.vertexBuffer, ld.vertexMemory,
+                                          ld.indexBuffer,  ld.indexMemory };
                 m_renderer->enqueueDeferredDestroy(q);
             }
         }
@@ -98,12 +105,58 @@ void VoxelWorld::initWorld()
             }
 }
 
+
+
+
+
 // ------------------------------------------------------------------------
 // updateChunksAroundPlayer => ring-buffer load/unload in all 3 dims
 // ------------------------------------------------------------------------
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
+    /* ── rolling frame-time ------------------------------------------------ */
+    auto  now = Clock::now();
+    float dtMs = std::chrono::duration<float, std::milli>(now - m_lastFrameTS).count();
+    m_lastFrameTS = now;
 
+    m_frameTimeMs.push_back(dtMs);
+    if (m_frameTimeMs.size() > FRAME_TIME_BUFFER)
+        m_frameTimeMs.pop_front();
+
+    float avgMs = averageDequeMs(m_frameTimeMs);
+
+    /* ── adaptive upload-budget ------------------------------------------- */
+    if (m_adjustCooldownFrames > 0)
+        --m_adjustCooldownFrames;
+    else
+    {
+        constexpr float UPPER = 17.f;
+        constexpr float LOWER = 10.f;
+        constexpr float SHRINK = 0.5f;   // −50 %
+        constexpr float GROW = 1.33f;  // +33 %
+        constexpr int   COOLDOWN = 60;     // frames (≈1 s @60 Hz)
+
+        if (avgMs > UPPER)
+        {
+            m_uploadBudgetBytes = static_cast<size_t>(m_uploadBudgetBytes * SHRINK);
+            m_uploadBudgetChunks = static_cast<int>(m_uploadBudgetChunks * SHRINK);
+            m_adjustCooldownFrames = COOLDOWN;
+        }
+        else if (avgMs < LOWER)
+        {
+            m_uploadBudgetBytes = static_cast<size_t>(m_uploadBudgetBytes * GROW);
+            m_uploadBudgetChunks = static_cast<int>(m_uploadBudgetChunks * GROW);
+            m_adjustCooldownFrames = COOLDOWN;
+        }
+
+        m_uploadBudgetBytes = std::clamp(m_uploadBudgetBytes,
+            VoxelWorld::MIN_UPLOAD_BUDGET_BYTES,
+            VoxelWorld::MAX_UPLOAD_BUDGET_BYTES);
+
+        m_uploadBudgetChunks = std::clamp(m_uploadBudgetChunks,
+            VoxelWorld::MIN_UPLOAD_BUDGET_CHUNKS,
+            VoxelWorld::MAX_UPLOAD_BUDGET_CHUNKS);
+    }
     static const int UPDATE_INTERVAL = 10;  // Update every 10 frames, for example
     static int frameCounter = 0;
     if (frameCounter++ % UPDATE_INTERVAL == 0)
@@ -233,6 +286,9 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
     gatherMesherResults();
     drainUploadQueue();
 }
+
+
+
 // ------------------------------------------------------------------------
 // loadOneChunk => create + queue generation
 // ------------------------------------------------------------------------
