@@ -114,7 +114,7 @@ void VoxelWorld::initWorld()
 // ------------------------------------------------------------------------
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
-    /* ── rolling frame-time ------------------------------------------------ */
+    /* ── rolling frame‑time ------------------------------------------------ */
     auto  now = Clock::now();
     float dtMs = std::chrono::duration<float, std::milli>(now - m_lastFrameTS).count();
     m_lastFrameTS = now;
@@ -125,16 +125,16 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 
     float avgMs = averageDequeMs(m_frameTimeMs);
 
-    /* ── adaptive upload-budget ------------------------------------------- */
+    /* ── adaptive upload‑budget ------------------------------------------- */
     if (m_adjustCooldownFrames > 0)
         --m_adjustCooldownFrames;
     else
     {
-        constexpr float UPPER = 17.f;
+        constexpr float UPPER = 17.f;   // >1 frame @60 Hz
         constexpr float LOWER = 10.f;
-        constexpr float SHRINK = 0.5f;   // −50 %
-        constexpr float GROW = 1.33f;  // +33 %
-        constexpr int   COOLDOWN = 60;     // frames (≈1 s @60 Hz)
+        constexpr float SHRINK = 0.5f;   // −50 %
+        constexpr float GROW = 1.33f;  // +33 %
+        constexpr int   COOLDOWN = 60;    // frames ≈1 s @60 Hz
 
         if (avgMs > UPPER)
         {
@@ -150,144 +150,91 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         }
 
         m_uploadBudgetBytes = std::clamp(m_uploadBudgetBytes,
-            VoxelWorld::MIN_UPLOAD_BUDGET_BYTES,
-            VoxelWorld::MAX_UPLOAD_BUDGET_BYTES);
-
+            MIN_UPLOAD_BUDGET_BYTES,
+            MAX_UPLOAD_BUDGET_BYTES);
         m_uploadBudgetChunks = std::clamp(m_uploadBudgetChunks,
-            VoxelWorld::MIN_UPLOAD_BUDGET_CHUNKS,
-            VoxelWorld::MAX_UPLOAD_BUDGET_CHUNKS);
+            MIN_UPLOAD_BUDGET_CHUNKS,
+            MAX_UPLOAD_BUDGET_CHUNKS);
     }
-    static const int UPDATE_INTERVAL = 10;  // Update every 10 frames, for example
+
+    /* ── periodic streaming update ---------------------------------------- */
+    static const int UPDATE_INTERVAL = 10;  // update every 10 frames
     static int frameCounter = 0;
     if (frameCounter++ % UPDATE_INTERVAL == 0)
     {
+        CpuProfiler::ScopedTimer t("VoxelWorld::chunkStreaming");
 
-        CpuProfiler::ScopedTimer updateChunksTimer("VoxelWorld::updateChunksAroundPlayer");  // Profiling chunk update
-
-        // Convert to chunk coords in X, Z
+        // Convert player position to chunk coords (X, Z)
         int centerX = static_cast<int>(std::floor(playerPosX / float(Chunk::SIZE_X)));
         int centerZ = static_cast<int>(std::floor(playerPosZ / float(Chunk::SIZE_Z)));
 
-        // If you have direct camera access, retrieve the actual Y-position
+        // Y‑layer (fixed at 0 for now – can extend later)
         float playerPosY = 0.0f;
-        if (m_renderer)
-        {
-            // e.g.: playerPosY = m_renderer->getCamera().position.y;
-        }
+        if (m_renderer) { /* optional: playerPosY = m_renderer->getCamera().pos.y; */ }
         int centerY = static_cast<int>(std::floor(playerPosY / float(Chunk::SIZE_Y)));
 
         int verticalRange = 2;
         int minCy = centerY - verticalRange;
         int maxCy = centerY + verticalRange;
 
-        // 1) Identify newly in-range chunks
+        /* 1) chunks to load ------------------------------------------------ */
+        std::vector<ChunkCoord> toLoad;
+        toLoad.reserve((2 * VIEW_DISTANCE + 1) * (2 * verticalRange + 1) * (2 * VIEW_DISTANCE + 1));
+
+        for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
+            for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
+                for (int cy = minCy; cy <= maxCy; ++cy)
+                    if (!m_chunkManager.hasChunk(cx, cy, cz))
+                        toLoad.push_back({ cx, cy, cz });
+
+        auto distSq = [&](const ChunkCoord& cc)
+            {
+                int dx = cc.x - centerX, dy = cc.y - centerY, dz = cc.z - centerZ;
+                return (dx * dx + dy * dy + dz * dz);
+            };
+        std::sort(toLoad.begin(), toLoad.end(), [&](auto& a, auto& b) { return distSq(a) < distSq(b); });
+        for (auto& cc : toLoad) m_chunksToLoad.push_back(cc);
+
+        /* 2) chunks to unload --------------------------------------------- */
+        const auto& allChunks = m_chunkManager.getAllChunks();
+        for (auto& kv : allChunks)
         {
-            CpuProfiler::ScopedTimer identifyChunksTimer("VoxelWorld::identifyChunksToLoad");  // Profiling chunk identification
-
-
-            std::vector<ChunkCoord> toLoad;
-            toLoad.reserve((2 * VIEW_DISTANCE + 1) * (2 * verticalRange + 1)
-                * (2 * VIEW_DISTANCE + 1));
-
-            for (int cx = centerX - VIEW_DISTANCE; cx <= centerX + VIEW_DISTANCE; ++cx)
-            {
-                for (int cz = centerZ - VIEW_DISTANCE; cz <= centerZ + VIEW_DISTANCE; ++cz)
-                {
-                    for (int cy = minCy; cy <= maxCy; ++cy)
-                    {
-                        if (!m_chunkManager.hasChunk(cx, cy, cz))
-                        {
-                            toLoad.push_back({ cx, cy, cz });
-                        }
-                    }
-                }
-            }
-
-            // Sort nearest first
-            auto distSq = [&](const ChunkCoord& cc)
-                {
-                    int dx = cc.x - centerX;
-                    int dy = cc.y - centerY;
-                    int dz = cc.z - centerZ;
-                    return (dx * dx + dy * dy + dz * dz);
-                };
-            std::sort(toLoad.begin(), toLoad.end(),
-                [&](auto& a, auto& b) { return distSq(a) < distSq(b); });
-
-            for (auto& cc : toLoad)
-            {
-                m_chunksToLoad.push_back(cc);
-            }
-        }
-
-        // 2) Identify out-of-range chunks
-        {
-
-            CpuProfiler::ScopedTimer identifyUnloadChunksTimer("VoxelWorld::identifyChunksToUnload");  // Profiling chunk unloading
-
-            const auto& allChunks = m_chunkManager.getAllChunks();
-            std::vector<ChunkCoord> outOfRange;
-            outOfRange.reserve(allChunks.size());
-
-            for (auto& kv : allChunks)
-            {
-                const ChunkCoord& cc = kv.first;
-                int dx = std::abs(cc.x - centerX);
-                int dy = std::abs(cc.y - centerY);
-                int dz = std::abs(cc.z - centerZ);
-
-                if (dx > VIEW_DISTANCE || dz > VIEW_DISTANCE || dy > verticalRange)
-                {
-                    outOfRange.push_back(cc);
-                }
-            }
-
-            for (auto& cc : outOfRange)
-            {
+            const ChunkCoord& cc = kv.first;
+            int dx = std::abs(cc.x - centerX);
+            int dy = std::abs(cc.y - centerY);
+            int dz = std::abs(cc.z - centerZ);
+            if (dx > VIEW_DISTANCE || dz > VIEW_DISTANCE || dy > verticalRange)
                 m_chunksToUnload.push_back(cc);
-            }
         }
     }
 
-    // 3) Batch loading  (instrumented)
+    /* ── 3) batch loading ------------------------------------------------- */
     const int LOAD_BUDGET = 64;
-    size_t loadPlanned = std::min<size_t>(LOAD_BUDGET, m_chunksToLoad.size());
-    CpuProfiler::ScopedTimer _tBL("VW::batchLoad N=" + std::to_string(loadPlanned));
-
-    int loadedCount = 0;
-    while (!m_chunksToLoad.empty() && loadedCount < LOAD_BUDGET)
+    int loaded = 0;
+    while (!m_chunksToLoad.empty() && loaded < LOAD_BUDGET)
     {
         ChunkCoord c = m_chunksToLoad.front();
         m_chunksToLoad.pop_front();
         loadOneChunk(c);
-        loadedCount++;
+        ++loaded;
     }
 
-    // 4) Batch unloading
+    /* ── 4) batch unloading ---------------------------------------------- */
     const int UNLOAD_BUDGET = 64;
-    const int UNLOAD_BATCHSIZE = 64;
-    int unloadedCount = 0;
-    int batchCount = 0;
-
-    while (!m_chunksToUnload.empty() &&
-        unloadedCount < UNLOAD_BUDGET &&
-        batchCount < UNLOAD_BATCHSIZE)
+    int unloaded = 0;
+    while (!m_chunksToUnload.empty() && unloaded < UNLOAD_BUDGET)
     {
         ChunkCoord c = m_chunksToUnload.front();
         m_chunksToUnload.pop_front();
-
         unloadOneChunk(c);
-        unloadedCount++;
-        batchCount++;
+        ++unloaded;
     }
 
-    // 5) schedule LOD building + poll results
+    /* ── 5) meshing & GPU uploads ---------------------------------------- */
     scheduleMeshingForDirtyChunks();
     gatherMesherResults();
     drainUploadQueue();
 }
-
-
 
 // ------------------------------------------------------------------------
 // loadOneChunk => create + queue generation

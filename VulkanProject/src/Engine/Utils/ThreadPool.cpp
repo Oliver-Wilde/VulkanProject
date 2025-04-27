@@ -1,5 +1,6 @@
 ﻿// ============================================================================
-// ThreadPool.cpp  – lock-free work-stealing implementation (final fix)
+// ThreadPool.cpp – work‑stealing pool with runtime meshing‑limit control
+//                 Updated 2025‑04‑27  (implements get/setMaxMeshing)
 // ============================================================================
 #include "ThreadPool.h"
 #include <algorithm>
@@ -70,6 +71,10 @@ size_t ThreadPool::getQueueSize()
     return total;
 }
 
+// NEW: runtime meshing limit accessors ------------------------------------
+size_t ThreadPool::getMaxMeshing() const { return m_maxMeshing.load(std::memory_order_relaxed); }
+void   ThreadPool::setMaxMeshing(size_t v) { m_maxMeshing.store(v, std::memory_order_relaxed); }
+
 // ───────────────────────────────── workerMain ────────────────────────────
 void ThreadPool::workerMain(size_t idx)
 {
@@ -87,7 +92,8 @@ void ThreadPool::workerMain(size_t idx)
 
         auto* counter = (job.type == TaskType::Meshing) ? &m_activeMeshing
             : &m_activeGeneration;
-        const size_t limit = (job.type == TaskType::Meshing) ? m_maxMeshing
+        const size_t limit = (job.type == TaskType::Meshing)
+            ? m_maxMeshing.load(std::memory_order_relaxed)
             : m_maxGeneration;
 
         size_t prev = counter->fetch_add(1, std::memory_order_acquire);
