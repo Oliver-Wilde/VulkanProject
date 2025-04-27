@@ -32,7 +32,8 @@
 
 extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler;              // global CPU profiler
-static uint64_t    s_frameCounter = 0;         // running frame counter
+static uint64_t    s_frameCounter = 0;     
+static constexpr uint64_t MAX_TL_FRAMES_AHEAD = 2;// running frame counter
 
 static uint64_t fnv1a64(const void* d, size_t n)
 {
@@ -424,9 +425,29 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
 // ============================================================================
 void Renderer::renderFrame()
 {
+
+
     CpuProfiler::ScopedTimer ft("Renderer::renderFrame");
     updateMVP();
-
+    if (m_useTimelineSemaphores)
+    {
+        FrameResources& oldest = m_frames[(m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT];
+        if (oldest.timelineSemaphore)
+        {
+            uint64_t gpuDone = 0;
+            vkGetSemaphoreCounterValue(m_context->getDevice(),
+                oldest.timelineSemaphore, &gpuDone);
+            if (oldest.timelineValue - gpuDone >= MAX_TL_FRAMES_AHEAD)
+            {
+                VkSemaphoreWaitInfo wi{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+                wi.semaphoreCount = 1;
+                wi.pSemaphores = &oldest.timelineSemaphore;
+                uint64_t waitVal = oldest.timelineValue;
+                wi.pValues = &waitVal;
+                vkWaitSemaphores(m_context->getDevice(), &wi, UINT64_MAX);
+            }
+        }
+    }
     FrameResources& fr = m_frames[m_currentFrame];
 
     // 1) CPU wait on fence from N‑2 frames
