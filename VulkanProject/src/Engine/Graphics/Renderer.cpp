@@ -30,10 +30,16 @@
 #undef  max
 #undef  min
 
+
+
+
+
 extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler;              // global CPU profiler
 static uint64_t    s_frameCounter = 0;     
 static constexpr uint64_t MAX_TL_FRAMES_AHEAD = 2;// running frame counter
+
+
 
 static uint64_t fnv1a64(const void* d, size_t n)
 {
@@ -41,6 +47,26 @@ static uint64_t fnv1a64(const void* d, size_t n)
     uint64_t h = 14695981039346656037ULL;
     while (n--) { h ^= *p++; h *= 1099511628211ULL; }
     return h;
+}
+
+namespace {
+    static inline uint64_t fnvMix(uint64_t h, uint64_t v)
+    {
+        h ^= v; h *= 1099511628211ULL; return h;
+    }
+
+    static uint64_t calcGeomHash(const std::vector<Chunk*>& vis, bool wire)
+    {
+        uint64_t h = 14695981039346656037ULL;
+        for (Chunk* c : vis)
+        {
+            h = fnvMix(h, reinterpret_cast<uint64_t>(c));
+            h = fnvMix(h, reinterpret_cast<uint64_t>(c->getVertexBuffer()));
+            h = fnvMix(h, reinterpret_cast<uint64_t>(c->getIndexBuffer()));
+        }
+        if (wire) h = fnvMix(h, 1ULL);
+        return h;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,8 +144,6 @@ VkCommandBuffer Renderer::GeometryBuilder::fetchFinished(uint32_t imgIdx,
 
 void Renderer::GeometryBuilder::threadMain()
 {
-    CpuProfiler::ScopedTimer threadMainTimer("Renderer::GeometryBuilder::threadMain");
-
     while (true)
     {
         GeometryJob job;
@@ -131,14 +155,10 @@ void Renderer::GeometryBuilder::threadMain()
             m_jobs.pop_front();
         }
 
-        CpuProfiler::ScopedTimer allocTimer("Renderer::GeometryBuilder::allocateCommandBuffer");  // Profiling buffer allocation
-
-        /* allocate a secondary CB */
         VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         ai.commandPool = m_cmdPool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
         ai.commandBufferCount = 1;
-
         VkCommandBuffer gcb;
         if (vkAllocateCommandBuffers(m_owner->m_context->getDevice(), &ai, &gcb) != VK_SUCCESS)
         {
@@ -146,13 +166,10 @@ void Renderer::GeometryBuilder::threadMain()
             continue;
         }
 
-        CpuProfiler::ScopedTimer visibleSetTimer("Renderer::GeometryBuilder::visibleSetGather");
-
-        /* visible‑set gather */
         std::vector<Chunk*> vis;
         const auto& all = m_owner->m_voxelWorld->getChunkManager().getAllChunks();
         vis.reserve(all.size());
-        for (auto& kv : all)
+        for (const auto& kv : all)
         {
             Chunk* c = kv.second.get();
             if (!c) continue;
@@ -166,14 +183,8 @@ void Renderer::GeometryBuilder::threadMain()
         }
         std::sort(vis.begin(), vis.end());
 
-        uint64_t hash = fnv1a64(vis.data(), vis.size() * sizeof(Chunk*));
-        hash ^= (job.wantWire ? 0x1 : 0x0);
+        uint64_t hash = calcGeomHash(vis, job.wantWire);
 
-        
-        
-        /* record CB */
-
-        CpuProfiler::ScopedTimer recordTimer("Renderer::GeometryBuilder::recordCommandBuffer");
         VkCommandBufferInheritanceInfo inh{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
         inh.renderPass = m_owner->m_rpManager->getRenderPass();
         inh.subpass = 0;
@@ -190,27 +201,23 @@ void Renderer::GeometryBuilder::threadMain()
         vkCmdBindDescriptorSets(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS,
             pInfo.pipelineLayout, 0, 1, &m_owner->m_mvpDescriptorSet, 0, nullptr);
 
-        uint32_t     vertsTotal = 0;
         VkDeviceSize zero = 0;
+        uint32_t vertsTotal = 0;
 
         for (Chunk* c : vis)
         {
-            VkBuffer vb = c->getVertexBuffer();               // ← local l‑value
+            VkBuffer vb = c->getVertexBuffer();
             vkCmdBindVertexBuffers(gcb, 0, 1, &vb, &zero);
             vkCmdBindIndexBuffer(gcb, c->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(gcb, c->getIndexCount(), 1, 0, 0, 0);
             vertsTotal += c->getVertexCount();
         }
-
         vkEndCommandBuffer(gcb);
 
-        /* push finished */
         {
-            CpuProfiler::ScopedTimer pushTimer("Renderer::GeometryBuilder::pushFinished");
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_done.push_back({ gcb, vertsTotal,
-                static_cast<uint32_t>(vis.size()),
-                job.imgIdx, hash, job.wantWire });
+            m_done.emplace_back(FinishedCB{ gcb, vertsTotal,
+                static_cast<uint32_t>(vis.size()), job.imgIdx, hash, job.wantWire });
         }
         m_cv.notify_one();
     }
@@ -340,22 +347,21 @@ float Renderer::computeAverage(const std::deque<float>& buf)
 // ============================================================================
 uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
     const Frustum& fr,
-    bool           useCull,
+    bool useCull,
     uint32_t& outVerts,
     uint32_t& outCalls)
 {
     VkCommandBuffer gcb = m_geomCmd[imgIdx];
 
-    /* 1) gather visible */
+    // 1) Visible‑set gather --------------------------------------------------
     std::vector<Chunk*> vis;
     const auto& all = m_voxelWorld->getChunkManager().getAllChunks();
     vis.reserve(all.size());
 
-    for (auto& kv : all)
+    for (const auto& kv : all)
     {
         Chunk* c = kv.second.get();
         if (!c) continue;
-
         if (useCull)
         {
             glm::vec3 mn, mx; c->getBoundingBox(mn, mx);
@@ -366,17 +372,15 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
     }
     std::sort(vis.begin(), vis.end());
 
-    /* 2) cache test */
-    uint64_t newHash = fnv1a64(vis.data(), vis.size() * sizeof(Chunk*));
-    if (newHash == m_geomHash[imgIdx] &&
-        m_wireframeOn == m_cachedWireframe[imgIdx])
+    uint64_t newHash = calcGeomHash(vis, m_wireframeOn);
+    if (newHash == m_geomHash[imgIdx])
     {
         outVerts = m_cachedVerts[imgIdx];
         outCalls = m_cachedCalls[imgIdx];
-        return newHash;                                // cache hit
+        return newHash; // cache hit
     }
 
-    /* 3) record CB */
+    // 3) Record secondary CB -------------------------------------------------
     vkResetCommandBuffer(gcb, 0);
 
     VkCommandBufferInheritanceInfo inh{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
@@ -400,7 +404,7 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
 
     for (Chunk* c : vis)
     {
-        VkBuffer vb = c->getVertexBuffer();             // ← local l‑value
+        VkBuffer vb = c->getVertexBuffer();
         vkCmdBindVertexBuffers(gcb, 0, 1, &vb, &zero);
         vkCmdBindIndexBuffer(gcb, c->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(gcb, c->getIndexCount(), 1, 0, 0, 0);
@@ -409,7 +413,6 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
 
     vkEndCommandBuffer(gcb);
 
-    /* 4) update cache */
     m_geomHash[imgIdx] = newHash;
     m_cachedVerts[imgIdx] = vertsTotal;
     m_cachedCalls[imgIdx] = static_cast<uint32_t>(vis.size());
