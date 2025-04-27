@@ -1,8 +1,9 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// ResourceManager.h   (2025-04-25)
+// ResourceManager.h   (2025-04-27)
 //   • 3-slot staging-buffer ring
 //   • All uploads asynchronous
+//   • Added friend access for gfx::IndirectBatch (indirect‑draw batching helper)
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -14,8 +15,14 @@
 class VulkanContext;
 struct Vertex;
 
+// Forward‑declare new batching helper so it can access private copy helpers
+namespace gfx { class IndirectBatch; }
+
 class ResourceManager
 {
+    /* Grant access to private acquireCmd/createBuffer helpers for the indirect
+       batch builder without exposing them in the public API. */
+    friend class gfx::IndirectBatch;
 public:
     explicit ResourceManager(VulkanContext* ctx);
     ~ResourceManager();
