@@ -170,7 +170,7 @@ void VulkanContext::pickPhysicalDevice()
 // ============================================================================
 void VulkanContext::createLogicalDevice()
 {
-    // 1. queue families ------------------------------------------------------
+    // 1. Queue family discovery -------------------------------------------------
     uint32_t qCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &qCount, nullptr);
     std::vector<VkQueueFamilyProperties> qProps(qCount);
@@ -179,11 +179,11 @@ void VulkanContext::createLogicalDevice()
     int graphics = -1, present = -1;
     for (uint32_t i = 0; i < qCount; ++i)
     {
-        if (qProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) graphics = i;
+        if (qProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) graphics = static_cast<int>(i);
 
         VkBool32 presentSupport = VK_FALSE;
         vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, i, m_surface, &presentSupport);
-        if (presentSupport) present = i;
+        if (presentSupport) present = static_cast<int>(i);
 
         if (graphics != -1 && present != -1) break;
     }
@@ -192,7 +192,7 @@ void VulkanContext::createLogicalDevice()
 
     m_graphicsFamilyIndex = static_cast<uint32_t>(graphics);
 
-    // 2. device queues -------------------------------------------------------
+    // 2. Queue create infos -----------------------------------------------------
     float priority = 1.f;
     std::set<int> unique = { graphics, present };
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
@@ -206,18 +206,32 @@ void VulkanContext::createLogicalDevice()
         queueInfos.push_back(qi);
     }
 
+    // 3. Requested core features ------------------------------------------------
     VkPhysicalDeviceFeatures feats{};
-    feats.fillModeNonSolid = VK_TRUE;    // enable wire?frame option
+    feats.fillModeNonSolid = VK_TRUE;   // allow wire-frame mode
 
-    const std::vector<const char*> devExt = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    // 4. Extensions -------------------------------------------------------------
+    const std::vector<const char*> devExt = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME   // enable timeline semaphores
+    };
 
+    // 5. Timeline-semaphore feature struct -------------------------------------
+    VkPhysicalDeviceTimelineSemaphoreFeatures tlFeat{};
+    tlFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    tlFeat.pNext = nullptr;
+    tlFeat.timelineSemaphore = VK_TRUE;
+
+    // 6. Device-create info -----------------------------------------------------
     VkDeviceCreateInfo dci{};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext = &tlFeat;                              // chain feature struct
     dci.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     dci.pQueueCreateInfos = queueInfos.data();
     dci.pEnabledFeatures = &feats;
     dci.enabledExtensionCount = static_cast<uint32_t>(devExt.size());
     dci.ppEnabledExtensionNames = devExt.data();
+
     if (enableValidationLayers)
     {
         dci.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -227,10 +241,11 @@ void VulkanContext::createLogicalDevice()
     if (vkCreateDevice(m_physicalDevice, &dci, nullptr, &m_device) != VK_SUCCESS)
         throw std::runtime_error("Failed to create logical device!");
 
+    // 7. Retrieve queues --------------------------------------------------------
     vkGetDeviceQueue(m_device, graphics, 0, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, present, 0, &m_presentQueue);
 
-    // 3. command pool --------------------------------------------------------
+    // 8. Command pool -----------------------------------------------------------
     VkCommandPoolCreateInfo pci{};
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.queueFamilyIndex = m_graphicsFamilyIndex;

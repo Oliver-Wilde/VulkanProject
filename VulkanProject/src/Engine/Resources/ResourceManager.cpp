@@ -17,6 +17,7 @@
 #include <mutex>
 #include <functional>
 #include "Engine/Voxels/Meshing/IMesher.h"
+#include <Engine/Utils/Logger.h>
 #undef max   // windows.h safety
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -205,7 +206,7 @@ VkShaderModule ResourceManager::loadShaderModule(const std::string& path)
     VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     ci.codeSize = code.size();
     ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
-
+    Logger::Info("DEBUG-SHADER-PATH " + path);
     VkShaderModule mod;
     if (vkCreateShaderModule(m_context->getDevice(), &ci, nullptr, &mod) != VK_SUCCESS)
         throw std::runtime_error("Shader module create failed: " + path);
