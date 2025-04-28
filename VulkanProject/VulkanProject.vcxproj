@@ -655,6 +655,8 @@
     <None Include="External Libraries\glm\gtx\wrap.inl" />
     <None Include="shaders\simple.frag" />
     <None Include="shaders\simple.vert" />
+    <None Include="shaders\voxel_lit.vert" />
+    <None Include="shaders\voxel_lit.frag" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

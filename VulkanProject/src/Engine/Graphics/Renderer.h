@@ -1,7 +1,7 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// Renderer.h – batch‑rendering voxel renderer with background CB builder
-//              [2025‑04‑27]   timeline‑semaphore & parallel‑submit overhaul
+// Renderer.h – batch-rendering voxel renderer with background CB builder
+//              [2025-04-28]  +directional-light push-constant support
 // ───────────────────────────────────────────────────────────────────────────
 #include <deque>
 #include <vector>
@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <vulkan/vulkan.h>
 #include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>                // ← NEW for light-direction
 
 #include "Engine/Graphics/Frustum.h"
 #include "Engine/Scene/Camera.h"
@@ -31,22 +32,18 @@ class SwapChain;
 // ─── uniform payload ──────────────────────────────────────────────────────
 struct MVPBlock { glm::mat4 mvp; };
 
-// ─── per‑flight resources ─────────────────────────────────────────────────
+// ─── per-flight resources ─────────────────────────────────────────────────
 struct FrameResources
 {
-    // NOTE: With timeline semaphores we need only *one* semaphore per frame,
-    //       whose counter value we signal / wait.  We keep the old binary
-    //       pair for backwards compatibility until all callers migrate.
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkSemaphore     imageAvailableSemaphore = VK_NULL_HANDLE;   // binary (legacy)
     VkSemaphore     renderFinishedSemaphore = VK_NULL_HANDLE;   // binary (legacy)
 
-    /* NEW — timeline semaphore: a single handle whose counter we increment
-       once per submission; acquire / present wait on specific values. */
+    /* timeline semaphore */
     VkSemaphore     timelineSemaphore = VK_NULL_HANDLE;
-    uint64_t        timelineValue = 0;               // last signalled
+    uint64_t        timelineValue = 0;
 
-    VkFence         inFlightFence = VK_NULL_HANDLE;  // CPU‑side reset
+    VkFence         inFlightFence = VK_NULL_HANDLE;
 };
 static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 static constexpr int DESTROY_LATENCY = 3;
@@ -63,11 +60,15 @@ public:
     void toggleWireframe();
     void enableFrustumCulling(bool enable);
     void setTime(Time* time);
+
+    /* NEW: sunlight direction setter (must be normalised).                    */
+    void setSunDirection(const glm::vec3& dir);
+
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
 
 private:
     /* ------------------------------------------------------------
-       Mesh‑batch helper (unchanged; definition at bottom of header)
+       Mesh-batch helper (unchanged; definition at bottom of header)
        ------------------------------------------------------------ */
     struct MeshBatch
     {
@@ -76,8 +77,8 @@ private:
         VkDeviceMemory vboMemory = VK_NULL_HANDLE;
         VkDeviceMemory iboMemory = VK_NULL_HANDLE;
 
-        VkDeviceSize   vboSize = 0, iboSize = 0;   // total bytes allocated
-        VkDeviceSize   vboUsed = 0, iboUsed = 0;   // bytes used this build
+        VkDeviceSize   vboSize = 0, iboSize = 0;
+        VkDeviceSize   vboUsed = 0, iboUsed = 0;
 
         void ensureCapacity(Renderer* owner,
             VkDeviceSize wantVbo,
@@ -90,13 +91,13 @@ private:
     };
 
     // ──────────────────────────────────────────────────────────────────
-    // Background geometry builder (records secondary CBs off‑thread)
+    // Background geometry builder
     // ──────────────────────────────────────────────────────────────────
     struct GeometryJob
     {
         Frustum   frustum;
         bool      useCulling = true;
-        uint32_t  imgIdx = 0;  // swap‑chain image this CB targets
+        uint32_t  imgIdx = 0;
         bool      wantWire = false;
     };
 
@@ -154,7 +155,6 @@ private:
     void updateMVP();
     void recreateSwapChain();
 
-    /* NEW – timeline‑semaphore helpers */
     void createSyncObjects();
     void destroySyncObjects();
 
@@ -184,16 +184,16 @@ private:
     VkDescriptorSet     m_mvpDescriptorSet = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_mvpLayout = VK_NULL_HANDLE;
 
-    // per‑flight & deferred frees
+    // per-flight & deferred frees
     FrameResources      m_frames[MAX_FRAMES_IN_FLIGHT];
     int                 m_currentFrame = 0;
     std::vector<QueuedChunkDestruction>
         m_deferredFrees[MAX_FRAMES_IN_FLIGHT + DESTROY_LATENCY];
 
-    // mesh‑batches per‑flight
+    // mesh-batches per-flight
     MeshBatch           m_batches[MAX_FRAMES_IN_FLIGHT];
 
-    // secondary CB caches (output from GeometryBuilder)
+    // secondary CB caches
     std::vector<VkCommandBuffer> m_geomCmd;
     std::vector<uint64_t>        m_geomHash;
     std::vector<uint32_t>        m_cachedVerts;
@@ -215,6 +215,10 @@ private:
 
     Camera              m_camera;
 
+    /* NEW ─ directional sun-light (world-space, normalised) */
+    glm::vec3           m_sunDir{ -0.5f, -1.0f, 0.35f };
+
     // feature toggles
-    bool                m_useTimelineSemaphores = true; // compile‑time opt‑out
+    bool                m_useTimelineSemaphores = true;
 };
+

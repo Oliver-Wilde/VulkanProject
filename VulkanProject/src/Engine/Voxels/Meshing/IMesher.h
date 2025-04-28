@@ -6,18 +6,41 @@
 #include "../Chunk.h"
 #include "../ChunkManager.h"
 
-// A packed vertex with position (x,y,z) and color in RGBA8 format.
+// ---------------------------------------------------------------------------
+// Vertex
+// ---------------------------------------------------------------------------
+// Packed vertex layout:
+//   • position : 3 × 32-bit floats  = 12 bytes
+//   • color    : RGBA8 UNORM        =  4 bytes
+//   • sunlight : 0-15 (4 bits)      |
+//   • blocklight : 0-15 (4 bits)    | combined into one uint8_t each
+//   • pad      : 2-byte padding to keep 4-byte alignment
+//
+// Stride: 20 bytes (aligned to 4) => remember to update pipeline bindings.
+// ---------------------------------------------------------------------------
 struct Vertex
 {
-    float x, y, z;      // 12 bytes for position
-    uint32_t color;     // 4 bytes for packed color (R8G8B8A8, etc.)
+    float     x, y, z;        ///< world-space position
+    uint32_t  color;          ///< packed R8G8B8A8 UNORM
+    uint8_t   sunLight;       ///< 0-15 baked skylight
+    uint8_t   blockLight;     ///< 0-15 baked block-light
+    uint16_t  _pad;           ///< align to 4-byte boundary
 
-    // Constructor takes position + a packed color integer
-    Vertex(float X, float Y, float Z, uint32_t packedColor)
-        : x(X), y(Y), z(Z), color(packedColor)
+    Vertex(float X, float Y, float Z,
+        uint32_t packedColor,
+        uint8_t sun = 15,
+        uint8_t block = 0)
+        : x(X), y(Y), z(Z)
+        , color(packedColor)
+        , sunLight(sun)
+        , blockLight(block)
+        , _pad(0)
     {}
 };
 
+// ---------------------------------------------------------------------------
+// IMesher interface
+// ---------------------------------------------------------------------------
 class IMesher
 {
 public:

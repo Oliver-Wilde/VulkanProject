@@ -35,11 +35,9 @@
 
 
 extern ThreadPool g_threadPool;
-static CpuProfiler g_cpuProfiler;              // global CPU profiler
-static uint64_t    s_frameCounter = 0;     
-static constexpr uint64_t MAX_TL_FRAMES_AHEAD = 2;// running frame counter
-
-
+static CpuProfiler g_cpuProfiler;
+static uint64_t    s_frameCounter = 0;
+static constexpr uint64_t MAX_TL_FRAMES_AHEAD = 2;
 
 static uint64_t fnv1a64(const void* d, size_t n)
 {
@@ -82,15 +80,15 @@ Renderer::GeometryBuilder::GeometryBuilder(Renderer* owner)
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     if (vkCreateCommandPool(m_owner->m_context->getDevice(),
         &pci, nullptr, &m_cmdPool) != VK_SUCCESS)
-        throw std::runtime_error("GeometryBuilder: command‑pool create failed");
+        throw std::runtime_error("GeometryBuilder: command-pool create failed");
 
     m_thread = std::thread(&GeometryBuilder::threadMain, this);
 }
 
+
 Renderer::GeometryBuilder::~GeometryBuilder()
 {
     CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::~GeometryBuilder");
-
     VkDevice dev = m_owner->m_context->getDevice();
     vkDeviceWaitIdle(dev);
 
@@ -111,8 +109,6 @@ Renderer::GeometryBuilder::~GeometryBuilder()
 
 void Renderer::GeometryBuilder::submit(const GeometryJob& job)
 {
-    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::submit");
-
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_jobs.push_back(job);
@@ -123,8 +119,6 @@ void Renderer::GeometryBuilder::submit(const GeometryJob& job)
 VkCommandBuffer Renderer::GeometryBuilder::fetchFinished(uint32_t imgIdx,
     uint32_t& outVerts, uint32_t& outCalls, uint64_t& outHash)
 {
-    CpuProfiler::ScopedTimer timer("Renderer::GeometryBuilder::fetchFinished");
-
     std::lock_guard<std::mutex> lk(m_mutex);
     for (auto it = m_done.begin(); it != m_done.end(); ++it)
     {
@@ -201,6 +195,13 @@ void Renderer::GeometryBuilder::threadMain()
         vkCmdBindDescriptorSets(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS,
             pInfo.pipelineLayout, 0, 1, &m_owner->m_mvpDescriptorSet, 0, nullptr);
 
+        /* ── NEW: push sunlight direction ─────────────────────────────────── */
+        float pc[4] = { m_owner->m_sunDir.x,
+                        m_owner->m_sunDir.y,
+                        m_owner->m_sunDir.z, 0.0f };
+        vkCmdPushConstants(gcb, pInfo.pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
+
         VkDeviceSize zero = 0;
         uint32_t vertsTotal = 0;
 
@@ -222,7 +223,6 @@ void Renderer::GeometryBuilder::threadMain()
         m_cv.notify_one();
     }
 }
-
 
 // ============================================================================
 // Constructor / Destructor
@@ -342,6 +342,16 @@ float Renderer::computeAverage(const std::deque<float>& buf)
 }
 
 
+void Renderer::setSunDirection(const glm::vec3& dir)
+{
+    glm::vec3 n = glm::normalize(dir);
+    if (glm::any(glm::isnan(n)) || glm::length(n) < 1e-4f)
+        n = glm::vec3(0.f, -1.f, 0.f);
+    m_sunDir = n;
+}
+
+
+
 // ============================================================================
 // buildGeometryCB  – records / caches geometry secondary command buffer
 // ============================================================================
@@ -353,7 +363,7 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
 {
     VkCommandBuffer gcb = m_geomCmd[imgIdx];
 
-    // 1) Visible‑set gather --------------------------------------------------
+    // Visible-set gather (unchanged) …
     std::vector<Chunk*> vis;
     const auto& all = m_voxelWorld->getChunkManager().getAllChunks();
     vis.reserve(all.size());
@@ -380,7 +390,6 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
         return newHash; // cache hit
     }
 
-    // 3) Record secondary CB -------------------------------------------------
     vkResetCommandBuffer(gcb, 0);
 
     VkCommandBufferInheritanceInfo inh{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
@@ -398,6 +407,11 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
     vkCmdBindPipeline(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS, pInfo.pipeline);
     vkCmdBindDescriptorSets(gcb, VK_PIPELINE_BIND_POINT_GRAPHICS,
         pInfo.pipelineLayout, 0, 1, &m_mvpDescriptorSet, 0, nullptr);
+
+    /* NEW: push light dir */
+    float pc[4] = { m_sunDir.x, m_sunDir.y, m_sunDir.z, 0.f };
+    vkCmdPushConstants(gcb, pInfo.pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
 
     VkDeviceSize zero = 0;
     uint32_t     vertsTotal = 0;
@@ -422,7 +436,6 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
     outCalls = static_cast<uint32_t>(vis.size());
     return newHash;
 }
-
 // ============================================================================
 // renderFrame  (unchanged logic; only comments trimmed)
 // ============================================================================
