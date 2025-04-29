@@ -1,7 +1,7 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
 // Renderer.h – batch-rendering voxel renderer with background CB builder
-//              [2025-04-28]  +directional-light push-constant support
+//              [2025-04-29]  +IndirectBatch +MeshBatch baseVertex support
 // ───────────────────────────────────────────────────────────────────────────
 #include <deque>
 #include <vector>
@@ -18,6 +18,7 @@
 #include "Engine/Graphics/Frustum.h"
 #include "Engine/Scene/Camera.h"
 #include "Engine/Voxels/VoxelWorld.h"
+#include "Engine/Graphics/IndirectBatch.h"          // ← NEW
 
 // ─── forward declarations ─────────────────────────────────────────────────
 class Window;
@@ -68,7 +69,7 @@ public:
 
 private:
     /* ------------------------------------------------------------
-       Mesh-batch helper (unchanged; definition at bottom of header)
+       Mesh-batch helper  (now returns firstIndex + baseVertex)
        ------------------------------------------------------------ */
     struct MeshBatch
     {
@@ -85,9 +86,14 @@ private:
             VkDeviceSize wantIbo);
         inline void reset() { vboUsed = iboUsed = 0; }
 
-        uint32_t appendChunk(Renderer* owner,
-            VkBuffer srcVbo, VkDeviceSize srcVboBytes,
-            VkBuffer srcIbo, VkDeviceSize srcIboBytes);
+        /*
+         * Copies the given chunk's vertex & index buffers into the batch and
+         * returns { firstIndex, baseVertex } suitable for an indirect draw.
+         */
+        std::pair<uint32_t/*firstIndex*/, uint32_t/*baseVertex*/>
+            appendChunk(Renderer* owner,
+                VkBuffer srcVbo, VkDeviceSize srcVboBytes,
+                VkBuffer srcIbo, VkDeviceSize srcIboBytes);
     };
 
     // ──────────────────────────────────────────────────────────────────
@@ -190,10 +196,13 @@ private:
     std::vector<QueuedChunkDestruction>
         m_deferredFrees[MAX_FRAMES_IN_FLIGHT + DESTROY_LATENCY];
 
-    // mesh-batches per-flight
+    // mesh-batches per-flight  (legacy path, now for indirect draws)
     MeshBatch           m_batches[MAX_FRAMES_IN_FLIGHT];
 
-    // secondary CB caches
+    // NEW ─ single IndirectBatch instance (shared across frames)
+    std::unique_ptr<gfx::IndirectBatch> m_indirectBatch;     // ← NEW
+
+    // secondary CB caches (legacy path)
     std::vector<VkCommandBuffer> m_geomCmd;
     std::vector<uint64_t>        m_geomHash;
     std::vector<uint32_t>        m_cachedVerts;
@@ -204,6 +213,7 @@ private:
     std::unique_ptr<GeometryBuilder> m_geoBuilder;
 
     bool                m_useMeshBatch = true;
+    bool                m_useIndirect = true;                // ← NEW toggle
 
     // timing & UI stats
     Time* m_time = nullptr;
@@ -221,4 +231,3 @@ private:
     // feature toggles
     bool                m_useTimelineSemaphores = true;
 };
-

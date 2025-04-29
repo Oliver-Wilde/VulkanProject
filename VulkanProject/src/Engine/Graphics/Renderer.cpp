@@ -277,6 +277,10 @@ Renderer::Renderer(VulkanContext* ctx, Window* wnd, VoxelWorld* world)
 
     // 7) async builder
     m_geoBuilder = std::make_unique<GeometryBuilder>(this);
+
+    // 8) NEW: IndirectBatch global instance ---------------------------------
+    m_indirectBatch = std::make_unique<gfx::IndirectBatch>();
+    m_indirectBatch->init(m_context, m_resourceMgr);
 }
 
 
@@ -285,6 +289,8 @@ Renderer::Renderer(VulkanContext* ctx, Window* wnd, VoxelWorld* world)
 Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_context->getDevice());
+
+    m_indirectBatch.reset();
 
     destroySyncObjects();
 
@@ -813,10 +819,13 @@ void Renderer::MeshBatch::ensureCapacity(Renderer* owner,
             ibo, iboMemory);      // ← store allocation!
     }
 }
-uint32_t Renderer::MeshBatch::appendChunk(Renderer* owner,
+std::pair<uint32_t, uint32_t> Renderer::MeshBatch::appendChunk(
+    Renderer* owner,
     VkBuffer srcVbo, VkDeviceSize srcVboBytes,
     VkBuffer srcIbo, VkDeviceSize srcIboBytes)
 {
+    // baseVertex is vertex offset BEFORE copy in vertex units (20‑byte stride)
+    uint32_t baseVertex = static_cast<uint32_t>(vboUsed / sizeof(Vertex));
     ensureCapacity(owner, vboUsed + srcVboBytes, iboUsed + srcIboBytes);
 
     ResourceManager* rm = owner->m_resourceMgr;
@@ -836,6 +845,5 @@ uint32_t Renderer::MeshBatch::appendChunk(Renderer* owner,
     uint32_t firstIdx = static_cast<uint32_t>(iboUsed / sizeof(uint32_t));
     vboUsed += srcVboBytes;
     iboUsed += srcIboBytes;
-    return firstIdx;
+    return { firstIdx, baseVertex };
 }
-

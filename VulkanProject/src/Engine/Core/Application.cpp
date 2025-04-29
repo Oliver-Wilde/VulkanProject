@@ -113,10 +113,11 @@ void Application::handleInput(Camera& cam, float dt)
 /* ============================================================================ */
 void Application::runLoop()
 {
-    CpuProfiler::ScopedTimer loopTimer("Application::runLoop");  // Profiling main loop
+    CpuProfiler::ScopedTimer loopTimer("Application::runLoop");
 
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
-    bool wireframeWasPressed = false;
+    bool   wireframeWasPressed = false;
+    bool   rebuildWasPressed = false;   // NEW
 
     while (m_isRunning && !m_window->shouldClose())
     {
@@ -127,8 +128,20 @@ void Application::runLoop()
         /* 1) input --------------------------------------------------------- */
         handleInput(camera, dt);
 
+        /* 1.5) instant chunk-rebuild hot-key (press R) --------------------- */
+        if (glfwGetKey(m_window->getGLFWwindow(), GLFW_KEY_R) == GLFW_PRESS)
+        {
+            if (!rebuildWasPressed && m_voxelWorld)
+                m_voxelWorld->forceRebuildAllChunks();
+            rebuildWasPressed = true;
+        }
+        else
+        {
+            rebuildWasPressed = false;
+        }
+
         /* 2) world update --------------------------------------------------- */
-        CpuProfiler::ScopedTimer worldUpdateTimer("VoxelWorld::updateChunksAroundPlayer");  // Profiling chunk update
+        CpuProfiler::ScopedTimer worldUpdateTimer("VoxelWorld::updateChunksAroundPlayer");
         if (m_voxelWorld)
             m_voxelWorld->updateChunksAroundPlayer(camera.position.x,
                 camera.position.z);
@@ -148,7 +161,6 @@ void Application::runLoop()
         m_renderer->renderFrame();
     }
 }
-
 /* ============================================================================ */
 /* cleanup – reverse‑order teardown                                             */
 /* ============================================================================ */

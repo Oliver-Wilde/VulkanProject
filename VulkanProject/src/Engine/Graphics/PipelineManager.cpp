@@ -361,4 +361,3 @@ PipelineInfo PipelineManager::getPipeline(const std::string& name)
         throw std::runtime_error("PipelineManager: pipeline not found: " + name);
     return it->second;
 }
-
