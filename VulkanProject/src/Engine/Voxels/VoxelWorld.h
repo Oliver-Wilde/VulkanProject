@@ -12,7 +12,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <list>
-#include <chrono>                              // ← NEW: frame-time stamps
+#include <chrono>          // frame-time stamps
+#include <algorithm>       // std::clamp  ← NEW
 
 #include "ChunkManager.h"
 #include "Meshing/NaiveMesher.h"
@@ -59,12 +60,12 @@ public:
     VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr);
     ~VoxelWorld();
 
-    // ── setup / per-frame update ───────────────────────────────────────────
+    // ── setup / per-frame update ──────────────────────────────────────────
     void setRenderer(Renderer* renderer);
     void initWorld();
     void updateChunksAroundPlayer(float playerPosX, float playerPosZ);
 
-    // ── public accessors / toggles ─────────────────────────────────────────
+    // ── public accessors / toggles ────────────────────────────────────────
     ChunkManager& getChunkManager() { return m_chunkManager; }
     static double getAvgMeshTime();
 
@@ -77,6 +78,12 @@ public:
     // ── NEW: expose a safe way to mark all chunks dirty ───────────────────
     /** Marks every loaded chunk dirty so its geometry is rebuilt next frame. */
     void forceRebuildAllChunks();
+
+    // ── NEW: runtime control over vertical streaming range ───────────────
+    /** Number of vertical chunk columns above/below the camera that stay loaded
+        (0 → only the Y-layer containing the camera, 4 → +/-4).                */
+    inline void setVerticalRange(int v) { m_verticalRange = std::clamp(v, 0, 4); }
+    inline int  getVerticalRange() const { return m_verticalRange; }
 
     // ── upload budget control ─────────────────────────────────────────────
     /** Set per-frame GPU upload budget (bytes + chunk count). */
@@ -133,7 +140,6 @@ private:
     /*──────── new mesh-cache structures ──────────────────────────────────*/
     struct CachedMesh
     {
-        // CPU-side geometry (multi-LOD)
         std::array<std::vector<Vertex>, MultiLODResult::MAX_LODS> verts;
         std::array<std::vector<uint32_t>, MultiLODResult::MAX_LODS> inds;
     };
@@ -152,13 +158,13 @@ private:
     Renderer* m_renderer = nullptr;
 
     // ── chunk data & generation ───────────────────────────────────────────
-    ChunkManager     m_chunkManager;
-    TerrainGenerator m_terrainGenerator;
+    ChunkManager      m_chunkManager;
+    TerrainGenerator  m_terrainGenerator;
 
-    GreedyMesher     m_greedyMesher;
-    NaiveMesher      m_naiveMesher;
-    MesherType       m_currentMesherType = MesherType::GREEDY;
-    bool             m_useMultiLOD = true;   // runtime toggle
+    GreedyMesher      m_greedyMesher;
+    NaiveMesher       m_naiveMesher;
+    MesherType        m_currentMesherType = MesherType::GREEDY;
+    bool              m_useMultiLOD = false;   // runtime toggle
 
     // ── streaming distance ───────────────────────────────────────────────
     static constexpr int VIEW_DISTANCE = 16;
@@ -178,13 +184,13 @@ private:
     std::deque<PendingUpload>   m_uploadQueue;
 
     // NEW: adaptive upload-budget limits
-    static constexpr size_t MIN_UPLOAD_BUDGET_BYTES = 512 * 1024;      // 0.5 MiB
+    static constexpr size_t MIN_UPLOAD_BUDGET_BYTES = 512 * 1024;       // 0.5 MiB
     static constexpr size_t MAX_UPLOAD_BUDGET_BYTES = 16 * 1024 * 1024; // 16 MiB
     static constexpr int    MIN_UPLOAD_BUDGET_CHUNKS = 1;
     static constexpr int    MAX_UPLOAD_BUDGET_CHUNKS = 32;
 
-    size_t m_uploadBudgetBytes = 2 * 1024 * 1024; // starts at 2 MiB per frame
-    int    m_uploadBudgetChunks = 5;               // 5 chunks per frame
+    size_t m_uploadBudgetBytes = 2 * 1024 * 1024; // starts at 2 MiB / frame
+    int    m_uploadBudgetChunks = 5;               // 5 chunks / frame
 
     /*──────── RAM mesh cache with simple LRU eviction ───────────────────*/
     std::unordered_map<uint64_t, CachedMesh> m_meshCache;   // hash → mesh
@@ -196,4 +202,7 @@ private:
     std::deque<float>                        m_frameTimeMs;
     std::chrono::high_resolution_clock::time_point m_lastFrameTS{};
     int                                      m_adjustCooldownFrames = 0;
+
+    /*──────── NEW: vertical chunk-column range (runtime tweakable) ──────*/
+    int m_verticalRange = 1;   // ±1 Y-layer around the camera
 };

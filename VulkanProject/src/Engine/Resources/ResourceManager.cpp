@@ -1,8 +1,8 @@
 ﻿// ============================================================================
-// ResourceManager.cpp   – 2025-04-25
-//   * 3-slot staging-buffer ring (smooth uploads, no realloc stalls)
-//   * Fully asynchronous uploads (no vkDeviceWaitIdle / vkQueueWaitIdle)
-//   * All helpers referenced by other modules implemented
+// ResourceManager.cpp   – 2025-04-29 (slot-rotation hot-fix)
+//   * NEW: staging slot now rotates on every async upload, preventing GPU/CPU
+//           race that caused corrupted vertex/index data.
+//   * Removed old slot bump in flushUploads() to avoid double-advancing.
 // ============================================================================
 
 #include "ResourceManager.h"
@@ -274,6 +274,19 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& v,
     VkDeviceSize total = vbSz + ibSz;
     auto [stBuf, stMem] = getOrCreateStagingBuffer(total);
 
+#ifndef NDEBUG
+    /* ── GUARD CHECK ───────────────────────────────────────────────────── */
+    {
+        const uint32_t GUARD = 0xDEADBEEF;
+        uint32_t test = 0;
+        void* guardPtr = nullptr;
+        vkMapMemory(m_context->getDevice(), stMem, total, sizeof(GUARD), 0, &guardPtr);
+        std::memcpy(&test, guardPtr, sizeof(GUARD));
+        vkUnmapMemory(m_context->getDevice(), stMem);
+        assert(test == GUARD && "Staging slot still in use – overwrite race!");
+    }
+#endif
+
     if (vbSz)
     {
         void* p; vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
@@ -306,6 +319,20 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& v,
         VkBufferCopy r{ vbSz, 0, ibSz };
         copyBufferRegionsAsync(stBuf, ib, &r, 1, tick);
     }
+
+#ifndef NDEBUG
+    /* ── GUARD WRITE ───────────────────────────────────────────────────── */
+    {
+        const uint32_t GUARD = 0xDEADBEEF;
+        void* guardPtr = nullptr;
+        vkMapMemory(m_context->getDevice(), stMem, total, sizeof(GUARD), 0, &guardPtr);
+        std::memcpy(guardPtr, &GUARD, sizeof(GUARD));
+        vkUnmapMemory(m_context->getDevice(), stMem);
+    }
+#endif
+
+    /* rotate slot immediately – avoids overwrite races */
+    m_currentSlot = (m_currentSlot + 1) % kStagingSlots;
 }
 
 /* ═════════════════════ destroy / copy helpers ════════════════════════════ */
@@ -436,8 +463,6 @@ void ResourceManager::flushUploads(bool block)
         if (up.onComplete) up.onComplete();
         g_pending.pop();
     }
-    if (g_pending.empty())
-        m_currentSlot = (m_currentSlot + 1) % kStagingSlots;
 }
 
 void ResourceManager::trimStagingBuffer()
@@ -448,3 +473,6 @@ void ResourceManager::trimStagingBuffer()
         if (m_slots[i].size > DEFAULT_STAGING_SIZE)
             ensureSlotCapacity(i, DEFAULT_STAGING_SIZE);
 }
+// ============================================================================
+// end of file
+// ============================================================================

@@ -173,7 +173,7 @@ void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
         if (m_renderer) { /* optional: playerPosY = m_renderer->getCamera().pos.y; */ }
         int centerY = static_cast<int>(std::floor(playerPosY / float(Chunk::SIZE_Y)));
 
-        int verticalRange = 2;
+        int verticalRange = 3;
         int minCy = centerY - verticalRange;
         int maxCy = centerY + verticalRange;
 
@@ -266,7 +266,7 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
     std::shared_ptr<Chunk> chunk = m_chunkManager.getChunk(c.x, c.y, c.z);
     if (!chunk) return;
 
-    if (chunk->isUploading())      // defer until upload finishes
+    if (chunk->isUploading())
     {
         Logger::Info("unloadOneChunk – chunk uploading, re‑queue: "
             + std::to_string(c.x) + ","
@@ -276,7 +276,7 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
         return;
     }
 
-    // Destroy all LOD GPU buffers ring-buffer style
+    // Destroy all LOD GPU buffers ring‑buffer style
     if (m_renderer)
     {
         for (int lod = 0; lod < Chunk::MAX_LOD_LEVELS; lod++)
@@ -285,10 +285,8 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
             if (ld.vertexBuffer || ld.indexBuffer)
             {
                 QueuedChunkDestruction qcd;
-                qcd.vb = ld.vertexBuffer;
-                qcd.vbMem = ld.vertexMemory;
-                qcd.ib = ld.indexBuffer;
-                qcd.ibMem = ld.indexMemory;
+                qcd.vb = ld.vertexBuffer;  qcd.vbMem = ld.vertexMemory;
+                qcd.ib = ld.indexBuffer;   qcd.ibMem = ld.indexMemory;
                 m_renderer->enqueueDeferredDestroy(qcd);
 
                 ld.vertexBuffer = VK_NULL_HANDLE;
@@ -308,7 +306,6 @@ void VoxelWorld::unloadOneChunk(const ChunkCoord& c)
 
     m_chunkManager.removeChunk(c.x, c.y, c.z);
 }
-
 // ------------------------------------------------------------------------scheduleMeshingForDirtyChunks
 // scheduleMeshingForDirtyChunks => multi-lod only
 // ------------------------------------------------------------------------

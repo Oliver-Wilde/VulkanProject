@@ -4,6 +4,8 @@
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/ChunkManager.h"
 
+#include "Engine/Utils/ThreadPool.h"
+
 // We MUST include ResourceManager to call its methods
 #include "Engine/Resources/ResourceManager.h"
 
@@ -18,6 +20,9 @@
 #include <stdexcept>
 #include <vector>
 #include <Engine/Utils/CpuProfiler.h>
+
+
+extern ThreadPool g_threadPool;
 
 UIRenderer::UIRenderer()
 {
@@ -206,6 +211,14 @@ void UIRenderer::renderDebugWindow(
         
     }
     ImGui::Separator();
+
+    static int meshCapUI = static_cast<int>(g_threadPool.getMaxMeshing());
+    if (ImGui::SliderInt("Active meshers", &meshCapUI, 1, 16, "%d jobs"))
+    {
+        g_threadPool.setMaxMeshing(static_cast<size_t>(meshCapUI));
+    }
+    ImGui::SameLine();
+    ImGui::Text("(queue: %zu)", g_threadPool.getQueueSize());
 
     /* ───────── perf numbers ───────────────────────────────────────────── */
     ImGui::Text("Δt:  %.3f ms", dt * 1000.f);

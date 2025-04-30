@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <iostream>
 
-ThreadPool g_threadPool(0);    // ------------------------------------------------
+ThreadPool g_threadPool(/*threads=*/0, /*maxMeshTasks=*/4, /*maxGenTasks=*/2);    // ------------------------------------------------
 
 /* ============================================================================ */
 /* ctor / dtor                                                                  */
@@ -167,6 +167,8 @@ void Application::runLoop()
 void Application::cleanup()
 {
     CpuProfiler::ScopedTimer cleanupTimer("Application::cleanup");  // Profiling cleanup
+
+    g_threadPool.shutdown();
 
     /* 1) voxel world (needs renderer alive) ------------------------------- */
     delete m_voxelWorld;     m_voxelWorld = nullptr;

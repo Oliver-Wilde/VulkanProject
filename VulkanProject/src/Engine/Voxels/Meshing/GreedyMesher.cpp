@@ -16,6 +16,7 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <cassert>
 
 
 
@@ -473,5 +474,12 @@ bool GreedyMesher::generateMesh(
     // ------------------------------------------------------------------------
     // Return true if any geometry was produced
     // ------------------------------------------------------------------------
+
+#ifndef NDEBUG
+/* ── index-bounds sanity check (helps catch out-of-range bugs) ─────── */
+    for (uint32_t idx : I)
+        assert(idx < V.size() && "GreedyMesher: index out of range");
+#endif
+
     return !V.empty();
 }

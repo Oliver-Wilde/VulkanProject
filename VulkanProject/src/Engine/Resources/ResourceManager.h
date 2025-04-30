@@ -1,9 +1,8 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// ResourceManager.h   (2025-04-27)
-//   • 3-slot staging-buffer ring
-//   • All uploads asynchronous
-//   • Added friend access for gfx::IndirectBatch (indirect‑draw batching helper)
+// ResourceManager.h   (2025-04-29)
+//   • Per-slot busy flags added for safe staging-ring reuse
+//   • m_currentSlot now selected via first-free search
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -11,17 +10,15 @@
 #include <unordered_map>
 #include <deque>
 #include <functional>
+#include <atomic>                      // ← NEW
 
 class VulkanContext;
 struct Vertex;
 
-// Forward‑declare new batching helper so it can access private copy helpers
 namespace gfx { class IndirectBatch; }
 
 class ResourceManager
 {
-    /* Grant access to private acquireCmd/createBuffer helpers for the indirect
-       batch builder without exposing them in the public API. */
     friend class gfx::IndirectBatch;
 public:
     explicit ResourceManager(VulkanContext* ctx);
@@ -30,7 +27,7 @@ public:
     // ── shaders ───────────────────────────────────────────────────────────
     VkShaderModule loadShaderModule(const std::string& spirvPath);
 
-    // ── chunk buffers (always async now) ──────────────────────────────────
+    // ── chunk buffers (always async) ──────────────────────────────────────
     void createChunkBuffers(const std::vector<Vertex>& verts,
         const std::vector<uint32_t>& inds,
         VkBuffer& outVB, VkDeviceMemory& outVBmem,
@@ -47,8 +44,8 @@ public:
 
     size_t GetTotalGPUBufferBytes() const;
 
-    void flushUploads(bool block = false);     // call once per-frame
-    void trimStagingBuffer();                  // optional memory tidy-up
+    void flushUploads(bool block = false);   // call once per-frame
+    void trimStagingBuffer();                // optional tidy-up
 
     // ── raw copy helpers (prefer async) ───────────────────────────────────
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
@@ -71,8 +68,10 @@ private:
         VkDeviceSize   size = 0;
     };
     static constexpr int kStagingSlots = 3;
-    StagingSlot   m_slots[kStagingSlots];
-    uint32_t      m_currentSlot = 0;
+
+    StagingSlot           m_slots[kStagingSlots];
+    std::atomic_bool      m_slotBusy[kStagingSlots]{};   // ← NEW
+    uint32_t              m_currentSlot = 0;
 
     void   ensureSlotCapacity(int slot, VkDeviceSize wantSize);
     StagingSlot& currentSlot();
