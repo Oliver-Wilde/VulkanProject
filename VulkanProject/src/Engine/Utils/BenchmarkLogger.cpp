@@ -58,9 +58,10 @@ void BenchmarkLogger::initialise(const std::string& scenario,
     _frames << meta;
     _chunks << meta;
 
+    /* header row with NEW cpuMemBytes column */
     _frames << "frameNumber,timestampMs,dtMs,cpuRebuildMs,gpuBusyMs,"
         "bytesUploaded,uploadBudget,chunksRebuilt,drawCalls,"
-        "triangles,vramLiveBytes\n";
+        "triangles,vramLiveBytes,cpuMemBytes\n";
     _chunks << "frameNumber,chunkId,meshingUs,vertexCount\n";
 }
 
@@ -73,7 +74,7 @@ void BenchmarkLogger::logFrame(const FrameLogRow& r)
         << r.gpuBusyMs << ',' << r.bytesUploaded << ','
         << r.uploadBudget << ',' << r.chunksRebuilt << ','
         << r.drawCalls << ',' << r.triangles << ','
-        << r.vramLiveBytes << '\n';
+        << r.vramLiveBytes << ',' << r.cpuMemBytes << '\n';
 }
 void BenchmarkLogger::logChunk(const ChunkLogRow& r)
 {

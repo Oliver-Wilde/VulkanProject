@@ -97,6 +97,10 @@ public:
     int    getUploadBudgetChunks() const { return m_uploadBudgetChunks; }
     size_t getPendingUploadCount() const { return m_uploadQueue.size(); }
 
+    inline float    getCpuMeshingMsLastFrame()   const { return m_cpuMeshingMsLastFrame; }
+    inline uint32_t getChunksRebuiltLastFrame()  const { return m_chunksRebuiltLastFrame; }
+    inline uint32_t getUploadBudgetBytes()       const { return m_uploadBudgetBytes; }
+
 #ifdef BENCHMARK_MODE
     /* ─────────── frame-level telemetry for BenchmarkLogger ─────────── */
     float     getMeshingCpuMsLastFrame()  const { return m_cpuMeshingMsLastFrame; }

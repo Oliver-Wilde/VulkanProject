@@ -1,59 +1,58 @@
-﻿#pragma once
-#ifdef BENCHMARK_MODE
-/* --------------------------------------------------------------------------
-   BenchmarkLogger  – central CSV writer for per-frame and per-chunk rows
-   -------------------------------------------------------------------------- */
+﻿#ifdef BENCHMARK_MODE
+#pragma once
+#include <cstdint>
+#include <mutex>
 #include <fstream>
 #include <string>
-#include <mutex>
-#include <cstdint>
 
-   /* ── row layouts (POD) ──────────────────────────────────────────────────── */
-struct FrameLogRow
-{
-    uint32_t frameNumber;
-    double   timestampMs;
-    float    dtMs;
-    float    cpuRebuildMs;
-    float    gpuBusyMs;
-    uint64_t bytesUploaded;
-    uint64_t uploadBudget;
-    uint32_t chunksRebuilt;
-    uint32_t drawCalls;
-    uint32_t triangles;
-    uint64_t vramLiveBytes;
-};
-struct ChunkLogRow
-{
-    uint32_t frameNumber;
-    uint64_t chunkId;      // 64-bit Morton or XYZ
-    uint32_t meshingUs;    // μs
-    uint32_t vertexCount;
-};
-
-/* ── singleton ──────────────────────────────────────────────────────────── */
 class BenchmarkLogger
 {
 public:
-    static BenchmarkLogger& get();     // global accessor
+    /* ── public helpers ─────────────────────────────────────────────── */
+    struct FrameLogRow
+    {
+        uint32_t frameNumber;
+        double   timestampMs;
+        float    dtMs;
 
-    /** Must be called once at program start (after CLI parsed). */
+        /* core title metrics */
+        float    cpuRebuildMs;
+        float    gpuBusyMs;
+        uint32_t bytesUploaded;
+        uint32_t uploadBudget;
+        uint32_t chunksRebuilt;
+
+        /* rendering load */
+        uint32_t drawCalls;
+        uint32_t triangles;
+
+        /* memory footprint */
+        uint64_t vramLiveBytes;
+        uint64_t cpuMemBytes;         // NEW
+    };
+    struct ChunkLogRow
+    {
+        uint32_t frameNumber;
+        uint32_t chunkId;
+        uint32_t meshingUs;
+        uint32_t vertexCount;
+    };
+
+    static BenchmarkLogger& get();
+
     void initialise(const std::string& scenario,
-        uint32_t          seed,
-        uint32_t          durationSec,
-        const std::string& hardwareId);
+        uint32_t seed,
+        uint32_t durationSec,
+        const std::string& hwId);
 
-    /* fast, thread-safe row emitters */
     void logFrame(const FrameLogRow& r);
     void logChunk(const ChunkLogRow& r);
-    void flush();                      // optional; files auto-flush in dtor
+    void flush();
+    ~BenchmarkLogger();
 
 private:
     BenchmarkLogger() = default;
-    ~BenchmarkLogger();
-
-    std::ofstream _frames;
-    std::ofstream _chunks;
-    std::mutex    _mtx;
+    std::mutex  _mtx;
+    std::ofstream _frames, _chunks;
 };
 #endif /* BENCHMARK_MODE */

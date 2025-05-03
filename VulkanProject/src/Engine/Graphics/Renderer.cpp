@@ -1,7 +1,17 @@
-﻿#ifdef BENCHMARK_MODE
-#include "Engine/Utils/BenchmarkLogger.h"
+﻿#ifndef VK_CHECK
+#define VK_CHECK(x)                                                              \
+    do {                                                                         \
+        VkResult _res = (x);                                                     \
+        if (_res != VK_SUCCESS)                                                  \
+            throw std::runtime_error("VK_CHECK failed at " __FILE__);            \
+    } while (0)
 #endif
 
+
+#ifdef BENCHMARK_MODE
+#include "Engine/Utils/BenchmarkLogger.h"
+#endif
+#include <chrono>    
 #include "Renderer.h"
 #include "Engine/Graphics/Frustum.h"
 #include "Engine/Core/Window.h"
@@ -42,6 +52,7 @@ extern ThreadPool g_threadPool;
 static CpuProfiler g_cpuProfiler;
 static uint64_t    s_frameCounter = 0;
 static constexpr uint64_t MAX_TL_FRAMES_AHEAD = 2;
+static float s_lastGpuMs = 0.f;
 
 static uint64_t fnv1a64(const void* d, size_t n)
 {
@@ -452,10 +463,10 @@ uint64_t Renderer::buildGeometryCB(uint32_t imgIdx,
 // ============================================================================
 void Renderer::renderFrame()
 {
-
-
     CpuProfiler::ScopedTimer ft("Renderer::renderFrame");
     updateMVP();
+
+    /* timeline-semaphore throttling (unchanged) */
     if (m_useTimelineSemaphores)
     {
         FrameResources& oldest = m_frames[(m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT];
@@ -475,27 +486,44 @@ void Renderer::renderFrame()
             }
         }
     }
+
     FrameResources& fr = m_frames[m_currentFrame];
 
-    // 1) CPU wait on fence from N‑2 frames
-    vkWaitForFences(m_context->getDevice(), 1, &fr.inFlightFence, VK_TRUE, UINT64_MAX);
+    /* ── wait for fence from N-2 frame ─────────────────────────────────── */
+    vkWaitForFences(m_context->getDevice(), 1, &fr.inFlightFence,
+        VK_TRUE, UINT64_MAX);
     vkResetFences(m_context->getDevice(), 1, &fr.inFlightFence);
+
+    /* ── read GPU time from frame that just finished ──────────────────── */
+    {
+        uint32_t done = (m_currentFrame + MAX_FRAMES_IN_FLIGHT - 1)
+            % MAX_FRAMES_IN_FLIGHT;
+        uint64_t ts[2]{};
+        if (vkGetQueryPoolResults(m_context->getDevice(), m_timestampPool,
+            done * 2, 2, sizeof(ts), ts, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
+        {
+            double ns = double(ts[1] - ts[0]) * double(m_timestampPeriod);
+            s_lastGpuMs = float(ns / 1.0e6);      // cache for CSV
+        }
+    }
 
     freeDeferredResources();
     m_resourceMgr->flushUploads(false);
 
-    // 2) acquire image
-    uint32_t imgIdx;
-    VkResult acq = vkAcquireNextImageKHR(m_context->getDevice(), m_swapChain->getSwapChain(),
-        UINT64_MAX, fr.imageAvailableSemaphore,
-        VK_NULL_HANDLE, &imgIdx);
+    /* ── acquire swap-chain image ─────────────────────────────────────── */
+    uint32_t imgIdx = 0;
+    VkResult acq = vkAcquireNextImageKHR(m_context->getDevice(),
+        m_swapChain->getSwapChain(), UINT64_MAX,
+        fr.imageAvailableSemaphore, VK_NULL_HANDLE, &imgIdx);
     if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
     {
         recreateSwapChain(); return;
     }
-    else if (acq != VK_SUCCESS) throw std::runtime_error("vkAcquireNextImageKHR failed");
+    else if (acq != VK_SUCCESS)
+        throw std::runtime_error("vkAcquireNextImageKHR failed");
 
-    // 3) frustum + geometry CB build (unchanged)
+    /* ── build / fetch geometry secondary CB ──────────────────────────── */
     Frustum frustum;
     if (m_enableFrustumCulling)
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
@@ -503,72 +531,83 @@ void Renderer::renderFrame()
     uint32_t verts = 0, draws = 0;
     buildGeometryCB(imgIdx, frustum, m_enableFrustumCulling, verts, draws);
 
-    // 4) record primary CB (unchanged except cmd var)
+    /* ── record primary CB ────────────────────────────────────────────── */
     VkCommandBuffer cmd = fr.commandBuffer;
     vkResetCommandBuffer(cmd, 0);
+
+    /* reset + BEGIN timestamp */
+    uint32_t qFirst = m_currentFrame * 2;
+    vkCmdResetQueryPool(cmd, m_timestampPool, qFirst, 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_timestampPool, qFirst);
+
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    vkBeginCommandBuffer(cmd, &bi);
+    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
 
-    VkClearValue clear[2];
-    clear[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
-    clear[1].depthStencil = { 1.f, 0 };
-
+    VkClearValue clr[2];
+    clr[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
+    clr[1].depthStencil = { 1.f, 0 };
     VkRenderPassBeginInfo rp{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rp.renderPass = m_rpManager->getRenderPass();
     rp.framebuffer = m_rpManager->getFramebuffers()[imgIdx];
-    rp.renderArea = { {0,0}, m_swapChain->getExtent() };
-    rp.clearValueCount = 2; rp.pClearValues = clear;
+    rp.renderArea = { {0, 0}, m_swapChain->getExtent() };
+    rp.clearValueCount = 2;
+    rp.pClearValues = clr;
 
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdExecuteCommands(cmd, 1, &m_geomCmd[imgIdx]);
 
-    // UI
+    /* UI */
     float dt = m_time ? m_time->getDeltaTime() : 1000.f;
     float fps = dt > 0.f ? 1.f / dt : 0.f;
     float cpu = g_cpuProfiler.GetCpuUsage();
     m_uiRenderer->beginFrame();
-    m_uiRenderer->renderDebugWindow(dt, fps, fps, cpu, cpu, verts, draws,
-        m_voxelWorld, m_wireframeOn, m_enableFrustumCulling,
-        m_resourceMgr);
+    m_uiRenderer->renderDebugWindow(dt, fps, fps, cpu, cpu,
+        verts, draws, m_voxelWorld, m_wireframeOn,
+        m_enableFrustumCulling, m_resourceMgr);
     m_uiRenderer->renderImGui(cmd);
 
     vkCmdEndRenderPass(cmd);
-    vkEndCommandBuffer(cmd);
 
-    // 5) submit -----------------------------------------------------------
+    /* END timestamp */
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        m_timestampPool, qFirst + 1);
+
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    /* ── submit & present (unchanged) ─────────────────────────────────── */
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    std::array<VkSemaphore, 1> waitSems = { fr.imageAvailableSemaphore };
-    std::array<VkSemaphore, 2> signalSems = { fr.renderFinishedSemaphore, fr.timelineSemaphore };
-
-    // increment timeline value for this frame
-    uint64_t nextTL = ++fr.timelineValue;
-
-    VkTimelineSemaphoreSubmitInfo tlInfo{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-    std::array<uint64_t, 1> waitVals = { 0 };            // binary sem → ignored
-    std::array<uint64_t, 2> signalVals = { 0, nextTL };
-    tlInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitVals.size());
-    tlInfo.pWaitSemaphoreValues = waitVals.data();
-    tlInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalVals.size());
-    tlInfo.pSignalSemaphoreValues = signalVals.data();
-
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.waitSemaphoreCount = static_cast<uint32_t>(waitSems.size());
-    si.pWaitSemaphores = waitSems.data();
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &fr.imageAvailableSemaphore;
     si.pWaitDstStageMask = &waitStage;
-    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-    si.signalSemaphoreCount = static_cast<uint32_t>(signalSems.size());
-    si.pSignalSemaphores = signalSems.data();
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+
+    VkSemaphore sig[2] = { fr.renderFinishedSemaphore, fr.timelineSemaphore };
+    si.signalSemaphoreCount = m_useTimelineSemaphores ? 2 : 1;
+    si.pSignalSemaphores = sig;
+
+    /* timeline info if enabled */
+    uint64_t nextTL = ++fr.timelineValue;
+    VkTimelineSemaphoreSubmitInfo tlInfo{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    uint64_t waitVal = 0, sigVal[2] = { 0, nextTL };
+    tlInfo.waitSemaphoreValueCount = 1;
+    tlInfo.pWaitSemaphoreValues = &waitVal;
+    tlInfo.signalSemaphoreValueCount = m_useTimelineSemaphores ? 2 : 1;
+    tlInfo.pSignalSemaphoreValues = sigVal;
     si.pNext = m_useTimelineSemaphores ? &tlInfo : nullptr;
 
-    if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si, fr.inFlightFence) != VK_SUCCESS)
-        throw std::runtime_error("vkQueueSubmit failed");
+    VK_CHECK(vkQueueSubmit(m_context->getGraphicsQueue(), 1, &si,
+        fr.inFlightFence));
 
-    // 6) present ----------------------------------------------------------
     VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores = &fr.renderFinishedSemaphore;
     VkSwapchainKHR sc = m_swapChain->getSwapChain();
-    pi.swapchainCount = 1; pi.pSwapchains = &sc; pi.pImageIndices = &imgIdx;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &sc;
+    pi.pImageIndices = &imgIdx;
 
     VkResult pres = vkQueuePresentKHR(m_context->getPresentQueue(), &pi);
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR)
@@ -578,40 +617,34 @@ void Renderer::renderFrame()
 
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
-    // CSV logging
-    s_frameCounter++;
-    CpuProfiler::LogFrameStats(s_frameCounter, dt, fps, fps, cpu, cpu, draws, verts,
-        Chunk::s_totalCPUBytes.load(std::memory_order_relaxed),
-        m_resourceMgr->GetTotalGPUBufferBytes());
-
-
 #ifdef BENCHMARK_MODE
-    /* ───────────────────── CSV frame log ───────────────────── */
     using clk = std::chrono::steady_clock;
     static const auto appStart = clk::now();
 
-    FrameLogRow row{};
+    BenchmarkLogger::FrameLogRow row{};
     row.frameNumber = static_cast<uint32_t>(s_frameCounter);
-    row.timestampMs = std::chrono::duration<double, std::milli>(clk::now() - appStart).count();
+    row.timestampMs = std::chrono::duration<double, std::milli>(
+        clk::now() - appStart).count();
     row.dtMs = dt * 1000.0f;
 
-    /* NOTE: the next four values are placeholders.
-       We’ll wire them properly once we inspect ResourceManager / ChunkManager. */
-    row.cpuRebuildMs = 0.0f;                                     // TODO: real meshing time
-    row.gpuBusyMs = 0.0f;                                     // TODO: GPU timestamp query
-    row.bytesUploaded = 0;                                        // TODO: ResourceManager hook
-    row.uploadBudget = 0;                                        // TODO: ResourceManager hook
+    /* now fully wired */
+    row.cpuRebuildMs = m_voxelWorld->getCpuMeshingMsLastFrame();
+    row.gpuBusyMs = s_lastGpuMs;
+    row.bytesUploaded = m_resourceMgr->getBytesUploadedThisFrame();
+    row.uploadBudget = m_voxelWorld->getUploadBudgetBytes();
+    row.chunksRebuilt = m_voxelWorld->getChunksRebuiltLastFrame();
 
-    row.chunksRebuilt = 0;                                        // TODO: ChunkManager hook
     row.drawCalls = draws;
     row.triangles = verts / 3;
+
     row.vramLiveBytes = m_resourceMgr->GetTotalGPUBufferBytes();
+    row.cpuMemBytes = Chunk::s_totalCPUBytes.load(std::memory_order_relaxed);
 
     BenchmarkLogger::get().logFrame(row);
-#endif
+#endif /* BENCHMARK_MODE */
+
 
 }
-
 // ============================================================================
 // MVP helpers
 // ============================================================================
@@ -679,51 +712,74 @@ void Renderer::createSyncObjects()
 {
     VkDevice dev = m_context->getDevice();
 
+    /* legacy binary semaphore + fence configs */
     VkSemaphoreCreateInfo binCI{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkFenceCreateInfo      fenceCI{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    VkSemaphoreTypeCreateInfo timelineInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
-    timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    timelineInfo.initialValue = 0;
-
+    /* timeline semaphore config */
+    VkSemaphoreTypeCreateInfo tlType{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+    tlType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    tlType.initialValue = 0;
     VkSemaphoreCreateInfo tlCI{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    tlCI.pNext = &timelineInfo;
+    tlCI.pNext = &tlType;
 
+    /* ── GPU-timestamp query-pool (instrumentation) ──────────────────── */
+    {
+        VkQueryPoolCreateInfo qp{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qp.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qp.queryCount = MAX_FRAMES_IN_FLIGHT * 2;          // begin + end / frame
+        VK_CHECK(vkCreateQueryPool(dev, &qp, nullptr, &m_timestampPool));
+
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_context->getPhysicalDevice(), &props);
+        m_timestampPeriod = props.limits.timestampPeriod;  // ns per query tick
+    }
+
+    /* per-flight resources ------------------------------------------------ */
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
     {
-        // primary command buffer
-        VkCommandBufferAllocateInfo cmdAI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-        cmdAI.commandPool = m_context->getCommandPool();
-        cmdAI.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cmdAI.commandBufferCount = 1;
-        vkAllocateCommandBuffers(dev, &cmdAI, &m_frames[i].commandBuffer);
+        /* primary CMD buffer */
+        VkCommandBufferAllocateInfo cai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cai.commandPool = m_context->getCommandPool();
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        VK_CHECK(vkAllocateCommandBuffers(dev, &cai, &m_frames[i].commandBuffer));
 
-        // binary semaphores (legacy – still used for swap‑chain acquire/present)
-        vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].imageAvailableSemaphore);
-        vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].renderFinishedSemaphore);
+        /* binary semaphores (swap-chain acquire / present) */
+        VK_CHECK(vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].imageAvailableSemaphore));
+        VK_CHECK(vkCreateSemaphore(dev, &binCI, nullptr, &m_frames[i].renderFinishedSemaphore));
 
-        // timeline semaphore
+        /* timeline semaphore */
         if (m_useTimelineSemaphores)
-            vkCreateSemaphore(dev, &tlCI, nullptr, &m_frames[i].timelineSemaphore);
+            VK_CHECK(vkCreateSemaphore(dev, &tlCI, nullptr, &m_frames[i].timelineSemaphore));
 
-        // fence
-        vkCreateFence(dev, &fenceCI, nullptr, &m_frames[i].inFlightFence);
+        /* in-flight fence */
+        VK_CHECK(vkCreateFence(dev, &fenceCI, nullptr, &m_frames[i].inFlightFence));
     }
 }
+
 
 void Renderer::destroySyncObjects()
 {
     VkDevice dev = m_context->getDevice();
+
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
     {
         vkDestroySemaphore(dev, m_frames[i].imageAvailableSemaphore, nullptr);
         vkDestroySemaphore(dev, m_frames[i].renderFinishedSemaphore, nullptr);
+
         if (m_useTimelineSemaphores && m_frames[i].timelineSemaphore)
             vkDestroySemaphore(dev, m_frames[i].timelineSemaphore, nullptr);
+
         vkDestroyFence(dev, m_frames[i].inFlightFence, nullptr);
-        vkFreeCommandBuffers(dev, m_context->getCommandPool(), 1, &m_frames[i].commandBuffer);
+        vkFreeCommandBuffers(dev, m_context->getCommandPool(), 1,
+            &m_frames[i].commandBuffer);
     }
+
+    /* instrumentation query-pool */
+    if (m_timestampPool)
+        vkDestroyQueryPool(dev, m_timestampPool, nullptr);
 }
 
 

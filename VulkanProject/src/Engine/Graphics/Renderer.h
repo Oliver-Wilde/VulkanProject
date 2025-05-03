@@ -62,9 +62,7 @@ public:
     void enableFrustumCulling(bool enable);
     void setTime(Time* time);
 
-
-
-    /* NEW: sunlight direction setter (must be normalised).                    */
+    /* NEW: sunlight direction setter (must be normalised). */
     void setSunDirection(const glm::vec3& dir);
 
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
@@ -220,7 +218,7 @@ private:
     std::unique_ptr<GeometryBuilder> m_geoBuilder;
 
     bool                m_useMeshBatch = true;
-    bool                m_useIndirect = true;                // ← NEW toggle
+    bool                m_useIndirect = true;               // ← NEW toggle
 
     // timing & UI stats
     Time* m_time = nullptr;
@@ -234,6 +232,10 @@ private:
 
     /* NEW ─ directional sun-light (world-space, normalised) */
     glm::vec3           m_sunDir{ -0.5f, -1.0f, 0.35f };
+
+    /* ── instrumentation ─────────────────────────────────────────────── */
+    VkQueryPool   m_timestampPool = VK_NULL_HANDLE;  // GPU timestamp pool
+    float         m_timestampPeriod = 1.0f;            // ns per tick
 
     // feature toggles
     bool                m_useTimelineSemaphores = true;
