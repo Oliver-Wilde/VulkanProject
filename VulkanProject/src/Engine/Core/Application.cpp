@@ -8,15 +8,20 @@
 #include "Engine/Utils/Logger.h"
 #include "Engine/Voxels/VoxelWorld.h"
 #include "Engine/Voxels/VoxelSetup.h"
-#include "Engine/Resources/ResourceManager.h"   // ResourceManager location
-#include "Engine/Utils/ThreadPool.h"    
+#include "Engine/Resources/ResourceManager.h"
+#include "Engine/Utils/ThreadPool.h"
 #include "Engine/Utils/CpuProfiler.h"
-// global pool
+
+#ifdef BENCHMARK_MODE
+#include "Engine/Utils/BenchmarkLogger.h"
+#include "Engine/Utils/ScenarioRunner.h"
+#include <chrono>
+#endif
 
 #include <stdexcept>
 #include <iostream>
 
-ThreadPool g_threadPool(/*threads=*/0, /*maxMeshTasks=*/4, /*maxGenTasks=*/2);    // ------------------------------------------------
+ThreadPool g_threadPool(/*threads=*/0, /*maxMeshTasks=*/4, /*maxGenTasks=*/2);    // ----------------
 
 /* ============================================================================ */
 /* ctor / dtor                                                                  */
@@ -29,11 +34,35 @@ Application::~Application()
 }
 
 /* ============================================================================ */
-/* init – full engine bring‑up                                                  */
+/* parseCommandLine – BENCHMARK-only                                            */
+/* ============================================================================ */
+#ifdef BENCHMARK_MODE
+void Application::parseCommandLine(int argc, char** argv)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string a = argv[i];
+        auto next = [&]() -> const char*
+            {
+                if (i + 1 < argc) return argv[++i];
+                Logger::Info("Missing value after '" + a + "'");
+                return "";
+            };
+
+        if (a == "--scenario")  m_scenario = next();
+        else if (a == "--seed") m_seed = static_cast<uint32_t>(std::stoul(next()));
+        else if (a == "--seconds") m_runSeconds = static_cast<uint32_t>(std::stoul(next()));
+        // silently ignore unknown args – they may belong to other subsystems
+    }
+}
+#endif
+
+/* ============================================================================ */
+/* init – full engine bring-up                                                  */
 /* ============================================================================ */
 void Application::init()
 {
-    CpuProfiler::ScopedTimer initTimer("Application::init");  // Profiling init
+    CpuProfiler::ScopedTimer initTimer("Application::init");
 
     /* 1) Voxel registry ---------------------------------------------------- */
     registerAllVoxels();
@@ -66,15 +95,38 @@ void Application::init()
     m_renderer->setTime(m_time);
     m_voxelWorld->initWorld();
 
+#ifdef BENCHMARK_MODE
+    /* -------------------------------------------------- benchmark start -- */
+    if (m_runSeconds == 0) m_runSeconds = 60;          // sensible default
+    const std::string hwId = Renderer::queryHardwareString(); // add stub if it doesn't exist
+    BenchmarkLogger::get().initialise(m_scenario, m_seed, m_runSeconds, hwId);
+
+    // pick scenario type
+    ScenarioRunner::Type t = ScenarioRunner::Type::Static;
+    if (m_scenario == "fly")  t = ScenarioRunner::Type::Fly;
+    else if (m_scenario == "edit") t = ScenarioRunner::Type::Edit;
+    else if (m_scenario == "lod")  t = ScenarioRunner::Type::Lod;
+
+    
+    m_startTime = std::chrono::steady_clock::now();
+#endif
+
     m_isRunning = true;
 }
 
 /* ============================================================================ */
-/* handleInput – binds WASD & mouse to Camera                                   */
+/* handleInput – binds WASD & mouse to Camera                                   */
 /* ============================================================================ */
 void Application::handleInput(Camera& cam, float dt)
 {
-    CpuProfiler::ScopedTimer inputTimer("Application::handleInput");  // Profiling input handling
+#ifdef BENCHMARK_MODE
+    // In benchmark mode we disable manual camera & mouse so the ScenarioRunner
+    // can drive everything deterministically.
+    (void)cam; (void)dt;
+    return;
+#endif
+
+    CpuProfiler::ScopedTimer inputTimer("Application::handleInput");
 
     GLFWwindow* window = m_window->getGLFWwindow();
 
@@ -116,8 +168,15 @@ void Application::runLoop()
     CpuProfiler::ScopedTimer loopTimer("Application::runLoop");
 
     Camera camera(glm::vec3(8.0f, 8.0f, 30.0f));
+
+#ifdef BENCHMARK_MODE
+    /* create once, right after camera exists */
+    if (!m_scenarioRunner)
+        m_scenarioRunner = new ScenarioRunner(
+            m_pendingScenarioType, m_seed, &camera, m_voxelWorld);
+#endif
     bool   wireframeWasPressed = false;
-    bool   rebuildWasPressed = false;   // NEW
+    bool   rebuildWasPressed = false;
 
     while (m_isRunning && !m_window->shouldClose())
     {
@@ -125,26 +184,21 @@ void Application::runLoop()
         m_time->update();
         float dt = m_time->getDeltaTime();
 
-        /* 1) input --------------------------------------------------------- */
+#ifdef BENCHMARK_MODE
+        /* automate camera / edits via ScenarioRunner ---------------------- */
+        m_scenarioRunner->update(dt);
+#else
+        /* 1) manual input ------------------------------------------------- */
         handleInput(camera, dt);
 
-        /* 1.5) instant chunk-rebuild hot-key (press R) --------------------- */
+        /* 1.5) instant chunk-rebuild hot-key ------------------------------ */
         if (glfwGetKey(m_window->getGLFWwindow(), GLFW_KEY_R) == GLFW_PRESS)
         {
             if (!rebuildWasPressed && m_voxelWorld)
                 m_voxelWorld->forceRebuildAllChunks();
             rebuildWasPressed = true;
         }
-        else
-        {
-            rebuildWasPressed = false;
-        }
-
-        /* 2) world update --------------------------------------------------- */
-        CpuProfiler::ScopedTimer worldUpdateTimer("VoxelWorld::updateChunksAroundPlayer");
-        if (m_voxelWorld)
-            m_voxelWorld->updateChunksAroundPlayer(camera.position.x,
-                camera.position.z);
+        else rebuildWasPressed = false;
 
         /* 3) toggle wireframe --------------------------------------------- */
         bool wireframeIsPressed =
@@ -155,35 +209,53 @@ void Application::runLoop()
             m_renderer->toggleWireframe();
         }
         wireframeWasPressed = wireframeIsPressed;
+#endif
+
+        /* 2) world update --------------------------------------------------- */
+        {
+            CpuProfiler::ScopedTimer timer("VoxelWorld::updateChunksAroundPlayer");
+            if (m_voxelWorld)
+                m_voxelWorld->updateChunksAroundPlayer(camera.position.x,
+                    camera.position.z);
+        }
 
         /* 4) render -------------------------------------------------------- */
         m_renderer->setCamera(camera);
         m_renderer->renderFrame();
+
+#ifdef BENCHMARK_MODE
+        /* auto-quit when runSeconds elapse -------------------------------- */
+        if (m_runSeconds > 0)
+        {
+            auto now = std::chrono::steady_clock::now();
+            float sec = std::chrono::duration<float>(now - m_startTime).count();
+            if (sec >= static_cast<float>(m_runSeconds))
+                m_isRunning = false;
+        }
+#endif
     }
 }
+
 /* ============================================================================ */
-/* cleanup – reverse‑order teardown                                             */
+/* cleanup – reverse-order teardown                                             */
 /* ============================================================================ */
 void Application::cleanup()
 {
-    CpuProfiler::ScopedTimer cleanupTimer("Application::cleanup");  // Profiling cleanup
+    CpuProfiler::ScopedTimer cleanupTimer("Application::cleanup");
+
+#ifdef BENCHMARK_MODE
+    delete m_scenarioRunner;  m_scenarioRunner = nullptr;
+#endif
 
     g_threadPool.shutdown();
 
-    /* 1) voxel world (needs renderer alive) ------------------------------- */
     delete m_voxelWorld;     m_voxelWorld = nullptr;
-
-    /* 2) renderer --------------------------------------------------------- */
     delete m_renderer;       m_renderer = nullptr;
-
-    /* 3) resources -------------------------------------------------------- */
     delete m_resourceManager; m_resourceManager = nullptr;
 
-    /* 4) Vulkan context --------------------------------------------------- */
     if (m_vulkanCtx) { m_vulkanCtx->cleanup(); delete m_vulkanCtx; }
     m_vulkanCtx = nullptr;
 
-    /* 5) window / time ---------------------------------------------------- */
     delete m_window; m_window = nullptr;
     delete m_time;   m_time = nullptr;
 

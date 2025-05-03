@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -74,7 +74,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions);BENCHMARK_MODE</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\Vulkan\Include;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glm;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glfw\include;$(ProjectDir)src</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -93,7 +93,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions);BENCHMARK_MODE</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\Vulkan\Include;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glm;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glfw\include;$(ProjectDir)src</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -112,7 +112,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions);BENCHMARK_MODE</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\Vulkan\Include;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glm;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glfw\include;$(ProjectDir)src</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -131,7 +131,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions);BENCHMARK_MODE</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\Vulkan\Include;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glm;C:\Users\james\source\repos\VulkanProject\VulkanProject\External Libraries\glfw\include;$(ProjectDir)src</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -147,6 +147,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\Engine\Utils\ScenarioRunner.cpp" />
+    <ClCompile Include="src\Engine\Utils\BenchmarkLogger.cpp" />
     <ClCompile Include="src\Engine\Graphics\IndirectBatch.cpp" />
     <ClCompile Include="src\Engine\Voxels\Meshing\LODMesher.cpp" />
     <ClCompile Include="src\Engine\Graphics\UIRenderer.cpp" />
@@ -185,6 +187,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
+    <ClInclude Include="src\Engine\Utils\ScenarioRunner.h" />
+    <ClInclude Include="src\Engine\Utils\BenchmarkLogger.h" />
     <ClInclude Include="src\Engine\Graphics\IndirectBatch.h" />
     <ClInclude Include="src\Engine\Voxels\IBlockProvider.h" />
     <ClInclude Include="src\Engine\Voxels\Meshing\LODMesher.h" />

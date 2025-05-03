@@ -1,4 +1,8 @@
-﻿#include "Renderer.h"
+﻿#ifdef BENCHMARK_MODE
+#include "Engine/Utils/BenchmarkLogger.h"
+#endif
+
+#include "Renderer.h"
 #include "Engine/Graphics/Frustum.h"
 #include "Engine/Core/Window.h"
 #include "Engine/Core/Time.h"
@@ -308,6 +312,7 @@ Renderer::~Renderer()
     vkDestroyDescriptorSetLayout(m_context->getDevice(), m_mvpLayout, nullptr);
 }
 
+
 // ============================================================================
 // Small public helpers
 // ============================================================================
@@ -518,7 +523,7 @@ void Renderer::renderFrame()
     vkCmdExecuteCommands(cmd, 1, &m_geomCmd[imgIdx]);
 
     // UI
-    float dt = m_time ? m_time->getDeltaTime() : 0.f;
+    float dt = m_time ? m_time->getDeltaTime() : 1000.f;
     float fps = dt > 0.f ? 1.f / dt : 0.f;
     float cpu = g_cpuProfiler.GetCpuUsage();
     m_uiRenderer->beginFrame();
@@ -578,6 +583,33 @@ void Renderer::renderFrame()
     CpuProfiler::LogFrameStats(s_frameCounter, dt, fps, fps, cpu, cpu, draws, verts,
         Chunk::s_totalCPUBytes.load(std::memory_order_relaxed),
         m_resourceMgr->GetTotalGPUBufferBytes());
+
+
+#ifdef BENCHMARK_MODE
+    /* ───────────────────── CSV frame log ───────────────────── */
+    using clk = std::chrono::steady_clock;
+    static const auto appStart = clk::now();
+
+    FrameLogRow row{};
+    row.frameNumber = static_cast<uint32_t>(s_frameCounter);
+    row.timestampMs = std::chrono::duration<double, std::milli>(clk::now() - appStart).count();
+    row.dtMs = dt * 1000.0f;
+
+    /* NOTE: the next four values are placeholders.
+       We’ll wire them properly once we inspect ResourceManager / ChunkManager. */
+    row.cpuRebuildMs = 0.0f;                                     // TODO: real meshing time
+    row.gpuBusyMs = 0.0f;                                     // TODO: GPU timestamp query
+    row.bytesUploaded = 0;                                        // TODO: ResourceManager hook
+    row.uploadBudget = 0;                                        // TODO: ResourceManager hook
+
+    row.chunksRebuilt = 0;                                        // TODO: ChunkManager hook
+    row.drawCalls = draws;
+    row.triangles = verts / 3;
+    row.vramLiveBytes = m_resourceMgr->GetTotalGPUBufferBytes();
+
+    BenchmarkLogger::get().logFrame(row);
+#endif
+
 }
 
 // ============================================================================
@@ -847,3 +879,12 @@ std::pair<uint32_t, uint32_t> Renderer::MeshBatch::appendChunk(
     iboUsed += srcIboBytes;
     return { firstIdx, baseVertex };
 }
+
+
+#ifdef BENCHMARK_MODE
+#include <string>
+std::string Renderer::queryHardwareString()
+{
+    return "unknown";        // simple stub; refine later if desired
+}
+#endif

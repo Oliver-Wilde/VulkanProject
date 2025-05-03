@@ -32,14 +32,29 @@ static int    s_meshCount = 0;
 // Protect multi-lod results
 static std::mutex s_resultMutex;
 static std::vector<MultiLODResult> s_pendingLODResults;
-
-
+#ifdef BENCHMARK_MODE
+static inline uint64_t split21(uint32_t v)
+{
+    uint64_t x = v & 0x1fffff;
+    x = (x | (x << 32)) & 0x1f00000000ffffULL;
+    x = (x | (x << 16)) & 0x1f0000ff0000ffULL;
+    x = (x | (x << 8)) & 0x100f00f00f00f00fULL;
+    x = (x | (x << 4)) & 0x10c30c30c30c30c3ULL;
+    x = (x | (x << 2)) & 0x1249249249249249ULL;
+    return x;
+}
+static inline uint64_t encodeMorton21(int x, int y, int z)
+{
+    return split21(uint32_t(x)) | (split21(uint32_t(y)) << 1) | (split21(uint32_t(z)) << 2);
+}
+/* frame counter local to VoxelWorld → increments once per frame           */
+static uint32_t s_worldFrameNumber = 0;
+#endif
 
 static float averageDequeMs(const std::deque<float>& d)
 {
     if (d.empty()) return 0.f;
-    return std::accumulate(d.begin(), d.end(), 0.f) /
-        static_cast<float>(d.size());
+    return std::accumulate(d.begin(), d.end(), 0.f) / float(d.size());
 }
 // ------------------------------------------------------------------------
 // Constructor / Destructor
@@ -49,7 +64,7 @@ VoxelWorld::VoxelWorld(VulkanContext* ctx, ResourceManager* rm)
     , m_resourceManager(rm)
 {
     CpuProfiler::ScopedTimer _t("VoxelWorld::VoxelWorld");
-    m_lastFrameTS = Clock::now();           // start frame-timer
+    m_lastFrameTS = Clock::now();
 }
 
 VoxelWorld::~VoxelWorld()
@@ -114,6 +129,13 @@ void VoxelWorld::initWorld()
 // ------------------------------------------------------------------------
 void VoxelWorld::updateChunksAroundPlayer(float playerPosX, float playerPosZ)
 {
+#ifdef BENCHMARK_MODE
+    /* reset per-frame counters and bump world-wide frame index */
+    m_cpuMeshingMsLastFrame = 0.0f;
+    m_chunksRebuiltLastFrame = 0;
+    ++s_worldFrameNumber;
+#endif
+
     /* ── rolling frame‑time ------------------------------------------------ */
     auto  now = Clock::now();
     float dtMs = std::chrono::duration<float, std::milli>(now - m_lastFrameTS).count();
@@ -345,6 +367,7 @@ void VoxelWorld::scheduleMeshingForDirtyChunks()
                     MultiLODResult mlr = LODMesher::buildAllLODs(*c,
                         c->worldX(), c->worldY(), c->worldZ(),
                         base, m_chunkManager);
+
                     {
                         std::lock_guard<std::mutex> lk(s_resultMutex);
                         s_pendingLODResults.emplace_back(std::move(mlr));
@@ -494,7 +517,10 @@ void VoxelWorld::drainUploadQueue()
         m_uploadQueue.pop_front();
 
         finalizeMultiLOD(pu.mlr);
-
+#ifdef BENCHMARK_MODE
+        ++m_chunksRebuiltLastFrame;
+         // may be 0 if not set
+#endif
         bytesLeft -= pu.bytes;
         --chunksLeft;
     }
@@ -533,6 +559,10 @@ void VoxelWorld::scheduleMeshingSingleLOD(Chunk& chunk, const IMesher* base)
             res.cx = keepAlive->worldX();
             res.cy = keepAlive->worldY();
             res.cz = keepAlive->worldZ();
+#ifdef BENCHMARK_MODE
+            
+            res.morton = encodeMorton21(res.cx, res.cy, res.cz);
+#endif
 
             {
                 std::lock_guard<std::mutex> lk(m_singleLodMutex);
@@ -551,8 +581,20 @@ void VoxelWorld::gatherSingleLODResults()
             local.swap(m_pendingMeshResultsSingleLOD);
     }
 
-    for (auto& r : local)
+    for (auto& r : local)        // ← add braces for the loop body
+    {
+#ifdef BENCHMARK_MODE
+        ++m_chunksRebuiltLastFrame;
+
+        ChunkLogRow cl;
+        cl.frameNumber = s_worldFrameNumber;
+        cl.chunkId = r.morton;
+        cl.meshingUs = 0;                       // cpuMs removed
+        cl.vertexCount = static_cast<uint32_t>(r.verts.size());
+        BenchmarkLogger::get().logChunk(cl);
+#endif
         finalizeSingleLODMesh(r);
+    }
 }
 
 void VoxelWorld::finalizeSingleLODMesh(MeshBuildResult& r)
@@ -629,4 +671,18 @@ void VoxelWorld::forceRebuildAllChunks()
     {
         if (kv.second) kv.second->markDirty();
     }
+}
+
+void VoxelWorld::setUploadBudget(size_t bytes, int chunks /*=5*/)
+{
+    /* clamp bytes */
+    if (bytes < MIN_UPLOAD_BUDGET_BYTES)      bytes = MIN_UPLOAD_BUDGET_BYTES;
+    else if (bytes > MAX_UPLOAD_BUDGET_BYTES) bytes = MAX_UPLOAD_BUDGET_BYTES;
+
+    /* clamp chunk count */
+    if (chunks < MIN_UPLOAD_BUDGET_CHUNKS)        chunks = MIN_UPLOAD_BUDGET_CHUNKS;
+    else if (chunks > MAX_UPLOAD_BUDGET_CHUNKS)   chunks = MAX_UPLOAD_BUDGET_CHUNKS;
+
+    m_uploadBudgetBytes = bytes;
+    m_uploadBudgetChunks = chunks;
 }

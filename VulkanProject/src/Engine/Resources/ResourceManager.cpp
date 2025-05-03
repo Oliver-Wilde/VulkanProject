@@ -20,6 +20,10 @@
 #include <Engine/Utils/Logger.h>
 #undef max   // windows.h safety
 
+#ifdef BENCHMARK_MODE
+#include <atomic>
+#endif
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Global GPU-memory tracker                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -261,9 +265,15 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& v,
     VkBuffer& vb, VkDeviceMemory& vbMem,
     VkBuffer& ib, VkDeviceMemory& ibMem,
     std::function<void()> onComplete)
+
 {
     VkDeviceSize vbSz = sizeof(Vertex) * v.size();
     VkDeviceSize ibSz = sizeof(uint32_t) * i.size();
+
+#ifdef BENCHMARK_MODE
+    m_bytesUploadedThisFrame.fetch_add(static_cast<size_t>(vbSz + ibSz),
+        std::memory_order_relaxed);
+#endif
 
     createBuffer(vbSz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vb, vbMem);
@@ -462,7 +472,13 @@ void ResourceManager::flushUploads(bool block)
         recycleCmd(up.cmd);
         if (up.onComplete) up.onComplete();
         g_pending.pop();
+
     }
+
+#ifdef BENCHMARK_MODE
+    if (g_pending.empty())
+        m_bytesUploadedThisFrame.store(0);
+#endif
 }
 
 void ResourceManager::trimStagingBuffer()

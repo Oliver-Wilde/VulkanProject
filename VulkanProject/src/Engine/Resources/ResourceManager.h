@@ -3,6 +3,7 @@
 // ResourceManager.h   (2025-04-29)
 //   • Per-slot busy flags added for safe staging-ring reuse
 //   • m_currentSlot now selected via first-free search
+//   • BENCHMARK_MODE: per-frame upload counters & budget accessors
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -10,7 +11,7 @@
 #include <unordered_map>
 #include <deque>
 #include <functional>
-#include <atomic>                      // ← NEW
+#include <atomic>
 
 class VulkanContext;
 struct Vertex;
@@ -20,6 +21,7 @@ namespace gfx { class IndirectBatch; }
 class ResourceManager
 {
     friend class gfx::IndirectBatch;
+
 public:
     explicit ResourceManager(VulkanContext* ctx);
     ~ResourceManager();
@@ -44,8 +46,15 @@ public:
 
     size_t GetTotalGPUBufferBytes() const;
 
-    void flushUploads(bool block = false);   // call once per-frame
+    void flushUploads(bool block = false);   // call once per frame
     void trimStagingBuffer();                // optional tidy-up
+
+#ifdef BENCHMARK_MODE
+    /* ─────────── per-frame upload telemetry ─────────── */
+    size_t getBytesUploadedThisFrame() const { return m_bytesUploadedThisFrame.load(); }
+    size_t getUploadBudgetThisFrame()  const { return currentSlot().size; }
+    void   resetFrameStats() { m_bytesUploadedThisFrame.store(0); }
+#endif
 
     // ── raw copy helpers (prefer async) ───────────────────────────────────
     void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
@@ -70,11 +79,15 @@ private:
     static constexpr int kStagingSlots = 3;
 
     StagingSlot           m_slots[kStagingSlots];
-    std::atomic_bool      m_slotBusy[kStagingSlots]{};   // ← NEW
+    std::atomic_bool      m_slotBusy[kStagingSlots]{};
     uint32_t              m_currentSlot = 0;
 
-    void   ensureSlotCapacity(int slot, VkDeviceSize wantSize);
+    void ensureSlotCapacity(int slot, VkDeviceSize wantSize);
+
+    /* non-const and const overloads so callers can use either */
     StagingSlot& currentSlot();
+    const StagingSlot& currentSlot() const { return m_slots[m_currentSlot]; }
+
     std::pair<VkBuffer, VkDeviceMemory>
         getOrCreateStagingBuffer(VkDeviceSize size);
 
@@ -101,4 +114,9 @@ private:
     std::deque<VkFence>         m_freeFences;
 
     std::unordered_map<std::string, VkShaderModule> m_shaderModules;
+
+#ifdef BENCHMARK_MODE
+    /* accumulated bytes uploaded during the current frame */
+    std::atomic<size_t> m_bytesUploadedThisFrame{ 0 };
+#endif
 };

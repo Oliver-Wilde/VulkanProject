@@ -62,10 +62,17 @@ public:
     void enableFrustumCulling(bool enable);
     void setTime(Time* time);
 
+
+
     /* NEW: sunlight direction setter (must be normalised).                    */
     void setSunDirection(const glm::vec3& dir);
 
     void enqueueDeferredDestroy(const QueuedChunkDestruction& qcd);
+
+#ifdef BENCHMARK_MODE
+    /** Returns a short “CPU | GPU-driver” string for the CSV metadata line. */
+    static std::string queryHardwareString();
+#endif
 
 private:
     /* ------------------------------------------------------------
@@ -101,7 +108,7 @@ private:
     // ──────────────────────────────────────────────────────────────────
     struct GeometryJob
     {
-        Frustum   frustum;
+        Frustum   frustum{};     // ← brace-initialised to silence warning
         bool      useCulling = true;
         uint32_t  imgIdx = 0;
         bool      wantWire = false;
