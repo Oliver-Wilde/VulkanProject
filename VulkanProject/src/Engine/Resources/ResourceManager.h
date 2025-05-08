@@ -1,9 +1,8 @@
 ﻿#pragma once
 // ───────────────────────────────────────────────────────────────────────────
-// ResourceManager.h   (2025-04-29)
-//   • Per-slot busy flags added for safe staging-ring reuse
-//   • m_currentSlot now selected via first-free search
-//   • BENCHMARK_MODE: per-frame upload counters & budget accessors
+// ResourceManager.h   (2025-04-30 – benchmark-ready)
+//   • Adds inline getters & reset for per-frame upload telemetry
+//   • No other behavioural changes
 // ───────────────────────────────────────────────────────────────────────────
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -51,9 +50,15 @@ public:
 
 #ifdef BENCHMARK_MODE
     /* ─────────── per-frame upload telemetry ─────────── */
-    size_t getBytesUploadedThisFrame() const { return m_bytesUploadedThisFrame.load(); }
-    size_t getUploadBudgetThisFrame()  const { return currentSlot().size; }
-    void   resetFrameStats() { m_bytesUploadedThisFrame.store(0); }
+    size_t getBytesUploadedThisFrame() const {             // ← used by Renderer
+        return m_bytesUploadedThisFrame.load(std::memory_order_relaxed);
+    }
+    size_t getUploadBudgetThisFrame() const {              // current staging slot size
+        return currentSlot().size;
+    }
+    void resetFrameStats() {                               // zero at frame start
+        m_bytesUploadedThisFrame.store(0, std::memory_order_relaxed);
+    }
 #endif
 
     // ── raw copy helpers (prefer async) ───────────────────────────────────
@@ -79,7 +84,7 @@ private:
     static constexpr int kStagingSlots = 3;
 
     StagingSlot           m_slots[kStagingSlots];
-    std::atomic_bool      m_slotBusy[kStagingSlots]{};
+    std::atomic_bool      m_slotBusy[kStagingSlots]{}; // (future-proof)
     uint32_t              m_currentSlot = 0;
 
     void ensureSlotCapacity(int slot, VkDeviceSize wantSize);

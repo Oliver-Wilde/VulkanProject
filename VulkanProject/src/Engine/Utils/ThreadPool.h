@@ -1,6 +1,8 @@
 ﻿// ============================================================================
 // ThreadPool.h – work-stealing pool with runtime meshing-limit control
+//               + 2025-05-04: add resize() and getThreadCount()
 // ============================================================================
+
 #pragma once
 
 #include <functional>
@@ -11,7 +13,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <memory>
-#include <cstdint>      // for uint8_t
+#include <cstdint>
 
 // ─── task metadata ─────────────────────────────────────────────────────────
 enum class TaskType : uint8_t { Meshing, Generation };
@@ -32,19 +34,22 @@ struct alignas(64) WorkDeque          // one per worker – cache-line aligned
 class ThreadPool
 {
 public:
-    /*  If threadCount == 0  →  uses  hardware_concurrency()-1  (min 1)       */
+    /* If threadCount == 0 ➜ uses hardware_concurrency()-1  (min 1)           */
     ThreadPool(size_t threadCount = 0,
         size_t maxMeshTasks = 4,
         size_t maxGenTasks = 4);
     ~ThreadPool();
 
-    /*  Queue a job – higher  priority  values are preferred when stealing    */
+    /* Queue a job – higher priority values are preferred when stealing       */
     void enqueueTask(const std::function<void()>& fn,
         TaskType type,
         int priority = 0);
 
-    /*  Graceful shutdown – wakes workers, waits for them to finish           */
+    /* Graceful shutdown – wakes workers, waits for them to finish            */
     void shutdown();
+
+    /* ─── NEW ─── Re-configure worker count at runtime (blocks until idle)   */
+    void resize(size_t newThreadCount);
 
     // ── runtime introspection ───────────────────────────────────────────────
     size_t getThreadCount() const { return m_workers.size(); }
@@ -59,10 +64,12 @@ private:
     bool tryPopLocal(size_t idx, Task& out);   // LIFO pop from own deque
     bool trySteal(size_t thiefIdx, Task& out); // FIFO steal from others
 
-    /*  One queue per thread – prevents mutex contention on push/pop          */
-    std::vector<std::unique_ptr<WorkDeque>> m_queues;
+    void spawnWorkers(size_t count);           // helper for ctor + resize
+    void joinAll();                            // helper for shutdown + resize
 
-    std::vector<std::thread> m_workers;
+    /* One queue per thread – prevents mutex contention on push/pop           */
+    std::vector<std::unique_ptr<WorkDeque>> m_queues;
+    std::vector<std::thread>                m_workers;
 
     std::atomic<bool>   m_shutdown{ false };
     std::atomic<size_t> m_rrEnq{ 0 };          // round-robin enqueue index
@@ -74,7 +81,7 @@ private:
     std::atomic<size_t> m_activeMeshing{ 0 };
     std::atomic<size_t> m_activeGeneration{ 0 };
 
-    /*  Sleep gate – workers block here when idle                             */
+    /* Sleep gate – workers block here when idle                              */
     std::condition_variable m_cv;
     std::mutex              m_sleepMtx;
 };

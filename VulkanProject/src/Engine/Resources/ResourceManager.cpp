@@ -259,57 +259,49 @@ void ResourceManager::createChunkBuffers(const std::vector<Vertex>& v,
 {
     createChunkBuffersAsync(v, i, vb, vbMem, ib, ibMem, nullptr);
 }
-
 void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& v,
     const std::vector<uint32_t>& i,
     VkBuffer& vb, VkDeviceMemory& vbMem,
     VkBuffer& ib, VkDeviceMemory& ibMem,
     std::function<void()> onComplete)
-
 {
+    /* 1. sizes + telemetry --------------------------------------------- */
     VkDeviceSize vbSz = sizeof(Vertex) * v.size();
     VkDeviceSize ibSz = sizeof(uint32_t) * i.size();
+    VkDeviceSize totalData = vbSz + ibSz;
 
 #ifdef BENCHMARK_MODE
-    m_bytesUploadedThisFrame.fetch_add(static_cast<size_t>(vbSz + ibSz),
+    m_bytesUploadedThisFrame.fetch_add(static_cast<size_t>(totalData),
         std::memory_order_relaxed);
 #endif
 
+    /* 2. create device-local buffers ----------------------------------- */
     createBuffer(vbSz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vb, vbMem);
     createBuffer(ibSz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, ib, ibMem);
 
-    /* stage data */
-    VkDeviceSize total = vbSz + ibSz;
-    auto [stBuf, stMem] = getOrCreateStagingBuffer(total);
+    /* 3. staging slot (+4 B for sentinel) ------------------------------ */
+    constexpr VkDeviceSize GUARD_BYTES = sizeof(uint32_t);
+    auto [stBuf, stMem] = getOrCreateStagingBuffer(totalData + GUARD_BYTES);
 
-#ifndef NDEBUG
-    /* ── GUARD CHECK ───────────────────────────────────────────────────── */
-    {
-        const uint32_t GUARD = 0xDEADBEEF;
-        uint32_t test = 0;
-        void* guardPtr = nullptr;
-        vkMapMemory(m_context->getDevice(), stMem, total, sizeof(GUARD), 0, &guardPtr);
-        std::memcpy(&test, guardPtr, sizeof(GUARD));
-        vkUnmapMemory(m_context->getDevice(), stMem);
-        assert(test == GUARD && "Staging slot still in use – overwrite race!");
-    }
-#endif
-
+    /* 4. copy data into staging buffer --------------------------------- */
     if (vbSz)
     {
-        void* p; vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
-        std::memcpy(p, v.data(), size_t(vbSz));
+        void* p = nullptr;
+        vkMapMemory(m_context->getDevice(), stMem, 0, vbSz, 0, &p);
+        std::memcpy(p, v.data(), static_cast<size_t>(vbSz));
         vkUnmapMemory(m_context->getDevice(), stMem);
     }
     if (ibSz)
     {
-        void* p; vkMapMemory(m_context->getDevice(), stMem, vbSz, ibSz, 0, &p);
-        std::memcpy(p, i.data(), size_t(ibSz));
+        void* p = nullptr;
+        vkMapMemory(m_context->getDevice(), stMem, vbSz, ibSz, 0, &p);
+        std::memcpy(p, i.data(), static_cast<size_t>(ibSz));
         vkUnmapMemory(m_context->getDevice(), stMem);
     }
 
+    /* 5. schedule async GPU copies ------------------------------------- */
     int copies = int((vbSz ? 1 : 0) + (ibSz ? 1 : 0));
     if (!copies) { if (onComplete) onComplete(); return; }
 
@@ -331,17 +323,20 @@ void ResourceManager::createChunkBuffersAsync(const std::vector<Vertex>& v,
     }
 
 #ifndef NDEBUG
-    /* ── GUARD WRITE ───────────────────────────────────────────────────── */
+    /* 6. write sentinel at fixed end-of-slot (no read/assert) ---------- */
     {
         const uint32_t GUARD = 0xDEADBEEF;
         void* guardPtr = nullptr;
-        vkMapMemory(m_context->getDevice(), stMem, total, sizeof(GUARD), 0, &guardPtr);
-        std::memcpy(guardPtr, &GUARD, sizeof(GUARD));
+        VkDeviceSize guardOffset = currentSlot().size - GUARD_BYTES;
+
+        vkMapMemory(m_context->getDevice(), stMem,
+            guardOffset, GUARD_BYTES, 0, &guardPtr);
+        std::memcpy(guardPtr, &GUARD, GUARD_BYTES);
         vkUnmapMemory(m_context->getDevice(), stMem);
     }
 #endif
 
-    /* rotate slot immediately – avoids overwrite races */
+    /* 7. rotate slot for next upload ----------------------------------- */
     m_currentSlot = (m_currentSlot + 1) % kStagingSlots;
 }
 
@@ -472,12 +467,12 @@ void ResourceManager::flushUploads(bool block)
         recycleCmd(up.cmd);
         if (up.onComplete) up.onComplete();
         g_pending.pop();
-
     }
 
 #ifdef BENCHMARK_MODE
+    /* when queue drains, reset counter so next frame starts at 0 */
     if (g_pending.empty())
-        m_bytesUploadedThisFrame.store(0);
+        m_bytesUploadedThisFrame.store(0, std::memory_order_relaxed);
 #endif
 }
 

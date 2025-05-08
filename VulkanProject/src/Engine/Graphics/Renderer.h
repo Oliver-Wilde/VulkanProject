@@ -223,7 +223,7 @@ private:
     // timing & UI stats
     Time* m_time = nullptr;
     bool                m_wireframeOn = false;
-    bool                m_enableFrustumCulling = false;
+    bool                m_enableFrustumCulling = true;
     static constexpr int ROLLING_AVG_SAMPLES = 120;
     std::deque<float>   m_fpsSamples;
     std::deque<float>   m_cpuSamples;

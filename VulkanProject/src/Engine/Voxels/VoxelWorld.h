@@ -1,5 +1,8 @@
 ﻿// =============================================================================
-// VoxelWorld.h   — adaptive upload-budget + frame-time tracker
+// VoxelWorld.h   — benchmark-ready (2025-04-30)
+//   • Removes duplicate getters / type clashes
+//   • Adds per-chunk timing + Morton ID fields
+//   • Keeps public API identical for non-BENCHMARK_MODE builds
 // =============================================================================
 #pragma once
 
@@ -12,8 +15,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <list>
-#include <chrono>          // frame-time stamps
-#include <algorithm>       // std::clamp
+#include <chrono>
+#include <algorithm>
 
 #include "ChunkManager.h"
 #include "Meshing/NaiveMesher.h"
@@ -23,7 +26,7 @@
 #include "Meshing/LODMesher.h"
 
 #ifdef BENCHMARK_MODE
-#include "Engine/Utils/BenchmarkLogger.h"   // only for inline accessors; no cpp-time dep
+#include "Engine/Utils/BenchmarkLogger.h"
 #endif
 
 // ── forward declarations ───────────────────────────────────────────────────
@@ -32,7 +35,7 @@ class ResourceManager;
 class Renderer;
 
 /*─────────────────────────────────────────────────────────────────────────────
-  QueuedChunkDestruction  (unchanged, for ring-buffer frees)
+  QueuedChunkDestruction  (unchanged)
  ────────────────────────────────────────────────────────────────────────────*/
 struct QueuedChunkDestruction
 {
@@ -43,18 +46,18 @@ struct QueuedChunkDestruction
 };
 
 /*─────────────────────────────────────────────────────────────────────────────
-  Compatibility struct for single-LOD path (kept for reference)
+  MeshBuildResult – single-LOD worker output
  ────────────────────────────────────────────────────────────────────────────*/
 struct MeshBuildResult
 {
     Chunk* chunkPtr = nullptr;
-    std::vector<Vertex>   verts;
+    std::vector<Vertex>  verts;
     std::vector<uint32_t> inds;
-    int cx = 0, cy = 0, cz = 0;
+    int                  cx = 0, cy = 0, cz = 0;
 
 #ifdef BENCHMARK_MODE
-    float      cpuMs = 0.0f;      // ← NEW
-    uint64_t   morton = 0;         // ← NEW (pre-computed ID)
+    uint32_t morton = 0;   ///< 3×10-bit Morton code for the chunk
+    uint32_t meshingUs = 0;   ///< wall-clock micro-seconds spent in generateMesh()
 #endif
 };
 
@@ -69,12 +72,12 @@ public:
     VoxelWorld(VulkanContext* context, ResourceManager* resourceMgr);
     ~VoxelWorld();
 
-    // ── setup / per-frame update ──────────────────────────────────────────
+    // ── setup / per-frame update ─────────────────────────────────────────
     void setRenderer(Renderer* renderer);
     void initWorld();
     void updateChunksAroundPlayer(float playerPosX, float playerPosZ);
 
-    // ── public accessors / toggles ────────────────────────────────────────
+    // ── public accessors / toggles ──────────────────────────────────────
     ChunkManager& getChunkManager() { return m_chunkManager; }
     static double getAvgMeshTime();
 
@@ -84,48 +87,47 @@ public:
     void setUseMultiLOD(bool use) { m_useMultiLOD = use; }
     bool isUsingMultiLOD() const { return m_useMultiLOD; }
 
-    /** Marks every loaded chunk dirty so its geometry is rebuilt next frame. */
-    void forceRebuildAllChunks();
+    void forceRebuildAllChunks();   // mark all dirty
 
-    // ── runtime control over vertical streaming range ───────────────────
+    // ── vertical streaming range ────────────────────────────────────────
     inline void setVerticalRange(int v) { m_verticalRange = std::clamp(v, 0, 4); }
     inline int  getVerticalRange() const { return m_verticalRange; }
 
-    // ── upload budget control ─────────────────────────────────────────────
-    void setUploadBudget(size_t bytes, int chunks = 5);
-    size_t getUploadBudgetBytes()  const { return m_uploadBudgetBytes; }
+    // ── upload-budget control ───────────────────────────────────────────
+    void   setUploadBudget(size_t bytes, int chunks = 5);
+    size_t getUploadBudgetBytes() const { return m_uploadBudgetBytes; }
     int    getUploadBudgetChunks() const { return m_uploadBudgetChunks; }
     size_t getPendingUploadCount() const { return m_uploadQueue.size(); }
 
-    inline float    getCpuMeshingMsLastFrame()   const { return m_cpuMeshingMsLastFrame; }
-    inline uint32_t getChunksRebuiltLastFrame()  const { return m_chunksRebuiltLastFrame; }
-    inline uint32_t getUploadBudgetBytes()       const { return m_uploadBudgetBytes; }
+    static constexpr size_t MIN_UPLOAD_BUDGET_BYTES = 512 * 1024;        // 0.5 MiB
+    static constexpr size_t MAX_UPLOAD_BUDGET_BYTES = 16 * 1024 * 1024;  // 16 MiB
+    static constexpr int    MIN_UPLOAD_BUDGET_CHUNKS = 1;
+    static constexpr int    MAX_UPLOAD_BUDGET_CHUNKS = 32;
 
 #ifdef BENCHMARK_MODE
-    /* ─────────── frame-level telemetry for BenchmarkLogger ─────────── */
-    float     getMeshingCpuMsLastFrame()  const { return m_cpuMeshingMsLastFrame; }
+    /* Per-frame telemetry consumed by BenchmarkLogger */
+    float     getCpuMeshingMsLastFrame()  const { return m_cpuMeshingMsLastFrame; }
     uint32_t  getChunksRebuiltLastFrame() const { return m_chunksRebuiltLastFrame; }
 #endif
 
 private:
-    /*──────── internal helpers ───────────────────────────────────────────*/
-    void loadOneChunk(const ChunkCoord& c);
-    void unloadOneChunk(const ChunkCoord& c);
+    /*──────── world-management helpers (unchanged declarations) ──────────*/
+    void loadOneChunk(const ChunkCoord&);
+    void unloadOneChunk(const ChunkCoord&);
 
-    void scheduleMeshingForDirtyChunks();   // central dispatcher
-    void gatherMesherResults();             // collects finished jobs
-    void drainUploadQueue();                // token-bucket drain (multi-LOD)
+    void scheduleMeshingForDirtyChunks();
+    void gatherMesherResults();
+    void drainUploadQueue();
 
-    // ── single-LOD helpers ──────────────────────────────────────────────
+    // single-LOD
     void scheduleMeshingSingleLOD(Chunk&, const IMesher*);
     void gatherSingleLODResults();
     void finalizeSingleLODMesh(MeshBuildResult&);
-
     void uploadMeshToChunkSingleLOD(Chunk&,
         const std::vector<Vertex>&, const std::vector<uint32_t>&);
     void destroyChunkBuffersSingleLOD(Chunk&);
 
-    // ── multi-LOD helper (already present) ───────────────────────────────
+    // multi-LOD
     void finalizeMultiLOD(MultiLODResult&);
 
     // misc VK helpers
@@ -134,79 +136,70 @@ private:
     void copyBuffer(VkBuffer, VkBuffer, VkDeviceSize);
     uint32_t findMemoryType(uint32_t, VkMemoryPropertyFlags);
 
-    /*──────── new mesh-cache structures ──────────────────────────────────*/
+    /*──────── mesh cache & upload queue (unchanged declarations) ─────────*/
     struct CachedMesh
     {
-        std::array<std::vector<Vertex>, MultiLODResult::MAX_LODS>    verts;
-        std::array<std::vector<uint32_t>, MultiLODResult::MAX_LODS>  inds;
+        std::array<std::vector<Vertex>, MultiLODResult::MAX_LODS> verts;
+        std::array<std::vector<uint32_t>, MultiLODResult::MAX_LODS> inds;
     };
-
     struct PendingUpload
     {
-        MultiLODResult mlr;     // ready CPU geometry
-        size_t         bytes;   // total VB+IB size
-        uint64_t       hash; 
-        // content hash for cache insertion
+        MultiLODResult mlr;
+        size_t         bytes;
+        uint64_t       hash;
     };
 
-private:
-    // ── core refs ─────────────────────────────────────────────────────────
+    // ── core refs ───────────────────────────────────────────────────────
     VulkanContext* m_context = nullptr;
     ResourceManager* m_resourceManager = nullptr;
     Renderer* m_renderer = nullptr;
 
-    // ── chunk data & generation ───────────────────────────────────────────
-    ChunkManager      m_chunkManager;
-    TerrainGenerator  m_terrainGenerator;
+    // ── chunk data & generation ─────────────────────────────────────────
+    ChunkManager     m_chunkManager;
+    TerrainGenerator m_terrainGenerator;
 
-    GreedyMesher      m_greedyMesher;
-    NaiveMesher       m_naiveMesher;
-    MesherType        m_currentMesherType = MesherType::GREEDY;
-    bool              m_useMultiLOD = false;
+    GreedyMesher     m_greedyMesher;
+    NaiveMesher      m_naiveMesher;
+    MesherType       m_currentMesherType = MesherType::GREEDY;
+    bool             m_useMultiLOD = false;
 
-    // ── streaming distance ───────────────────────────────────────────────
+    // streaming distance
     static constexpr int VIEW_DISTANCE = 16;
-
     std::deque<ChunkCoord> m_chunksToLoad;
     std::deque<ChunkCoord> m_chunksToUnload;
 
-    /*──────── legacy single-LOD buffers ──────────────────────────────────*/
+    /*──────── single-LOD worker queues ─────────────────────────────────*/
     std::mutex                   m_singleLodMutex;
     std::vector<MeshBuildResult> m_pendingMeshResultsSingleLOD;
 
-    /*──────── async multi-LOD queues ────────────────────────────────────*/
+    /*──────── multi-LOD worker queues ─────────────────────────────────*/
     std::mutex                  m_multiLODMutex;
     std::vector<MultiLODResult> m_pendingMultiLODResults;
 
-    /*──────── token-bucket upload queue (multi-LOD only) ───────────────*/
+    /*──────── token-bucket upload queue ───────────────────────────────*/
     std::deque<PendingUpload>   m_uploadQueue;
+    size_t m_uploadBudgetBytes = 2 * 1024 * 1024; // 2 MiB / frame
+    int    m_uploadBudgetChunks = 5;                // 5 chunks / frame
 
-    // adaptive upload budget limits
-    static constexpr size_t MIN_UPLOAD_BUDGET_BYTES = 512 * 1024;        // 0.5 MiB
-    static constexpr size_t MAX_UPLOAD_BUDGET_BYTES = 16 * 1024 * 1024;  // 16 MiB
-    static constexpr int    MIN_UPLOAD_BUDGET_CHUNKS = 1;
-    static constexpr int    MAX_UPLOAD_BUDGET_CHUNKS = 32;
-
-    size_t m_uploadBudgetBytes = 2 * 1024 * 1024;   // starts at 2 MiB / frame
-    int    m_uploadBudgetChunks = 5;                 // 5 chunks / frame
-
-    /*──────── RAM mesh cache with simple LRU eviction ───────────────────*/
-    std::unordered_map<uint64_t, CachedMesh> m_meshCache;   // hash → mesh
-    std::list<uint64_t>                      m_cacheLRU;    // MRU front
+    // mesh-cache
+    std::unordered_map<uint64_t, CachedMesh> m_meshCache;
+    std::list<uint64_t>                      m_cacheLRU;
     static constexpr size_t                  MAX_CACHE_SIZE = 256;
 
-    /*──────── rolling frame-time tracker ────────────────────────────────*/
+    // adaptive frame-time tracker (unchanged)
     static constexpr size_t FRAME_TIME_BUFFER = 120;
     std::deque<float>                        m_frameTimeMs;
     std::chrono::high_resolution_clock::time_point m_lastFrameTS{};
     int                                      m_adjustCooldownFrames = 0;
 
-    /*──────── vertical chunk-column range (runtime tweakable) ───────────*/
+    // vertical range
     int m_verticalRange = 1;   // ±1 Y-layer
 
 #ifdef BENCHMARK_MODE
-    /*──────── per-frame counters for CSV logging ───────────────────────*/
+    /*──────── per-frame counters for CSV logging ──────────────────────*/
     float    m_cpuMeshingMsLastFrame = 0.0f;
     uint32_t m_chunksRebuiltLastFrame = 0;
 #endif
 };
+
+

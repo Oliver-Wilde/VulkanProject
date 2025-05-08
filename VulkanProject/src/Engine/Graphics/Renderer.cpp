@@ -40,7 +40,7 @@
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-
+#include "Engine/Globals/BenchFlags.h"
 #undef  max
 #undef  min
 
@@ -296,6 +296,8 @@ Renderer::Renderer(VulkanContext* ctx, Window* wnd, VoxelWorld* world)
     // 8) NEW: IndirectBatch global instance ---------------------------------
     m_indirectBatch = std::make_unique<gfx::IndirectBatch>();
     m_indirectBatch->init(m_context, m_resourceMgr);
+
+    enableFrustumCulling(g_cliCulling);
 }
 
 
@@ -466,17 +468,14 @@ void Renderer::renderFrame()
     CpuProfiler::ScopedTimer ft("Renderer::renderFrame");
     updateMVP();
 
-    /* timeline-semaphore throttling (unchanged) */
-    if (m_useTimelineSemaphores)
-    {
+    /* ── timeline-semaphore throttling (unchanged) ───────────────────── */
+    if (m_useTimelineSemaphores) {
         FrameResources& oldest = m_frames[(m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT];
-        if (oldest.timelineSemaphore)
-        {
+        if (oldest.timelineSemaphore) {
             uint64_t gpuDone = 0;
             vkGetSemaphoreCounterValue(m_context->getDevice(),
                 oldest.timelineSemaphore, &gpuDone);
-            if (oldest.timelineValue - gpuDone >= MAX_TL_FRAMES_AHEAD)
-            {
+            if (oldest.timelineValue - gpuDone >= MAX_TL_FRAMES_AHEAD) {
                 VkSemaphoreWaitInfo wi{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
                 wi.semaphoreCount = 1;
                 wi.pSemaphores = &oldest.timelineSemaphore;
@@ -489,41 +488,44 @@ void Renderer::renderFrame()
 
     FrameResources& fr = m_frames[m_currentFrame];
 
-    /* ── wait for fence from N-2 frame ─────────────────────────────────── */
+    /* ── wait for fence from N-2 frame ───────────────────────────────── */
     vkWaitForFences(m_context->getDevice(), 1, &fr.inFlightFence,
         VK_TRUE, UINT64_MAX);
     vkResetFences(m_context->getDevice(), 1, &fr.inFlightFence);
 
-    /* ── read GPU time from frame that just finished ──────────────────── */
-    {
+    /* ── read GPU time from frame that just finished (N-1) ───────────── */
+    if (s_frameCounter > 0) {
         uint32_t done = (m_currentFrame + MAX_FRAMES_IN_FLIGHT - 1)
             % MAX_FRAMES_IN_FLIGHT;
+
         uint64_t ts[2]{};
-        if (vkGetQueryPoolResults(m_context->getDevice(), m_timestampPool,
+        VkResult r = vkGetQueryPoolResults(
+            m_context->getDevice(), m_timestampPool,
             done * 2, 2, sizeof(ts), ts, sizeof(uint64_t),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
-        {
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+        if (r == VK_SUCCESS) {
             double ns = double(ts[1] - ts[0]) * double(m_timestampPeriod);
-            s_lastGpuMs = float(ns / 1.0e6);      // cache for CSV
+            s_lastGpuMs = float(ns / 1.0e6);
         }
     }
 
     freeDeferredResources();
     m_resourceMgr->flushUploads(false);
 
-    /* ── acquire swap-chain image ─────────────────────────────────────── */
+    /* ── acquire swap-chain image ────────────────────────────────────── */
     uint32_t imgIdx = 0;
-    VkResult acq = vkAcquireNextImageKHR(m_context->getDevice(),
-        m_swapChain->getSwapChain(), UINT64_MAX,
+    VkResult acq = vkAcquireNextImageKHR(
+        m_context->getDevice(), m_swapChain->getSwapChain(), UINT64_MAX,
         fr.imageAvailableSemaphore, VK_NULL_HANDLE, &imgIdx);
-    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR)
-    {
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR) {
         recreateSwapChain(); return;
     }
-    else if (acq != VK_SUCCESS)
+    else if (acq != VK_SUCCESS) {
         throw std::runtime_error("vkAcquireNextImageKHR failed");
+    }
 
-    /* ── build / fetch geometry secondary CB ──────────────────────────── */
+    /* ── build secondary geometry CB ─────────────────────────────────── */
     Frustum frustum;
     if (m_enableFrustumCulling)
         frustum = buildCameraFrustum(m_camera, m_swapChain->getExtent());
@@ -531,19 +533,31 @@ void Renderer::renderFrame()
     uint32_t verts = 0, draws = 0;
     buildGeometryCB(imgIdx, frustum, m_enableFrustumCulling, verts, draws);
 
-    /* ── record primary CB ────────────────────────────────────────────── */
+
+    {
+        GeometryJob job{};
+        job.imgIdx = imgIdx;
+        job.wantWire = m_wireframeOn;
+        job.useCulling = m_enableFrustumCulling;
+        if (job.useCulling)               // only needed when culling is on
+            job.frustum = frustum;        // ← reuse the one we just built
+        m_geoBuilder->submit(job);
+    }
+
+    /* ── record primary command buffer ───────────────────────────────── */
     VkCommandBuffer cmd = fr.commandBuffer;
     vkResetCommandBuffer(cmd, 0);
-
-    /* reset + BEGIN timestamp */
-    uint32_t qFirst = m_currentFrame * 2;
-    vkCmdResetQueryPool(cmd, m_timestampPool, qFirst, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        m_timestampPool, qFirst);
 
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
 
+    /* reset + “BEGIN” timestamp (MUST be inside recording state) */
+    uint32_t tsFirst = m_currentFrame * 2;          // this frame's query pair
+    vkCmdResetQueryPool(cmd, m_timestampPool, tsFirst, 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        m_timestampPool, tsFirst);
+
+    /* render-pass & geometry */
     VkClearValue clr[2];
     clr[0].color = { {0.1f, 0.2f, 0.3f, 1.f} };
     clr[1].depthStencil = { 1.f, 0 };
@@ -563,19 +577,20 @@ void Renderer::renderFrame()
     float cpu = g_cpuProfiler.GetCpuUsage();
     m_uiRenderer->beginFrame();
     m_uiRenderer->renderDebugWindow(dt, fps, fps, cpu, cpu,
-        verts, draws, m_voxelWorld, m_wireframeOn,
-        m_enableFrustumCulling, m_resourceMgr);
+        verts, draws, m_voxelWorld,
+        m_wireframeOn, m_enableFrustumCulling,
+        m_resourceMgr);
     m_uiRenderer->renderImGui(cmd);
 
     vkCmdEndRenderPass(cmd);
 
-    /* END timestamp */
+    /* write “END” timestamp */
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        m_timestampPool, qFirst + 1);
+        m_timestampPool, tsFirst + 1);
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
-    /* ── submit & present (unchanged) ─────────────────────────────────── */
+    /* ── submit & present (unchanged) ────────────────────────────────── */
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.waitSemaphoreCount = 1;
@@ -588,7 +603,7 @@ void Renderer::renderFrame()
     si.signalSemaphoreCount = m_useTimelineSemaphores ? 2 : 1;
     si.pSignalSemaphores = sig;
 
-    /* timeline info if enabled */
+    /* timeline info */
     uint64_t nextTL = ++fr.timelineValue;
     VkTimelineSemaphoreSubmitInfo tlInfo{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
     uint64_t waitVal = 0, sigVal[2] = { 0, nextTL };
@@ -625,26 +640,21 @@ void Renderer::renderFrame()
     row.frameNumber = static_cast<uint32_t>(s_frameCounter);
     row.timestampMs = std::chrono::duration<double, std::milli>(
         clk::now() - appStart).count();
-    row.dtMs = dt * 1000.0f;
-
-    /* now fully wired */
+    row.dtMs = dt * 1000.f;
     row.cpuRebuildMs = m_voxelWorld->getCpuMeshingMsLastFrame();
     row.gpuBusyMs = s_lastGpuMs;
     row.bytesUploaded = m_resourceMgr->getBytesUploadedThisFrame();
     row.uploadBudget = m_voxelWorld->getUploadBudgetBytes();
     row.chunksRebuilt = m_voxelWorld->getChunksRebuiltLastFrame();
-
     row.drawCalls = draws;
     row.triangles = verts / 3;
-
     row.vramLiveBytes = m_resourceMgr->GetTotalGPUBufferBytes();
     row.cpuMemBytes = Chunk::s_totalCPUBytes.load(std::memory_order_relaxed);
 
     BenchmarkLogger::get().logFrame(row);
-#endif /* BENCHMARK_MODE */
-
-
+#endif
 }
+
 // ============================================================================
 // MVP helpers
 // ============================================================================

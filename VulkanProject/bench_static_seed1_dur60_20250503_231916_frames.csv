@@ -1,0 +1,2 @@
+#scenario=static,seed=1,durationSec=60,commit=unknown,hardware=unknown
+frameNumber,timestampMs,dtMs,cpuRebuildMs,gpuBusyMs,bytesUploaded,uploadBudget,chunksRebuilt,drawCalls,triangles,vramLiveBytes,cpuMemBytes

@@ -48,10 +48,19 @@ void ScenarioRunner::update(float dt)
 
     case Type::Fly:
     {
-        const float r = 64.f;
-        const float speed = 0.25f;            // rad/s
-        float a = speed * _t;
-        _cam->position = { r * std::cos(a), 32.f, r * std::sin(a) };
+        /* ─── warm-up + smooth speed ramp ───────────────────────────── */
+        constexpr float WARMUP_SEC = 10.f;     // stand still first 5 s
+        constexpr float RAMP_SEC = 5.f;     // reach full speed after +5 s
+        constexpr float FULL_SPEED = 0.25f;   // rad/s once ramped
+        constexpr float ORBIT_RADIUS = 64.f;
+
+        float tMove = std::max(0.f, _t - WARMUP_SEC);              // time since moving
+        float speed = FULL_SPEED * glm::clamp(tMove / RAMP_SEC,    // 0→1 ramp
+            0.f, 1.f);
+        float angle = speed * tMove;                               // θ(t)
+        _cam->position = { ORBIT_RADIUS * std::cos(angle),
+                           32.f,
+                           ORBIT_RADIUS * std::sin(angle) };
         lookAt(_cam, { 0.f, 16.f, 0.f });
     } break;
 

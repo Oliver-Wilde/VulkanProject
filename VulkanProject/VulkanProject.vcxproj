@@ -187,6 +187,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\Downloads\imgui-master\imgui-master\imconfig.h" />
+    <ClInclude Include="src\Engine\Globals\BenchFlags.h" />
     <ClInclude Include="src\Engine\Utils\ScenarioRunner.h" />
     <ClInclude Include="src\Engine\Utils\BenchmarkLogger.h" />
     <ClInclude Include="src\Engine\Graphics\IndirectBatch.h" />

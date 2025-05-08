@@ -1,6 +1,6 @@
 ﻿// ============================================================================
-// ThreadPool.cpp – work‑stealing pool with runtime meshing‑limit control
-//                 Updated 2025‑04‑27  (implements get/setMaxMeshing)
+// ThreadPool.cpp – work-stealing pool with runtime meshing-limit control
+//                 2025-05-04: adds resize(), spawnWorkers(), joinAll()
 // ============================================================================
 #include "ThreadPool.h"
 #include <algorithm>
@@ -9,31 +9,48 @@
 #include <memory>
 #include <mutex>
 
-// ───────────────────────────────── ctor / dtor ───────────────────────────
+// ──────────────────────────── helpers (fwd) ──────────────────────────────
+namespace {
+    static inline size_t hardwareMinusOne()
+    {
+        size_t hc = std::thread::hardware_concurrency();
+        return (hc > 2) ? hc - 1 : 1;
+    }
+}
+
+// ────────────────────────── private helpers  ─────────────────────────────
+void ThreadPool::spawnWorkers(size_t count)
+{
+    m_queues.reserve(count);
+    for (size_t i = m_queues.size(); i < count; ++i)
+        m_queues.emplace_back(std::make_unique<WorkDeque>());
+
+    for (size_t i = m_workers.size(); i < count; ++i)
+        m_workers.emplace_back([this, i] { workerMain(i); });
+}
+
+void ThreadPool::joinAll()
+{
+    for (auto& w : m_workers)
+        if (w.joinable()) w.join();
+    m_workers.clear();
+    m_queues.clear();
+}
+
+// ─────────────────────────── ctor / dtor ────────────────────────────────
 ThreadPool::ThreadPool(size_t threadCount,
     size_t maxMesh,
     size_t maxGen)
     : m_maxMeshing(maxMesh)
     , m_maxGeneration(maxGen)
 {
-    if (threadCount == 0)
-    {
-        size_t hc = std::thread::hardware_concurrency();
-        threadCount = (hc > 2) ? hc - 1 : 1;
-    }
-
-    m_queues.reserve(threadCount);
-    for (size_t i = 0; i < threadCount; ++i)
-        m_queues.emplace_back(std::make_unique<WorkDeque>());
-
-    m_workers.reserve(threadCount);
-    for (size_t i = 0; i < threadCount; ++i)
-        m_workers.emplace_back([this, i] { workerMain(i); });
+    if (threadCount == 0) threadCount = hardwareMinusOne();
+    spawnWorkers(threadCount);
 }
 
 ThreadPool::~ThreadPool() { shutdown(); }
 
-// ───────────────────────────────── enqueueTask ───────────────────────────
+// ─────────────────────────── enqueueTask  ───────────────────────────────
 void ThreadPool::enqueueTask(const std::function<void()>& fn,
     TaskType type,
     int priority)
@@ -48,18 +65,36 @@ void ThreadPool::enqueueTask(const std::function<void()>& fn,
     m_cv.notify_one();
 }
 
-// ───────────────────────────────── shutdown ──────────────────────────────
+// ───────────────────────────── shutdown  ────────────────────────────────
 void ThreadPool::shutdown()
 {
     bool expected = false;
     if (!m_shutdown.compare_exchange_strong(expected, true)) return;
 
     m_cv.notify_all();
-    for (auto& w : m_workers)
-        if (w.joinable()) w.join();
+    joinAll();
 }
 
-// ───────────────────────────────── getQueueSize ──────────────────────────
+// ───────────────────────────── resize  ───────────────────────────────────
+void ThreadPool::resize(size_t newCount)
+{
+    if (newCount == 0) newCount = hardwareMinusOne();
+    if (newCount == getThreadCount()) return;
+
+    // Ensure no tasks are running
+    shutdown();
+
+    // Reset state
+    m_shutdown.store(false, std::memory_order_relaxed);
+    m_rrEnq.store(0, std::memory_order_relaxed);
+    m_activeMeshing.store(0, std::memory_order_relaxed);
+    m_activeGeneration.store(0, std::memory_order_relaxed);
+
+    // Spawn the new set of workers
+    spawnWorkers(newCount);
+}
+
+// ───────────────────────────── getQueueSize  ────────────────────────────
 size_t ThreadPool::getQueueSize()
 {
     size_t total = 0;
@@ -71,11 +106,17 @@ size_t ThreadPool::getQueueSize()
     return total;
 }
 
-// NEW: runtime meshing limit accessors ------------------------------------
-size_t ThreadPool::getMaxMeshing() const { return m_maxMeshing.load(std::memory_order_relaxed); }
-void   ThreadPool::setMaxMeshing(size_t v) { m_maxMeshing.store(v, std::memory_order_relaxed); }
+// ─── runtime meshing limit accessors ─────────────────────────────────────
+size_t ThreadPool::getMaxMeshing() const
+{
+    return m_maxMeshing.load(std::memory_order_relaxed);
+}
+void ThreadPool::setMaxMeshing(size_t v)
+{
+    m_maxMeshing.store(v, std::memory_order_relaxed);
+}
 
-// ───────────────────────────────── workerMain ────────────────────────────
+// ───────────────────────────── workerMain  ──────────────────────────────
 void ThreadPool::workerMain(size_t idx)
 {
     while (!m_shutdown.load(std::memory_order_relaxed))
@@ -90,7 +131,8 @@ void ThreadPool::workerMain(size_t idx)
             continue;
         }
 
-        auto* counter = (job.type == TaskType::Meshing) ? &m_activeMeshing
+        auto* counter = (job.type == TaskType::Meshing)
+            ? &m_activeMeshing
             : &m_activeGeneration;
         const size_t limit = (job.type == TaskType::Meshing)
             ? m_maxMeshing.load(std::memory_order_relaxed)
@@ -113,7 +155,7 @@ void ThreadPool::workerMain(size_t idx)
     }
 }
 
-// ───────────────────────────────── local pop (LIFO) ──────────────────────
+// ───────────────────────────── pop / steal  ─────────────────────────────
 bool ThreadPool::tryPopLocal(size_t idx, Task& out)
 {
     WorkDeque& dq = *m_queues[idx];
@@ -124,7 +166,6 @@ bool ThreadPool::tryPopLocal(size_t idx, Task& out)
     return true;
 }
 
-// ───────────────────────────────── steal (FIFO) ──────────────────────────
 bool ThreadPool::trySteal(size_t thiefIdx, Task& out)
 {
     size_t n = m_queues.size();

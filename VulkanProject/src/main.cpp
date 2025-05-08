@@ -1,19 +1,22 @@
 #include "Engine/Core/Application.h"
 #include <iostream>
 
-int main()
+int main(int argc, char** argv)
 {
-    try {
-        // Create the application
+    try
+    {
         Application app;
-        // Initialize
+
+#ifdef BENCHMARK_MODE
+        /* Parse --scenario / --seed / --seconds before init() */
+        app.parseCommandLine(argc, argv);
+#endif
+
         app.init();
-        // Run main loop
-        app.runLoop();
-        // Cleanup
-        app.cleanup();
+        app.runLoop();     // runLoop calls cleanup() internally on exit
     }
-    catch (const std::exception& e) {
+    catch (const std::exception& e)
+    {
         std::cerr << "[FATAL] " << e.what() << std::endl;
         return EXIT_FAILURE;
     }

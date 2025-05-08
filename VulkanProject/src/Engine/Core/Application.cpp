@@ -21,7 +21,18 @@
 #include <stdexcept>
 #include <iostream>
 
-ThreadPool g_threadPool(/*threads=*/0, /*maxMeshTasks=*/4, /*maxGenTasks=*/2);    // ----------------
+
+/* ── CLI params made global so any subsystem can read them ───────────── */
+std::string g_cliMesher = "greedy";                        // greedy | naive
+bool        g_cliCulling = true;                            // on | off
+uint32_t    g_cliWorkers = std::thread::hardware_concurrency();
+uint32_t    g_cliUploadMB = 8;                               // MiB/frame
+int         g_cliViewDist = 8;
+
+
+ThreadPool g_threadPool(/*threads=*/g_cliWorkers,
+    /*maxMeshTasks=*/4,
+    /*maxGenTasks=*/2);
 
 /* ============================================================================ */
 /* ctor / dtor                                                                  */
@@ -49,11 +60,21 @@ void Application::parseCommandLine(int argc, char** argv)
                 return "";
             };
 
-        if (a == "--scenario")  m_scenario = next();
-        else if (a == "--seed") m_seed = static_cast<uint32_t>(std::stoul(next()));
-        else if (a == "--seconds") m_runSeconds = static_cast<uint32_t>(std::stoul(next()));
-        // silently ignore unknown args – they may belong to other subsystems
+        if (a == "--scenario")   m_scenario = next();
+        else if (a == "--seed")       m_seed = static_cast<uint32_t>(std::stoul(next()));
+        else if (a == "--seconds")    m_runSeconds = static_cast<uint32_t>(std::stoul(next()));
+
+        /* new benchmark flags -------------------------------------------- */
+        else if (a == "--mesher")     g_cliMesher = next();              // greedy|naive
+        else if (a == "--culling")    g_cliCulling = std::string(next()) == "on";
+        else if (a == "--workers")    g_cliWorkers = static_cast<uint32_t>(std::stoul(next()));
+        else if (a == "--upload-mib") g_cliUploadMB = static_cast<uint32_t>(std::stoul(next()));
+        else if (a == "--viewdist")   g_cliViewDist = std::stoi(next());
+        /* silently ignore unknown args                                    */
     }
+
+    /* apply worker count parsed above */
+    g_threadPool.resize(g_cliWorkers);   // harmless no-op if unchanged
 }
 #endif
 
@@ -64,55 +85,53 @@ void Application::init()
 {
     CpuProfiler::ScopedTimer initTimer("Application::init");
 
-    /* 1) Voxel registry ---------------------------------------------------- */
+    /* 1) voxel registry -------------------------------------------------- */
     registerAllVoxels();
-    std::cout << "DEBUG: Registered all voxel types.\n";
 
-    /* 2) OS window --------------------------------------------------------- */
+    /* 2) OS window ------------------------------------------------------- */
     m_window = new Window(800, 600, "My Voxel Engine");
-    std::cout << "DEBUG: Created Window\n";
 
-    /* 3) Time singleton ---------------------------------------------------- */
+    /* 3) Time singleton -------------------------------------------------- */
     m_time = new Time();
 
-    /* 4) Vulkan context ---------------------------------------------------- */
+    /* 4) Vulkan context -------------------------------------------------- */
     m_vulkanCtx = new VulkanContext();
     m_vulkanCtx->init(m_window);
 
-    /* 5) Resources --------------------------------------------------------- */
+    /* 5) resources ------------------------------------------------------- */
     m_resourceManager = new ResourceManager(m_vulkanCtx);
 
-    /* 6) World ------------------------------------------------------------- */
+    /* 6) world ----------------------------------------------------------- */
     m_voxelWorld = new VoxelWorld(m_vulkanCtx, m_resourceManager);
 
-    /* 7) Renderer ---------------------------------------------------------- */
+    /* 7) renderer -------------------------------------------------------- */
     m_renderer = new Renderer(m_vulkanCtx, m_window, m_voxelWorld);
+    m_renderer->enableFrustumCulling(g_cliCulling);           // <<< new flag hook
 
-    /* 8) Hook the two together (renderer must exist first) ----------------- */
+    /* 8) wire them together --------------------------------------------- */
     m_voxelWorld->setRenderer(m_renderer);
 
-    /* 9) Misc -------------------------------------------------------------- */
+    /* 9) misc ------------------------------------------------------------ */
     m_renderer->setTime(m_time);
     m_voxelWorld->initWorld();
 
 #ifdef BENCHMARK_MODE
-    /* -------------------------------------------------- benchmark start -- */
-    if (m_runSeconds == 0) m_runSeconds = 60;          // sensible default
-    const std::string hwId = Renderer::queryHardwareString(); // add stub if it doesn't exist
+    /* ------------------------------ benchmark start -------------------- */
+    if (m_runSeconds == 0) m_runSeconds = 60;
+    const std::string hwId = Renderer::queryHardwareString();
     BenchmarkLogger::get().initialise(m_scenario, m_seed, m_runSeconds, hwId);
 
-    // pick scenario type
     ScenarioRunner::Type t = ScenarioRunner::Type::Static;
     if (m_scenario == "fly")  t = ScenarioRunner::Type::Fly;
     else if (m_scenario == "edit") t = ScenarioRunner::Type::Edit;
     else if (m_scenario == "lod")  t = ScenarioRunner::Type::Lod;
-
-    
+    m_pendingScenarioType = t;
     m_startTime = std::chrono::steady_clock::now();
 #endif
 
     m_isRunning = true;
 }
+
 
 /* ============================================================================ */
 /* handleInput – binds WASD & mouse to Camera                                   */
